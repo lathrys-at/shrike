@@ -32,6 +32,7 @@ pub mod embed_set;
 pub mod fusion;
 pub mod index_orchestrator;
 pub mod index_set;
+pub mod ingest;
 pub mod recognize;
 pub mod tag_centroids;
 pub mod watermark;
@@ -327,7 +328,6 @@ pub struct Kernel {
     /// background after membership-relevant index ops, coalesced under
     /// write bursts; boot/rebuild paths refresh synchronously.
     tag_keys: Arc<tag_centroids::TagKeyMap>,
-    tag_config: tag_centroids::TagCentroidConfig,
     tag_refresh: Arc<tag_centroids::TagRefresher>,
     /// The recognition services (the second registry slot):
     /// OCR/ASR/describe engines the harness attaches at runtime, exactly like
@@ -347,15 +347,13 @@ pub struct Kernel {
     /// (not a batch-size cap) because it bounds CONCURRENCY without shrinking a
     /// single sweep's batch — throughput per call is unchanged.
     slow_recognition: Arc<tokio::sync::Semaphore>,
-    /// The watermark over-certification guard: tracks in-flight +
-    /// un-healed-failed writes per watermark space (index, derived) so an
-    /// advance never certifies a `col.mod` whose writes this op did not actually
-    /// index/ingest. See [`watermark`]. `Arc` so a write can `register` INSIDE
-    /// its collection-actor job — the actor's FIFO then orders registration with
-    /// the write, closing the post-await-continuation race (an earlier-`col.mod`
-    /// write is always registered before any later op's job runs, hence before
-    /// any later op can complete-and-advance).
-    watermarks: Arc<watermark::WatermarkTracker>,
+    /// The persistent ingest actor: the single writer of the vector index,
+    /// the derived store, and the watermarks. Maintained collection writes
+    /// enqueue `{ids, col.mod, kind}` INSIDE their write job and return; the
+    /// actor drains in FIFO (== `col.mod`) order. Bulk ops (reindex/rebuild/
+    /// recognition store) ride the same channel as awaited jobs, so every
+    /// index/derived mutation serializes through one consumer. See [`ingest`].
+    ingest: ingest::IngestHandle,
     /// The per-secondary-space cross-space IMAGE activation floor,
     /// keyed by space key. A dedicated CLIP secondary is image-only
     /// (`WriteMode::ImageOnly`), so the engine's own intra-modal calibration —
@@ -623,18 +621,32 @@ impl Kernel {
             index_set.primary_saver(),
             Arc::clone(&embed),
         );
+        let recognition_gate = recognize::RecognitionGate::default();
+        // The single writer over the shared sub-stores; the kernel keeps the
+        // same Arcs for its concurrent read paths (search/status). All
+        // index/derived mutation funnels through the spawned drain task.
+        let ingestor = ingest::Ingestor::new(
+            Arc::clone(&collection),
+            Arc::clone(&index_set),
+            Arc::clone(&derived),
+            Arc::clone(&embed),
+            recognition_gate.clone(),
+            Arc::clone(&tag_keys),
+            tag_config.clone(),
+            Arc::clone(&tag_refresh),
+        );
+        let ingest = ingest::spawn(ingestor);
         Ok(Self {
             collection,
             index_set,
             derived,
             embed,
             tag_keys,
-            tag_config,
             tag_refresh,
             recognize: RwLock::new(BTreeMap::new()),
-            recognition_gate: recognize::RecognitionGate::default(),
+            recognition_gate,
             slow_recognition: Arc::new(tokio::sync::Semaphore::new(SLOW_RECOGNITION_CONCURRENCY)),
-            watermarks: Arc::new(watermark::WatermarkTracker::default()),
+            ingest,
             secondary_floors: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
@@ -747,7 +759,7 @@ impl Kernel {
     /// union of every purpose's source (all recognition purposes mint
     /// vectors — only the LEXICAL surfaces differ). `compose_embed_inputs`
     /// reads OCR/ASR/VLM recognized text from these.
-    fn vector_minting_sources() -> Vec<&'static str> {
+    pub(crate) fn vector_minting_sources() -> Vec<&'static str> {
         Self::ALL_PURPOSES.iter().map(|p| p.source()).collect()
     }
 
@@ -779,33 +791,8 @@ impl Kernel {
     /// Returns an error if the collection read fails or the engine rejects the
     /// `tag.text` rebuild.
     pub async fn refresh_tag_centroids(&self) -> NativeResult<usize> {
-        if self.embed_service().is_none() {
-            return Ok(0);
-        }
-        let (rows, total) = self
-            .collection
-            .run(|core| -> NativeResult<_> {
-                let rows = core.note_tag_rows()?;
-                let total = core.note_count()?;
-                Ok((rows, total))
-            })
-            .await??;
-        // Tag centroids are a pure function of the PRIMARY text space's vectors
-        // — recompute against its engine, request its saver (tag.text
-        // lives only in the primary; never fanned out).
-        let tag_engine = self.index_set.tag_engine();
-        let built =
-            tag_centroids::recompute(&*tag_engine, &rows, total, &self.tag_config, &self.tag_keys)?;
-        self.index_set.primary_saver().request_save();
-        Ok(built)
-    }
-
-    /// Best-effort refresh: the tag layer is conditionally-present and must
-    /// never fail the index op it rides on.
-    async fn refresh_tags_best_effort(&self) {
-        if let Err(e) = self.refresh_tag_centroids().await {
-            tracing::warn!(error = ?e, "tag centroid refresh failed");
-        }
+        // Runs on the ingest actor (the sole writer of the `tag.text` space).
+        self.ingest.refresh_tag_centroids().await
     }
 
     /// Attach an embedding service (embedding start / model swap) — the N=1
@@ -961,6 +948,7 @@ impl Kernel {
     ///
     /// `index-narrow`: image items route to this ONE image-primary, never to
     /// every image-capable space.
+    #[cfg(test)]
     fn image_only_route(
         &self,
     ) -> Option<(
@@ -1101,7 +1089,8 @@ impl Kernel {
                 core.note_embed_inputs(&ids)
             })
             .await??;
-        let inputs = self.compose_embed_inputs(raw, None);
+        let inputs =
+            ingest::compose_embed_inputs(&*self.derived, &self.recognition_gate, raw, None);
         let mut sample: Vec<(i64, String)> = inputs
             .into_iter()
             .filter(|i| !i.image_names.is_empty() && !i.text.trim().is_empty())
@@ -1229,88 +1218,9 @@ impl Kernel {
     /// reconcile/rebuild fails.
     #[must_use = "whether reindexing ran is the caller's signal to refresh status"]
     pub async fn reindex_if_needed(&self) -> NativeResult<bool> {
-        let Some(svc) = self.embed_service() else {
-            return Ok(false); // no embedder → nothing to (re)index
-        };
-        // The index path consumes the PRIMARY space's orchestrator + the
-        // primary embedder. Per-space drift is keyed on the primary's own
-        // model_id, so a model swap on the primary drifts only it —
-        // byte-identical to the single-space path.
-        let orch = self.index_set.primary();
-        let col_mod = self.col_mod().await?;
-        let model_id = svc.embedder.fingerprint();
-        if !orch.check_drift(col_mod, model_id.as_deref(), svc.images.is_some()) {
-            return Ok(false);
-        }
-        let raw = self
-            .collection
-            .run(|core| -> NativeResult<_> {
-                let ids = core.find_notes("")?;
-                core.note_embed_inputs(&ids)
-            })
-            .await??;
-        if raw.is_empty() {
-            if let Some(dim) = svc.embedder.dim() {
-                orch.materialize_empty(dim, col_mod, model_id.as_deref());
-            }
-            // A whole-collection (re)materialize re-certifies the index space →
-            // any earlier per-op index-tail failure is healed.
-            self.watermarks.clear_index_poison();
-            self.refresh_tags_best_effort().await;
-            return Ok(true);
-        }
-        let inputs = self.compose_embed_inputs(raw, None);
-        orch.reconcile(
-            inputs.clone(),
-            col_mod,
-            model_id.clone(),
-            &*svc.embedder,
-            svc.images_pair(),
-        )
-        .await?;
-        // A successful whole-collection reconcile re-indexes every changed/new
-        // note (and drops deleted) and stamps its own snapshot col_mod, so every
-        // prior per-op index-tail failure is now healed — clear the poison floor
-        // that was holding the watermark back.
-        self.watermarks.clear_index_poison();
-        // The SEPARATE image-primary space, if any: reconcile its
-        // ImageOnly index against its OWN drift (keyed on its own model_id /
-        // image fingerprints). None at N=1 / for an omni primary.
-        self.reconcile_image_route(&inputs, col_mod).await?;
-        self.refresh_tags_best_effort().await;
-        Ok(true)
-    }
-
-    /// Reconcile the separate image-primary space's ImageOnly index, if
-    /// one exists. Drift is the image space's own (its model_id is the image
-    /// embedder's fingerprint, its hashes fold image refs only), so a pure-text
-    /// edit is a no-op here. No-op when there is no separate image route.
-    async fn reconcile_image_route(
-        &self,
-        inputs: &[index_orchestrator::EmbedInput],
-        col_mod: i64,
-    ) -> NativeResult<()> {
-        let Some((iorch, isvc)) = self.image_only_route() else {
-            return Ok(());
-        };
-        let Some((image_embedder, resolver)) = isvc.images_pair() else {
-            return Ok(()); // an image-primary always has an image pair, but be safe
-        };
-        let image_model_id = isvc.embedder.fingerprint();
-        // The image space drifts on its OWN model_id; check before re-embedding.
-        if !iorch.check_drift(col_mod, image_model_id.as_deref(), true) {
-            return Ok(());
-        }
-        iorch
-            .reconcile_with_mode(
-                inputs.to_vec(),
-                col_mod,
-                image_model_id,
-                &*isvc.embedder,
-                Some((image_embedder, resolver)),
-                index_orchestrator::WriteMode::ImageOnly,
-            )
-            .await
+        // The reconcile runs on the ingest actor (the sole writer), serialized
+        // with the hot path; the kernel serves reads while it runs.
+        self.ingest.reindex_if_needed().await
     }
 
     /// Explicit FULL index rebuild (the `/index/rebuild` semantics): drop and
@@ -1323,53 +1233,7 @@ impl Kernel {
     /// Returns `Unavailable` when no embedder is attached, or an error if the
     /// collection read, embedding, or the engine rebuild fails.
     pub async fn rebuild_index(&self) -> NativeResult<usize> {
-        let Some(svc) = self.embed_service() else {
-            return Err(NativeError::unavailable(
-                "no embedding service attached — start embedding first",
-            ));
-        };
-        let col_mod = self.col_mod().await?;
-        let model_id = svc.embedder.fingerprint();
-        let raw = self
-            .collection
-            .run(|core| -> NativeResult<_> {
-                let ids = core.find_notes("")?;
-                core.note_embed_inputs(&ids)
-            })
-            .await??;
-        let inputs = self.compose_embed_inputs(raw, None);
-        let total = inputs.len();
-        self.index_set
-            .primary()
-            .rebuild(
-                inputs.clone(),
-                col_mod,
-                model_id,
-                &*svc.embedder,
-                svc.images_pair(),
-            )
-            .await?;
-        // The SEPARATE image-primary space: a full rebuild re-embeds its
-        // ImageOnly index too. None at N=1 / for an omni primary.
-        if let Some((iorch, isvc)) = self.image_only_route() {
-            if let Some((ie, r)) = isvc.images_pair() {
-                iorch
-                    .rebuild_with_mode(
-                        inputs,
-                        col_mod,
-                        isvc.embedder.fingerprint(),
-                        &*isvc.embedder,
-                        Some((ie, r)),
-                        index_orchestrator::WriteMode::ImageOnly,
-                    )
-                    .await?;
-            }
-        }
-        // A full rebuild re-certifies the whole index space → clear any poison
-        // floor from earlier per-op index-tail failures.
-        self.watermarks.clear_index_poison();
-        self.refresh_tags_best_effort().await;
-        Ok(total)
+        self.ingest.rebuild_index().await
     }
 
     /// Post-write maintenance for a set of created/updated notes: ONE read
@@ -1385,133 +1249,42 @@ impl Kernel {
     /// Returns an error if the collection read, embedding, an index add, or the
     /// derived ingest fails.
     pub async fn reindex_notes(&self, written: &[i64]) -> NativeResult<()> {
-        self.index_written(written).await
-    }
-
-    /// Compose orchestrator inputs from collection rows + the derived
-    /// store's recognized texts across EVERY vector-minting source:
-    /// the index derives from collection text + OCR + ASR +
-    /// VLM-describe, so reconcile == rebuild keeps holding after recognition,
-    /// and a note's recognized text mints vectors on any (re-)embed path.
-    /// Vector-worthiness re-judges from the stored text (confidence already
-    /// gated at ingest). The destination axis is lexical-visibility only — a
-    /// VectorOnly (VLM) source still feeds this embed path; it is merely
-    /// hidden from the substring/fuzzy surfaces.
-    fn compose_embed_inputs(
-        &self,
-        raw: Vec<(i64, String, Vec<String>)>,
-        only_notes: Option<&[i64]>,
-    ) -> Vec<index_orchestrator::EmbedInput> {
-        let mut recognized_map: std::collections::HashMap<i64, Vec<String>> =
-            std::collections::HashMap::new();
-        // Union every recognition source's vector-worthy text under the note
-        // key. Per-op callers scope the read to the written notes; the
-        // full-set read is for rebuild/reconcile, which consume everything.
-        // One query per source (a small fixed set — ocr/vlm/asr), each bounded
-        // by rows that EXIST for that source (most notes have none), so this
-        // is proportional to recognized-content volume, not 3× the
-        // collection. (A single `source IN (…)` read could collapse it if a
-        // profile ever flags it.)
-        for source in Self::vector_minting_sources() {
-            let texts = match only_notes {
-                Some(ids) => self.derived.texts_for_source_for_notes(source, ids),
-                None => self.derived.texts_for_source(source),
-            };
-            match texts {
-                Ok(rows) => {
-                    for (nid, _r, text) in rows {
-                        if self.recognition_gate.vector_worthy(&text) {
-                            recognized_map.entry(nid).or_default().push(text);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = ?e, %source, "reading recognized texts failed; embedding without them");
-                }
-            }
+        if written.is_empty() {
+            return Ok(());
         }
-        raw.into_iter()
-            .map(
-                |(note_id, text, image_names)| index_orchestrator::EmbedInput {
-                    note_id,
-                    text,
-                    image_names,
-                    ocr_texts: recognized_map.remove(&note_id).unwrap_or_default(),
-                },
-            )
-            .collect()
+        // No own collection write precedes this (the find/replace or note-type
+        // migration already committed): read `col.mod` AND enqueue the
+        // maintenance item in ONE collection job, so the enqueue is FIFO-ordered
+        // with every concurrent write (queue order == col.mod order).
+        let enq = self.ingest.enqueuer();
+        let ids = written.to_vec();
+        self.collection
+            .run(move |core| -> NativeResult<()> {
+                let col_mod = core.col_mod()?;
+                enq.enqueue(ingest::IngestItem {
+                    ids,
+                    col_mod,
+                    kind: ingest::MaintKind::Maintain,
+                    membership_may_have_changed: false,
+                });
+                Ok(())
+            })
+            .await?
     }
 
-    /// Full derived-text (FTS5) rebuild, entirely kernel-side: one
-    /// collection job collects the field rows, the build runs on the blocking
-    /// pool against the kernel's own engine — the rows never cross the FFI.
-    /// (The Python path round-tripped the whole collection's text
-    /// Rust→Python→Rust: ~150-250MB transient at 100k notes, on every drifted
-    /// boot, /reload, and cooperative re-acquire.) Returns
-    /// `(row_count, col_mod)` — the col_mod is the BUILD's own snapshot (read
-    /// in the same collection job as the rows), so the host's watermark can't
-    /// mask a write that landed mid-build.
+    /// Full derived-text (FTS5) rebuild, entirely kernel-side: one collection
+    /// job collects the field rows, the build runs on the blocking pool against
+    /// the kernel's own engine — the rows never cross the FFI. Runs on the
+    /// ingest actor (the sole writer), so a concurrent per-op derived ingest can
+    /// no longer land inside the snapshot→build→prune window — the old
+    /// commit-then-verify convergence loop is gone (#828 closed structurally).
+    /// Returns `(row_count, col_mod)`.
     ///
     /// # Errors
     ///
     /// Returns an error if the collection read or the derived-store build fails.
     pub async fn rebuild_derived(&self) -> NativeResult<(usize, i64)> {
-        // Commit-then-verify: the collect runs in one actor job but
-        // the build commits OFF the actor, so concurrent jobs (an upsert's
-        // ingest, a sweep's OCR store for a new note) can land in the window
-        // — and the build's field-replace + dead-note prune would erase
-        // them. Every lossy interleave bumps col.mod (note writes do; OCR
-        // stores touch only existing notes, which the prune keeps), so
-        // re-reading col_mod after the commit and re-collecting on movement
-        // converges. After the cap the watermark stays at the last snapshot
-        // — visible drift, healed by the next rebuild plus the sweep
-        // re-pending any pruned OCR rows.
-        const REBUILD_ATTEMPTS: usize = 3;
-        let mut last = (0usize, 0i64);
-        for attempt in 1..=REBUILD_ATTEMPTS {
-            let (n, dmod, now) = self.rebuild_derived_once().await?;
-            last = (n, dmod);
-            if now == dmod {
-                // A clean whole-collection derived rebuild re-ingests every note
-                // and stamps its own snapshot col_mod → prior per-op derived
-                // ingest failures are healed; clear the derived poison floor.
-                // (The capped/raced fallback below deliberately does
-                // NOT — its watermark is knowingly behind.)
-                self.watermarks.clear_derived_poison();
-                return Ok(last);
-            }
-            tracing::debug!(
-                attempt,
-                "collection moved during derived build; re-collecting"
-            );
-        }
-        tracing::warn!(
-            "derived rebuild raced sustained writes; watermark left at the last snapshot"
-        );
-        Ok(last)
-    }
-
-    /// One collect → build → verify pass: returns the row count, the
-    /// snapshot `col_mod` the build committed under, and the post-commit
-    /// `col_mod` (equal means nothing interleaved).
-    async fn rebuild_derived_once(&self) -> NativeResult<(usize, i64, i64)> {
-        let (rows, live_notes, dmod) = self
-            .collection
-            .run(|core| -> NativeResult<_> {
-                let ids = core.find_notes("")?;
-                let rows = core.derived_field_rows(&ids)?;
-                let dmod = core.col_mod()?;
-                Ok((rows, ids, dmod))
-            })
-            .await??;
-        let n = rows.len();
-        let derived = Arc::clone(&self.derived);
-        // Blocking-fs leaf (the FTS5 rebuild) → the compute pool. `live_notes`
-        // (the collection's note set) governs the recognition-row prune, so a
-        // row for a live note that this field snapshot misses is never dropped.
-        runtime::dispatch_compute(move || derived.build(&rows, &live_notes, dmod)).await?;
-        let now = self.collection.run(|core| core.col_mod()).await??;
-        Ok((n, dmod, now))
+        self.ingest.rebuild_derived().await
     }
 
     /// One bounded recognition sweep across EVERY attached purpose:
@@ -1864,24 +1637,23 @@ impl Kernel {
             }
         }
         let affected: Vec<i64> = touched.keys().copied().collect();
-        for (note_id, refs_text) in &touched {
-            self.derived.ingest(*note_id, source, refs_text)?;
-        }
-        for (note_id, name, json) in &segments {
-            self.derived.put_segments(*note_id, source, name, json)?;
-        }
-        self.derived.mark_gated(source, &gated)?;
-        // NB the fingerprint meta is advanced by the DRAIN CALLER once the whole
-        // drain completes — not here per chunk — so a mid-drain abort
-        // never marks this purpose's recognition as up-to-date.
-
-        // Re-embed the affected notes: their hash now folds the recognized
-        // text, so this mints the vectors and the next reconcile sees them
-        // current. (A VectorOnly source's rows are excluded from the lexical
-        // surfaces, but still mint a vector here.)
-        if !affected.is_empty() {
-            self.index_written(&affected).await?;
-        }
+        // Hand the derived writes + the re-embed to the ingest actor: routing
+        // them through the sole writer serializes them with rebuild, so a
+        // rebuild's prune can no longer drop a row this sweep ingested (#828)
+        // and the recognition vector add no longer races a reindex (#650/#644).
+        // The affected notes re-embed because their hash now folds the
+        // recognized text. The fingerprint meta is advanced by the DRAIN CALLER
+        // once the whole drain completes — not here per chunk — so a mid-drain
+        // abort never marks this purpose's recognition as up-to-date.
+        self.ingest
+            .store_recognition(ingest::RecognitionWrite {
+                source: source.to_string(),
+                touched: touched.into_iter().collect(),
+                segments,
+                gated,
+                affected,
+            })
+            .await?;
 
         // `recognized` counts what was actually sent. A skipped (unreadable)
         // item stores nothing, so it STAYS PENDING; the drain loop stops on a
@@ -1908,194 +1680,6 @@ impl Kernel {
         }
     }
 
-    /// Read `col.mod` AND register a watermark token in ONE collection-actor
-    /// job. For paths with no own `col.mod`-bumping write (the
-    /// recognition sweep, `reindex_notes`, `forget_notes`, `metadata_changed`):
-    /// reading and registering in the same job is what keeps registration
-    /// FIFO-ordered with every concurrent write. By the actor's FIFO, any write
-    /// whose `col.mod ≤ V` ran (and so registered, inside its own job) before
-    /// this job observes `V` — so this op cannot complete-and-advance past an
-    /// un-indexed earlier write. A separate read-then-register (two jobs, or a
-    /// continuation) would let a write commit+register in the gap and be
-    /// over-certified.
-    async fn read_col_mod_and_register(&self) -> NativeResult<watermark::WriteTokens> {
-        let watermarks = Arc::clone(&self.watermarks);
-        self.collection
-            .run(move |core| -> NativeResult<_> { Ok(watermarks.register(core.col_mod()?)) })
-            .await?
-    }
-
-    /// The maintained index/derived tail for a set of created/updated notes,
-    /// used by paths that DON'T do their own `col.mod`-bumping write before the
-    /// tail (the recognition sweep, `reindex_notes`). It reads the live
-    /// `col.mod` and registers it as in-flight in ONE actor job — there is no
-    /// separate committed write whose `col.mod` it must inherit.
-    async fn index_written(&self, written: &[i64]) -> NativeResult<()> {
-        let tokens = self.read_col_mod_and_register().await?;
-        self.index_written_tracked(written, tokens).await
-    }
-
-    /// The maintained index/derived tail, best-effort and
-    /// over-certification-safe. `tokens` carries the `col.mod` captured
-    /// (and registered as in-flight) with this op's collection write, so the
-    /// watermark advance is bounded to a value whose writes this op actually
-    /// indexed.
-    ///
-    /// The tail is best-effort: a failed embed/index/ingest after the
-    /// collection write already committed logs a WARNING and returns
-    /// successfully with the watermark LEFT BEHIND (the token completed as a
-    /// failure), so the next boot/reload drift check reconciles the note —
-    /// rather than failing the whole call and telling the caller a committed
-    /// write failed (the committed-but-errored window). This mirrors every
-    /// sibling maintained op (`collection_prune`/`migrate_note_type`/…).
-    async fn index_written_tracked(
-        &self,
-        written: &[i64],
-        tokens: watermark::WriteTokens,
-    ) -> NativeResult<()> {
-        if written.is_empty() {
-            // Nothing to index — complete both tokens as success so the empty
-            // tail (e.g. a batch of all-errors) doesn't strand the watermark
-            // behind its own captured col.mod.
-            self.advance_watermarks(tokens, true, true).await;
-            return Ok(());
-        }
-        // First-occurrence dedupe: a batch that wrote the same note
-        // twice must not index it twice — and the collection readers' move-
-        // out assembly hands a repeated id its content on the first
-        // occurrence only.
-        let mut seen = std::collections::BTreeSet::new();
-        let written: Vec<i64> = written
-            .iter()
-            .copied()
-            .filter(|id| seen.insert(*id))
-            .collect();
-        let written = &written[..];
-        let ids = written.to_vec();
-        // The read is the input to BOTH tails; a read failure means neither tail
-        // ran, so both watermarks stay behind (best-effort) and the next drift
-        // heals. (This previously `?`-propagated and failed the whole call.)
-        let read = self
-            .collection
-            .run(move |core| -> NativeResult<_> {
-                let inputs = core.note_embed_inputs(&ids)?;
-                let rows = core.derived_field_rows(&ids)?;
-                let tagged = core.any_tagged(&ids)?;
-                Ok((inputs, rows, tagged))
-            })
-            .await;
-        let (raw_inputs, rows, tagged) = match read.and_then(|r| r) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    notes = written.len(),
-                    "index tail read failed after the collection write committed; \
-                     leaving the watermark behind for next-boot drift to heal"
-                );
-                self.advance_watermarks(tokens, false, false).await;
-                return Ok(());
-            }
-        };
-        let svc = self.embed_service();
-        // The index half. With no embedder attached the index is intentionally
-        // NOT maintained (it reconciles on the next attach), so its watermark
-        // must stay put — modelled as "index tail did not succeed for this op"
-        // so the in-flight token doesn't advance the index watermark.
-        let index_ok = if let Some(svc) = &svc {
-            match self.write_index(&raw_inputs, written, svc).await {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        notes = written.len(),
-                        "index add failed after the collection write committed; \
-                         leaving the index watermark behind for next-boot drift to heal"
-                    );
-                    false
-                }
-            }
-        } else {
-            false
-        };
-        // The derived (lexical) half, independent of the index half — it runs
-        // even with embeddings off.
-        let derived_ok = match self.ingest_derived(&rows, written) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    notes = written.len(),
-                    "derived ingest failed after the collection write committed; \
-                     leaving the derived watermark behind for next-boot drift to heal"
-                );
-                false
-            }
-        };
-        self.advance_watermarks(tokens, index_ok, derived_ok).await;
-        // Tag centroids derive from the text vectors just written —
-        // refreshed off the op tail, and only when the op could have changed
-        // membership AND the index half actually landed (a failed embed wrote no
-        // vectors to derive a centroid from).
-        if index_ok && (tagged || self.tag_keys.any_member_of(written)) {
-            self.tag_refresh.request();
-        }
-        Ok(())
-    }
-
-    /// The index-add half of the maintained tail: the text-primary write
-    /// plus the separate image-primary write when one exists.
-    async fn write_index(
-        &self,
-        raw_inputs: &[(i64, String, Vec<String>)],
-        written: &[i64],
-        svc: &EmbedService,
-    ) -> NativeResult<()> {
-        let inputs = self.compose_embed_inputs(raw_inputs.to_vec(), Some(written));
-        // The TEXT-primary write: text (+ image when the primary is
-        // omni — `images_pair()` is None for a dedicated text embedder).
-        // Byte-identical for N=1.
-        self.index_set
-            .primary()
-            .add(&inputs, &*svc.embedder, svc.images_pair())
-            .await?;
-        // The SEPARATE image-primary write: the note's images land in
-        // the image-primary's own ImageOnly index. None at N=1 / omni.
-        if let Some((iorch, isvc)) = self.image_only_route() {
-            if let Some((ie, r)) = isvc.images_pair() {
-                iorch
-                    .add_with_mode(
-                        &inputs,
-                        &*isvc.embedder,
-                        Some((ie, r)),
-                        index_orchestrator::WriteMode::ImageOnly,
-                    )
-                    .await?;
-            }
-        }
-        Ok(())
-    }
-
-    /// The derived-ingest half of the maintained tail: group the rows per note
-    /// and ingest in ONE transaction for the whole batch.
-    fn ingest_derived(
-        &self,
-        rows: &[(i64, String, String, String)],
-        written: &[i64],
-    ) -> NativeResult<()> {
-        let mut refs: BTreeMap<i64, Vec<(String, String)>> = BTreeMap::new();
-        for (nid, _source, name, value) in rows {
-            refs.entry(*nid)
-                .or_default()
-                .push((name.clone(), value.clone()));
-        }
-        let batch: Vec<(i64, Vec<(String, String)>)> = written
-            .iter()
-            .map(|note_id| (*note_id, refs.remove(note_id).unwrap_or_default()))
-            .collect();
-        self.derived.ingest_many(&batch, FIELD_SOURCE)
-    }
-
     /// The wire-shaped bulk upsert: the collection core's NAMED upsert
     /// — `id`?/`note_type`/`deck`/`fields` map/`tags`, create AND update,
     /// `dry_run`, typed per-item results — run as ONE collection job, then
@@ -2115,80 +1699,44 @@ impl Kernel {
     ) -> NativeResult<Vec<shrike_schemas::UpsertNoteResult>> {
         let span = tracing::debug_span!("kernel.upsert_notes_wire", dry_run);
         async move {
-            // Read `col.mod` AND register the watermark token in the SAME write
-            // job: the collection actor's FIFO then guarantees an
-            // earlier-`col.mod` write registers before any later op's job runs,
-            // so a later op can never complete-and-advance past an un-indexed
-            // earlier write — even if this op's continuation is starved across
-            // the later op's whole async tail. A dry run mutates nothing, so it
-            // takes no token at all.
-            let watermarks = Arc::clone(&self.watermarks);
-            let (results, tokens) = self
+            // Commit the write and enqueue the maintenance item in the SAME
+            // collection job: the actor's FIFO then makes queue order == col.mod
+            // order (the load-bearing ordering invariant — the enqueue must NOT
+            // slip into a post-await continuation). The slow embed runs off the
+            // drain, so this write never waits on it. A dry run mutates nothing,
+            // so it enqueues nothing.
+            let enq = self.ingest.enqueuer();
+            let results = self
                 .collection
                 .run(move |core| -> NativeResult<_> {
                     let results = core.upsert_notes(&notes, policy, dry_run)?;
-                    let tokens = if dry_run {
-                        None
-                    } else {
-                        Some(watermarks.register(core.col_mod()?))
-                    };
-                    Ok((results, tokens))
+                    if !dry_run {
+                        // Typed outcomes: written ids come straight off the
+                        // variants — no parse-own-output round-trip.
+                        let written: Vec<i64> = results
+                            .iter()
+                            .filter_map(|r| match r {
+                                shrike_schemas::UpsertNoteResult::Created { id, .. }
+                                | shrike_schemas::UpsertNoteResult::Updated { id, .. } => Some(*id),
+                                _ => None,
+                            })
+                            .collect();
+                        if !written.is_empty() {
+                            enq.enqueue(ingest::IngestItem {
+                                ids: written,
+                                col_mod: core.col_mod()?,
+                                kind: ingest::MaintKind::Maintain,
+                                membership_may_have_changed: false,
+                            });
+                        }
+                    }
+                    Ok(results)
                 })
                 .await??;
-            if let Some(tokens) = tokens {
-                // Typed outcomes: written ids come straight off the
-                // variants — the parse-own-output round-trip is gone.
-                let written: Vec<i64> = results
-                    .iter()
-                    .filter_map(|r| match r {
-                        shrike_schemas::UpsertNoteResult::Created { id, .. }
-                        | shrike_schemas::UpsertNoteResult::Updated { id, .. } => Some(*id),
-                        _ => None,
-                    })
-                    .collect();
-                // Best-effort tail: the note is committed; a failed
-                // embed/index/ingest logs a warning and returns the successful
-                // per-item results rather than failing the whole call.
-                self.index_written_tracked(&written, tokens).await?;
-            }
             Ok(results)
         }
         .instrument(span)
         .await
-    }
-
-    /// Complete this op's watermark tokens and advance each space's watermark to
-    /// the captured `col.mod` — but ONLY to a value whose writes this op (and
-    /// every still-in-flight earlier write) actually indexed/ingested.
-    ///
-    /// `index_ok`/`derived_ok` say whether THIS op's respective tail succeeded;
-    /// the [`watermark::WatermarkTracker`] additionally blocks an advance that
-    /// would over-certify a concurrent in-flight write or an un-healed earlier
-    /// failure. A blocked or failed advance leaves the watermark behind — the
-    /// lagging op's completion or the next boot/reload drift heals it.
-    ///
-    /// Never reads the live `col.mod`: the value comes from
-    /// the token captured in the op's own collection write job, so an
-    /// interleaved concurrent write can't be silently certified here.
-    async fn advance_watermarks(
-        &self,
-        tokens: watermark::WriteTokens,
-        index_ok: bool,
-        derived_ok: bool,
-    ) {
-        if let Some(col_mod) = self.watermarks.complete_derived(tokens.derived, derived_ok) {
-            if let Err(e) = self.derived.set_col_mod(col_mod) {
-                tracing::warn!(error = %e, "advancing the derived watermark failed");
-            }
-        }
-        if let Some(col_mod) = self.watermarks.complete_index(tokens.index, index_ok) {
-            // Fan out the watermark + save request to EVERY index space:
-            // a maintained write advances each space's own col_mod and arms its
-            // saver. With one space this is the single set_col_mod + request,
-            // byte-identical.
-            self.index_set.set_col_mod_all(col_mod);
-            self.index_set.request_save_all();
-        }
     }
 
     /// The collection's current `col.mod`.
@@ -2198,6 +1746,15 @@ impl Kernel {
     /// Returns an error if the collection read fails.
     pub async fn col_mod(&self) -> NativeResult<i64> {
         self.collection.run(|core| core.col_mod()).await?
+    }
+
+    /// Await the ingest queue drained to the current point: every maintenance
+    /// item enqueued before this call has been fully processed (re-read → embed
+    /// → index/derived add → watermark advance). The deterministic barrier the
+    /// data plane and tests await instead of polling — once it returns, the
+    /// effects of all prior writes are visible. A no-op if the actor is gone.
+    pub async fn settle(&self) {
+        self.ingest.flush().await;
     }
 
     /// Resolve a note type's id by name.
@@ -2268,34 +1825,37 @@ impl Kernel {
             // ahead of any later op's job (closing the post-await-continuation
             // race), and the watermark it may advance to is the
             // one its OWN write produced.
-            let watermarks = Arc::clone(&self.watermarks);
-            let (outcomes, tokens): (Vec<NativeResult<CreateOutcome>>, watermark::WriteTokens) =
-                self.collection
-                    .run(move |core| -> NativeResult<_> {
-                        let outcomes = notes
-                            .iter()
-                            .map(|n| {
-                                core.create_note(
-                                    n.notetype_id,
-                                    n.deck_id,
-                                    &n.fields,
-                                    &n.tags,
-                                    policy,
-                                )
-                            })
-                            .collect();
-                        let tokens = watermarks.register(core.col_mod()?);
-                        Ok((outcomes, tokens))
-                    })
-                    .await??;
-            let created: Vec<i64> = outcomes
-                .iter()
-                .filter_map(|o| match o {
-                    Ok(CreateOutcome::Created(id)) => Some(*id),
-                    _ => None,
+            let enq = self.ingest.enqueuer();
+            let outcomes: Vec<NativeResult<CreateOutcome>> = self
+                .collection
+                .run(move |core| -> NativeResult<_> {
+                    let outcomes: Vec<NativeResult<CreateOutcome>> = notes
+                        .iter()
+                        .map(|n| {
+                            core.create_note(n.notetype_id, n.deck_id, &n.fields, &n.tags, policy)
+                        })
+                        .collect();
+                    // Enqueue the maintenance item INSIDE the write job so queue
+                    // order == col.mod order (the load-bearing invariant); the
+                    // slow embed runs off the drain, never blocking this write.
+                    let created: Vec<i64> = outcomes
+                        .iter()
+                        .filter_map(|o| match o {
+                            Ok(CreateOutcome::Created(id)) => Some(*id),
+                            _ => None,
+                        })
+                        .collect();
+                    if !created.is_empty() {
+                        enq.enqueue(ingest::IngestItem {
+                            ids: created,
+                            col_mod: core.col_mod()?,
+                            kind: ingest::MaintKind::Maintain,
+                            membership_may_have_changed: false,
+                        });
+                    }
+                    Ok(outcomes)
                 })
-                .collect();
-            self.index_written_tracked(&created, tokens).await?;
+                .await??;
             Ok(outcomes)
         }
         .instrument(span)
@@ -2313,44 +1873,25 @@ impl Kernel {
     /// the sidecar removals are best-effort (a failure leaves the watermark
     /// behind for the next drift to heal).
     pub async fn forget_notes(&self, note_ids: Vec<i64>) -> NativeResult<()> {
-        let tokens = self.read_col_mod_and_register().await?;
-        self.drop_note_sidecars(&note_ids, tokens).await
-    }
-
-    /// The sidecar tail shared by every note-deletion shape: drop the
-    /// notes' vectors + derived rows, advance the watermarks, refresh tags.
-    /// `tokens` carries the `col.mod` captured with the deleting write;
-    /// the removals are best-effort — a failed removal leaves the
-    /// watermark behind so the next drift reconciles the now-deleted note out.
-    async fn drop_note_sidecars(
-        &self,
-        note_ids: &[i64],
-        tokens: watermark::WriteTokens,
-    ) -> NativeResult<()> {
-        // Removal fans out to EVERY index space: a deleted note leaves
-        // all indexes. With one space this is the single remove, byte-identical.
-        let index_ok = match self.index_set.remove_all(note_ids) {
-            Ok(_) => self.embed_service().is_some(),
-            Err(e) => {
-                tracing::warn!(error = %e, notes = note_ids.len(), "index removal failed after delete; leaving the index watermark behind");
-                false
-            }
-        };
-        let derived_ok = match self.derived.remove(note_ids, None) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!(error = %e, notes = note_ids.len(), "derived removal failed after delete; leaving the derived watermark behind");
-                false
-            }
-        };
-        self.advance_watermarks(tokens, index_ok, derived_ok).await;
-        // A deletion changes membership only if a deleted note was IN it —
-        // the in-memory probe alone decides (the rows are already gone), and
-        // the refresh runs off the op tail.
-        if self.tag_keys.any_member_of(note_ids) {
-            self.tag_refresh.request();
+        if note_ids.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        // No own write precedes this (the notes are already deleted): read
+        // `col.mod` AND enqueue the remove in ONE collection job, so the enqueue
+        // is FIFO-ordered (queue order == col.mod order).
+        let enq = self.ingest.enqueuer();
+        self.collection
+            .run(move |core| -> NativeResult<()> {
+                let col_mod = core.col_mod()?;
+                enq.enqueue(ingest::IngestItem {
+                    ids: note_ids,
+                    col_mod,
+                    kind: ingest::MaintKind::Remove,
+                    membership_may_have_changed: false,
+                });
+                Ok(())
+            })
+            .await?
     }
 
     /// A metadata-only collection change (tags/decks/templates/field metadata
@@ -2373,23 +1914,24 @@ impl Kernel {
     ///
     /// Returns an error if reading `col.mod` to register the watermark fails.
     pub async fn metadata_changed(&self, membership_may_have_changed: bool) -> NativeResult<()> {
-        // Read `col.mod` + register in one actor job — the metadata write
-        // already committed in its own prior job, so FIFO orders this read after
-        // it; registering in-job keeps it ordered with any concurrent upsert too.
-        let tokens = self.read_col_mod_and_register().await?;
-        // The index watermark advances only when an embedder is attached (else
-        // it must stay put so the next attach reconciles, as before).
-        let index_ok = self.embed_service().is_some();
-        self.advance_watermarks(tokens, index_ok, true).await;
-        // Tag-only ops (update_note_tags / rename_tag / clear-unused-tags) ride
-        // this path and change MEMBERSHIP without an index op — centroids would
-        // otherwise go stale until the next upsert/delete or reboot. The
-        // coalescing refresher caps a burst to ~1 recompute; request it
-        // ONLY when tag membership could actually have moved.
-        if membership_may_have_changed {
-            self.tag_refresh.request();
-        }
-        Ok(())
+        // The metadata write already committed in its own prior job: read
+        // `col.mod` AND enqueue an advance-only item in ONE collection job, so
+        // the enqueue is FIFO-ordered with any concurrent upsert (queue order ==
+        // col.mod order). The actor advances both watermarks (no index/derived
+        // change to make) and requests the tag refresh when membership moved.
+        let enq = self.ingest.enqueuer();
+        self.collection
+            .run(move |core| -> NativeResult<()> {
+                let col_mod = core.col_mod()?;
+                enq.enqueue(ingest::IngestItem {
+                    ids: Vec::new(),
+                    col_mod,
+                    kind: ingest::MaintKind::AdvanceOnly,
+                    membership_may_have_changed,
+                });
+                Ok(())
+            })
+            .await?
     }
 
     /// Delete notes and drop their sidecars in ONE maintained op: the
@@ -2412,15 +1954,14 @@ impl Kernel {
         note_ids: Vec<i64>,
     ) -> NativeResult<shrike_schemas::DeleteNotesResponse> {
         let ids = note_ids.clone();
-        // Existence partition + delete + `col.mod`/watermark capture in ONE job
-        // (single-op; in-job register so the actor's FIFO orders
-        // registration with the write). The `nid:` find scopes the existence
-        // check to the requested ids (no full scan) — same partition the host's
-        // wrapper.delete_notes computed, now without the extra round trip.
-        let watermarks = Arc::clone(&self.watermarks);
-        let (deleted, tokens) = self
+        // Existence partition + delete + enqueue the remove in ONE job: the
+        // `nid:` find scopes the existence check to the requested ids (no full
+        // scan), and the enqueue inside the write job keeps queue order ==
+        // col.mod order. The vector/derived-row removal runs off the drain.
+        let enq = self.ingest.enqueuer();
+        let deleted = self
             .collection
-            .run(move |core| -> NativeResult<_> {
+            .run(move |core| -> NativeResult<Vec<i64>> {
                 let existing: std::collections::HashSet<i64> = if ids.is_empty() {
                     std::collections::HashSet::new()
                 } else {
@@ -2440,9 +1981,14 @@ impl Kernel {
                     .collect();
                 if !deleted.is_empty() {
                     core.delete_notes(&deleted)?;
+                    enq.enqueue(ingest::IngestItem {
+                        ids: deleted.clone(),
+                        col_mod: core.col_mod()?,
+                        kind: ingest::MaintKind::Remove,
+                        membership_may_have_changed: false,
+                    });
                 }
-                let tokens = watermarks.register(core.col_mod()?);
-                Ok((deleted, tokens))
+                Ok(deleted)
             })
             .await??;
         let not_found: Vec<i64> = note_ids
@@ -2450,10 +1996,6 @@ impl Kernel {
             .copied()
             .filter(|i| !deleted.contains(i))
             .collect();
-        // Sidecar tail over exactly the notes that were deleted: drop
-        // their vectors + derived rows, advance the watermarks. Best-effort —
-        // a failed sidecar leaves the watermark behind so next-boot drift heals.
-        self.drop_note_sidecars(&deleted, tokens).await?;
         Ok(shrike_schemas::DeleteNotesResponse { deleted, not_found })
     }
 
@@ -3130,8 +2672,15 @@ impl Kernel {
     /// Returns an error if closing the collection fails; a drained actor is the
     /// already-closed success, not an error.
     pub async fn close(&self) -> NativeResult<()> {
+        // Shutdown drain ordering (the spec's fixed order): the ingest actor
+        // drains its queue and flushes the index savers durably FIRST — while
+        // the collection is still open, since a drain re-reads note content —
+        // so the durable watermark never lands ahead of a never-flushed index
+        // write. Only then do the maintenance coordinators and the collection
+        // close.
+        self.ingest.shutdown().await;
         // A sleeping coalesced tag refresh has nothing to read once the
-        // actor drains — abort it first.
+        // collection actor drains — abort it next.
         self.tag_refresh.shutdown();
         let result = self.collection.close().await;
         self.collection.shutdown().await;
@@ -3525,6 +3074,7 @@ mod no_cpython_smoke {
                 "the primary text space's semantic signal contributes"
             );
             // The primary index holds the note.
+            kernel.settle().await;
             assert!(kernel.index().engine().contains(nid));
 
             // Removal fans out to EVERY space — no error on the empty
@@ -3607,6 +3157,9 @@ mod no_cpython_smoke {
             &upsert_wire(kernel, notes.to_string(), "error".into(), false).await,
         )
         .unwrap();
+        // The write is fire-and-forget; settle the drain so the index/derived
+        // effects are visible to the test's immediate assertions.
+        kernel.settle().await;
         results[0]["id"].as_i64().unwrap()
     }
 
@@ -3906,6 +3459,7 @@ mod no_cpython_smoke {
             else {
                 panic!("create failed")
             };
+            kernel.settle().await;
             assert!(kernel.index().engine().contains(nid), "indexed");
             // Lexical row exists too (derived store ingested on upsert).
             assert!(!kernel
@@ -4081,6 +3635,7 @@ mod no_cpython_smoke {
             else {
                 panic!("create failed")
             };
+            kernel.settle().await;
             assert!(kernel.index().engine().contains(nid));
             let hits = kernel.search("composed kernels", 5).await.unwrap();
             assert_eq!(hits[0].note_id, nid);
@@ -4161,6 +3716,7 @@ mod no_cpython_smoke {
             else {
                 panic!("create failed")
             };
+            kernel.settle().await;
             assert!(kernel.index().engine().contains(nid));
             kernel
                 .collection
@@ -4174,6 +3730,7 @@ mod no_cpython_smoke {
                 .await
                 .unwrap();
             assert!(preview.dry_run);
+            kernel.settle().await;
             assert!(kernel.index().engine().contains(nid)); // untouched
 
             let applied = kernel
@@ -4221,6 +3778,8 @@ mod no_cpython_smoke {
                 panic!("create failed")
             };
 
+            // Settle the upsert's drain so `before` reflects its watermark.
+            kernel.settle().await;
             let watermark = |k: &Kernel| k.index().status().col_mod;
             let before = watermark(&kernel);
 
@@ -4231,6 +3790,7 @@ mod no_cpython_smoke {
                 .await
                 .unwrap();
             assert_eq!(miss.notes_modified, 0);
+            kernel.settle().await;
             assert_eq!(watermark(&kernel), before);
 
             // All-error deck batch: same skip.
@@ -4245,6 +3805,7 @@ mod no_cpython_smoke {
                 errs[0],
                 shrike_schemas::UpsertDeckResult::Error { .. }
             ));
+            kernel.settle().await;
             assert_eq!(watermark(&kernel), before);
 
             // A real tag edit: the tail advances the watermark to the new
@@ -4254,6 +3815,7 @@ mod no_cpython_smoke {
                 .await
                 .unwrap();
             assert_eq!(hit.notes_modified, 1);
+            kernel.settle().await;
             assert_eq!(watermark(&kernel), Some(kernel.col_mod().await.unwrap()));
             assert!(!kernel.reindex_if_needed().await.unwrap());
 
@@ -4267,6 +3829,7 @@ mod no_cpython_smoke {
                 .unwrap();
             let del = kernel.delete_decks(vec!["Temp".into()]).await.unwrap();
             assert_eq!(del.deleted, vec!["Temp"]);
+            kernel.settle().await;
             assert_eq!(watermark(&kernel), Some(kernel.col_mod().await.unwrap()));
             assert!(!kernel.reindex_if_needed().await.unwrap());
 
@@ -4475,6 +4038,7 @@ mod no_cpython_smoke {
             else {
                 panic!("create failed")
             };
+            kernel.settle().await;
             let embeds_before = embedder.0.load(Ordering::SeqCst);
 
             let field_map: std::collections::BTreeMap<String, String> = [
@@ -4506,7 +4070,9 @@ mod no_cpython_smoke {
                 .await
                 .unwrap();
             assert_eq!(applied.changed, vec![nid]);
+            kernel.settle().await;
             assert!(embedder.0.load(Ordering::SeqCst) > embeds_before);
+            kernel.settle().await;
             assert!(kernel.index().engine().contains(nid));
             assert!(!kernel.reindex_if_needed().await.unwrap());
 
@@ -6088,6 +5654,7 @@ mod no_cpython_smoke {
         assert_eq!(dup.unwrap(), CreateOutcome::SkippedDuplicate);
 
         // Search: semantic + lexical signals both contribute to the winner.
+        kernel.settle().await;
         let hits = kernel.search("mitochondria powerhouse", 5).await.unwrap();
         assert_eq!(hits[0].note_id, mito);
         let signals: Vec<&str> = hits[0].signals.iter().map(|(s, _)| s.as_str()).collect();
@@ -6109,20 +5676,20 @@ mod no_cpython_smoke {
             kernel.delete_notes(vec![mito]).await.unwrap().deleted,
             vec![mito]
         );
+        kernel.settle().await;
         let after = kernel.search("mitochondria powerhouse", 5).await.unwrap();
         assert!(after.iter().all(|h| h.note_id != mito));
 
-        // Restart WITHOUT a flush: the on-disk sidecars still hold the
-        // boot-time materialized-empty state, so the fresh kernel detects
-        // drift and reconciles — re-embedding every live note via the
-        // collection read surface (find_notes + note_embed_inputs).
+        // Restart: close() drains the ingest queue and flushes the index savers
+        // durably (the shutdown ordering), so the on-disk index already reflects
+        // every write — the fresh kernel finds NO drift and serves the persisted
+        // vectors directly.
         kernel.close().await.unwrap();
         let kernel2 = Kernel::open(col.to_str().unwrap(), cache.to_str().unwrap())
             .await
             .unwrap();
         kernel2.attach_embedder(Arc::new(HashEmbedder), None);
-        assert!(kernel2.reindex_if_needed().await.unwrap()); // drift → reconcile
-        assert!(!kernel2.reindex_if_needed().await.unwrap()); // now current
+        assert!(!kernel2.reindex_if_needed().await.unwrap()); // durable close → already current
         let hits = kernel2.search("newton laws of motion", 5).await.unwrap();
         assert!(!hits.is_empty());
         kernel2.close().await.unwrap();
@@ -6179,6 +5746,7 @@ mod no_cpython_smoke {
                 )
                 .await
                 .unwrap();
+            kernel.settle().await;
             assert!(
                 !kernel
                     .derived
@@ -6536,77 +6104,6 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
-        });
-    }
-
-    /// Registration-ordering pin:
-    /// `register` runs INSIDE the collection-actor job, so the actor's FIFO
-    /// orders an earlier-`col.mod` write's registration ahead of a later op's
-    /// job — even when the later op's continuation (its tail + advance) runs
-    /// FIRST. Were `register` in the post-await continuation instead, op A could
-    /// register 200 and advance to 200 before op B (100) ever registered, and a
-    /// later failure of B would be silently certified.
-    ///
-    /// This drives the real `SerializedCollection` + `WatermarkTracker`
-    /// contract the production write paths use: B's write job (FIFO-first) reads
-    /// col.mod + registers in-job; A's write job (FIFO-second) does the same;
-    /// then A "completes" its tail BEFORE B does. A must be BLOCKED from
-    /// advancing past B's still-in-flight col.mod. The load-bearing assertion is
-    /// `registered_after_jobs`: once both FIFO write JOBS have returned, BOTH
-    /// writes are already in flight — the exact property a post-await-continuation
-    /// register would lose (B's continuation could be starved past A's
-    /// completion, leaving B unregistered and A free to over-certify). The full
-    /// real-kernel adversarial interleave is `s5_interleaved_*` (B parked in its
-    /// tail while A completes end-to-end).
-    #[test]
-    fn register_in_job_orders_registration_with_writes_under_fifo() {
-        crate::runtime::testing::run_with_sync(async {
-            let dir = temp_dir();
-            let collection = Arc::new(
-                SerializedCollection::open(dir.join("c.anki2").to_string_lossy().into_owned())
-                    .await
-                    .unwrap(),
-            );
-            let tracker = Arc::new(watermark::WatermarkTracker::default());
-
-            // Two writes through the actor, FIFO-ordered. Each reads col.mod and
-            // registers IN THE JOB (exactly as upsert/delete do). We pin the two
-            // col.mod values explicitly so the assertion doesn't depend on the
-            // collection's actual mod stamps: B registers 100, A registers 200,
-            // mirroring "B writes first (lower mod), A writes second (higher)".
-            let tk = Arc::clone(&tracker);
-            let b_tokens = collection.run(move |_core| tk.register(100)).await.unwrap();
-            let tk = Arc::clone(&tracker);
-            let a_tokens = collection.run(move |_core| tk.register(200)).await.unwrap();
-
-            // The load-bearing guarantee: once both write JOBS have returned,
-            // BOTH writes are in flight — registration happened IN the jobs, not
-            // in a (possibly-starved) continuation. A continuation-register could
-            // leave this at 1.
-            assert_eq!(
-                tracker.index_in_flight(),
-                2,
-                "both FIFO write jobs registered in-job before either completes"
-            );
-
-            // A's tail finishes FIRST (the adversarial continuation order). With
-            // register-in-job, B (100) is already in flight, so A (200) is
-            // blocked — it may not certify a watermark covering B's write.
-            assert_eq!(
-                tracker.complete_index(a_tokens.index, true),
-                None,
-                "A must NOT advance past B's earlier in-flight write (FIFO registration)"
-            );
-            // B then completes; nothing earlier remains → it advances to 100.
-            assert_eq!(
-                tracker.complete_index(b_tokens.index, true),
-                Some(100),
-                "B advances to its own col.mod once it is the earliest in flight"
-            );
-
-            collection.close().await.unwrap();
-            collection.shutdown().await;
             std::fs::remove_dir_all(dir).ok();
         });
     }

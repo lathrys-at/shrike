@@ -927,6 +927,19 @@ impl AsyncKernel {
         kernel_op(py, async move { kernel.reindex_if_needed().await })
     }
 
+    /// Await the ingest queue drained to the current point — awaitable. Every
+    /// maintenance item enqueued before this call has been fully processed
+    /// (re-read → embed → index/derived add → watermark advance), so the effects
+    /// of all prior writes are visible. The deterministic barrier the data plane
+    /// and tests await instead of polling the index/derived status.
+    fn settle<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            kernel.settle().await;
+            Ok::<(), shrike_error::NativeError>(())
+        })
+    }
+
     /// Cross-space search inputs as JSON — awaitable. Embeds the query
     /// texts into every SECONDARY text-capable space (on the kernel runtime,
     /// where embed is legal — `action_search_notes` runs on the collection-actor
