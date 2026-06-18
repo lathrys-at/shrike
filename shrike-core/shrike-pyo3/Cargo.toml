@@ -27,9 +27,11 @@ default = [
     "manage-llama",
 ]
 # Forwarded to shrike-derived (#300): default = bundled SQLite (FTS5 + trigram
-# guaranteed). To link the platform SQLite use `scripts/build-native.sh
-# --system-sqlite` (re-enables the rest of the server set) — a bare
-# --no-default-features also drops anki-core and every engine.
+# guaranteed; the Bazel build and scripts/build-native.sh always bundle). To link
+# the platform SQLite instead, do a non-hermetic cargo build that drops only this:
+# `cargo build -p shrike-pyo3 --no-default-features --features
+# "anki-core,engine-ort,engine-remote,manage-llama"` (a bare --no-default-features
+# would also drop anki-core and every engine).
 bundled-sqlite = ["shrike-derived/bundled"]
 # The anki collection core binding (#278). DEFAULT ON since the cutover:
 # CollectionWrapper runs on the native core, so every shrike_native build

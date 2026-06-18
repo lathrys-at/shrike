@@ -45,9 +45,9 @@ HOW TO RUN IT
    ``*-vision-mmproj-F16.gguf`` files. The fixture fetches both on demand; to
    pre-seed the shared test-model cache (no re-spelled URLs), run::
 
-       python -c "from pathlib import Path; \
-         from tests.integration.model_cache import cached_multimodal_model_dir; \
-         print(cached_multimodal_model_dir(Path('/tmp/unused')))"
+       python -c "from tests.integration.model_cache import \
+           cached_multimodal_model_dir, default_model_cache_base; \
+         print(cached_multimodal_model_dir(default_model_cache_base()))"
 
 3. Point the harness at them and run::
 

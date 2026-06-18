@@ -13,7 +13,7 @@ binary fixture in git.
 Usage (run from the repo root):
     python tests/manual/skill_quality/build_collection.py \
         --out tests/manual/skill_quality/run/working.anki2
-    python tests/manual/skill_quality/build_collection.py --out /tmp/c.anki2 --spec other.json
+    python tests/manual/skill_quality/build_collection.py --out .cache/c.anki2 --spec other.json
 """
 
 from __future__ import annotations

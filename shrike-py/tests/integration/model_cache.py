@@ -249,8 +249,8 @@ def cached_model_path(model_name: str, fallback_dir: Path) -> Path:
     """Resolve where the model file should live.
 
     Uses ``$SHRIKE_TEST_MODEL_DIR`` when set — a stable, cache-restored directory
-    in CI so the model is fetched at most once — otherwise *fallback_dir* (a
-    per-session temp dir locally). The directory is created if missing.
+    in CI so the model is fetched at most once — otherwise *fallback_dir* (callers
+    pass :func:`default_model_cache_base`). The directory is created if missing.
     """
     root = os.environ.get("SHRIKE_TEST_MODEL_DIR")
     base = Path(root) if root else fallback_dir
