@@ -6,7 +6,7 @@ exports_files(["Cargo.toml"])
 
 # The shared SSRF-safety crate (#592): the is_global classifier, the
 # resolve-and-vet helper, and the IP-pinned ureq agent builder. Depended on by
-# BOTH shrike-kernel (media_fetch) and the remote engine crates — kernel-unaware
+# BOTH shrike-media (the inbound-media fetch) and the remote engine crates — kernel-unaware
 # and engine-unaware, so it sits below both (//shrike-core:layering_check stays green).
 rust_library(
     name = "shrike_network",

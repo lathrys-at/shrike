@@ -266,7 +266,7 @@ class TestMediaCLI:
 
 # NOTE (#278 cutover): the live-httpx redirect-guard and real-TLS SNI tests
 # retired with the Python fetch implementation. The native fetch's per-hop
-# re-vetting + IP pinning are covered by media_fetch.rs's unit tests and the
+# re-vetting + IP pinning are covered by shrike-media's unit tests (#711) and the
 # loopback-server cases in tests/native/test_media_url_fetch.py; a LIVE
 # TLS-SNI validation test has no native equivalent yet (the Rust resolver
 # can't be monkeypatched) — flagged as a residual for the security review.

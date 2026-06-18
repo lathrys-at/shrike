@@ -2,13 +2,13 @@
 //!
 //! **Trust-boundary code**: changes here go through the security-review gate.
 //!
-//! This crate was extracted from `shrike-kernel`'s `media_fetch` so the SSRF
-//! control is shared, not copied. Three consumers depend on it:
+//! This crate was extracted from the media URL fetch so the SSRF control is
+//! shared, not copied. Three consumers depend on it:
 //!
-//! - `shrike-kernel` (`media_fetch`): the attacker-supplied `store_media` url
-//!   path — resolves+vets EVERY hop's host against `ipaddress.is_global`
-//!   parity, pins the connection to the vetted IP, follows redirects manually
-//!   re-vetting each hop.
+//! - `shrike-media` (the inbound-media crate, #711): the attacker-supplied
+//!   `store_media` url path — resolves+vets EVERY hop's host against
+//!   `ipaddress.is_global` parity, pins the connection to the vetted IP,
+//!   follows redirects manually re-vetting each hop.
 //! - `shrike-embed-remote` / `shrike-describe-remote`: the operator-configured
 //!   endpoint path. The base URL is operator-trusted (loopback llama-server, a
 //!   tailnet host) so it is NOT is_global-gated — but the connection is pinned
@@ -36,7 +36,7 @@ use std::time::Duration;
 use shrike_error::{NativeError, NativeResult};
 
 /// The hop cap shared by every manual redirect-following loop in the tree (the
-/// kernel media fetch and the remote engines), so "how many redirects" is one
+/// media fetch and the remote engines), so "how many redirects" is one
 /// number, not three.
 pub const MAX_REDIRECTS: usize = 5;
 

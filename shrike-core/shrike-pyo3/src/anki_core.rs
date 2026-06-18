@@ -424,11 +424,7 @@ impl CollectionCore {
                 .into_iter()
                 .enumerate()
                 .map(|(i, item)| {
-                    shrike_media::prepare_media_item(
-                        i as i64,
-                        item,
-                        allow_private_fetch,
-                    )
+                    shrike_media::prepare_media_item(i as i64, item, allow_private_fetch)
                 })
                 .collect();
             self.inner
