@@ -27,7 +27,7 @@
 //!   work is never an option here: `spawn_op`'s detach-not-abort contract
 //!   means the op always runs; the callback is the only way to observe it.
 //! - [`shrike_attach_remote_embedder`] composes the remote embeddings engine
-//!   (route 2 async-direct, #721 S2: `RemoteEmbedder` -> `AsyncWithPolicy`, no
+//!   (route 2 async-direct: `RemoteEmbedder` -> `AsyncWithPolicy`, no
 //!   `Blocking` adapter) into the kernel's `Arc<dyn Embedder>` slot, mirroring
 //!   `native_embedder.rs::from_remote` minus the PyO3 wrappers.
 //! - [`shrike_string_free`] returns ownership of a string this library
@@ -743,7 +743,7 @@ fn default_top_k() -> usize {
 /// OpenAI-compatible cloud endpoint. Mirrors `native_embedder.rs::from_remote`
 /// minus the PyO3 wrappers: `RemoteEmbedder` -> `AsyncWithPolicy`
 /// (host-assembled fingerprint/dim + the `safe_batch` text chunking) ->
-/// `Arc<dyn Embedder>`. Route 2 async-direct (#721 S2): no `Blocking` adapter —
+/// `Arc<dyn Embedder>`. Route 2 async-direct: no `Blocking` adapter —
 /// the kernel awaits the engine's reqwest IO on its runtime.
 ///
 /// The embed slot is an ORDERED SET of spaces: a Swift/Kotlin caller
@@ -814,7 +814,7 @@ pub unsafe extern "C" fn shrike_attach_remote_embedder(
                         model,
                     },
                 )?;
-                // Route 2: the remote embedder is async-direct (#721 S2) — it
+                // Route 2: the remote embedder is async-direct — it
                 // implements the async `Embedder` trait, so it attaches WITHOUT
                 // the `Blocking` adapter. `AsyncWithPolicy` carries the host
                 // fingerprint/dim and chunks the text path by `safe_batch` (the

@@ -8,8 +8,8 @@
 //!   (`cuda`/`tensorrt`/`directml`, each implying `onnx`).
 //! - [`remote`] (feature `remote`): OpenAI-compatible HTTP engines — embeddings
 //!   ([`remote::embed`]) and VLM describe ([`remote::describe`]) over a shared,
-//!   SSRF-pinned async HTTP client ([`remote::http`]). Route 2 async-direct
-//!   (#721 S2): these engines implement the async `Embedder`/`Recognizer` traits
+//!   SSRF-pinned async HTTP client ([`remote::http`]). Route 2 async-direct:
+//!   these engines implement the async `Embedder`/`Recognizer` traits
 //!   directly over `reqwest`, so the kernel awaits them on its runtime — no
 //!   `Blocking` adapter.
 //! - [`apple`] (feature `engine-apple`): the Apple Vision OCR + SpeechAnalyzer

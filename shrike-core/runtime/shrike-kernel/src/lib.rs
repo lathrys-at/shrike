@@ -2496,7 +2496,7 @@ impl Kernel {
 
     /// The full store_media batch: each item's byte source (base64 decode /
     /// SSRF-guarded URL download) prepares CONCURRENTLY — each item is a
-    /// `tokio::spawn`'d task on the runtime (#721 S2: the prepare is async now —
+    /// `tokio::spawn`'d task on the runtime (the prepare is async now —
     /// the URL fetch rides the async IP-pinned client, so no blocking-pool
     /// thread parks on a network wait) — then the batch writes as ONE collection
     /// job (`path` items run their containment gates under that job; they carry

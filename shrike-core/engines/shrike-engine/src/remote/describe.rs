@@ -1,14 +1,14 @@
-//! The remote VLM describe engine (#433): a [`Recognizer`] over any
+//! The remote VLM describe engine: a [`Recognizer`] over any
 //! OpenAI-compatible chat-completions endpoint with vision content parts —
 //! llama-server with a multimodal GGUF locally (`--mmproj`, spawned via
 //! `shrike-llama-server`'s `chat_mode`), a cloud service with a key
 //! (OpenAI / OpenRouter / Gemini's OpenAI-compat endpoint accept the
 //! identical shape; Anthropic's native API differs — reach Claude via an
-//! OpenAI-compat gateway). A **route-2 async-direct engine** (#721 S2): it
+//! OpenAI-compat gateway). A **route-2 async-direct engine**: it
 //! implements engine-api's async [`Recognizer`] trait directly over the async
 //! `reqwest` client, so the kernel awaits it on its runtime (no `Blocking`
-//! adapter). The shared SSRF/retry/api-key machinery lives in [`super::http`]
-//! (#708 dedup); this module holds only the describe-specific dialect.
+//! adapter). The shared SSRF/retry/api-key machinery lives in [`super::http`];
+//! this module holds only the describe-specific dialect.
 //!
 //! Scope discipline: this crate **talks to an endpoint**, nothing else — the
 //! [`super::embed`] posture. Fingerprint *assembly* is host policy; this
@@ -23,7 +23,7 @@
 //! recognition pipeline ingests recognized text into the derived (lexical)
 //! store unconditionally, so this engine is constructible and tested but
 //! must NOT occupy a recognition slot until the kernel grows a per-engine
-//! destination policy (#433 tracks that integration).
+//! destination policy.
 //!
 //! Error semantics — the load-bearing split, proven against the kernel's
 //! sweep: a **per-item permanent** failure (400/413/415/422 — *this image*
@@ -122,7 +122,7 @@ impl Default for RemoteDescriberConfig {
 
 /// The engine: a thin, stateless HTTP client wrapper.
 ///
-/// SSRF posture lives in [`RemoteHttpClient`] (#592, same as [`super::embed`]):
+/// SSRF posture lives in [`RemoteHttpClient`] (same as [`super::embed`]):
 /// the client is pinned to `base_url`'s resolved IP with auto-redirects OFF, and
 /// a redirect is followed only when it stays on the SAME host.
 pub struct RemoteDescriber {
@@ -232,7 +232,7 @@ impl RemoteDescriber {
         // `item.mime` is the ENGINE routing-hint (`shrike_engine_api::mime_for_name`
         // via `MediaItem::from_named`) — describe-remote reuses that table by
         // construction, NOT shrike-media's store/response MIME (the two are
-        // deliberately separate; see the #711 notes on both tables).
+        // deliberately separate).
         let mime = item.mime.as_deref().unwrap_or("image/png");
         let data_url = format!(
             "data:{mime};base64,{}",
@@ -453,7 +453,7 @@ mod tests {
         );
     }
 
-    // ── SSRF redirect re-vet (#592) ─────────────────────────────────────────
+    // ── SSRF redirect re-vet ─────────────────────────────────────────
 
     #[tokio::test]
     async fn cross_host_redirect_is_refused() {
