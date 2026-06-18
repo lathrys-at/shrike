@@ -11,6 +11,7 @@ SHRIKE_PYO3_SRCS = [
     "src/anki_core.rs",
     "src/async_kernel.rs",
     "src/asyncio_bridge.rs",
+    "src/compute_dispatch.rs",
     "src/finalize_gate.rs",
     "src/gated_log.rs",
     "src/kernel_actions.rs",
