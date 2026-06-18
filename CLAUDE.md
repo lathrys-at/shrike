@@ -37,6 +37,14 @@ scripts/dev-setup.sh        # idempotent: .venv, shrike-py[dev], builds shrike_n
 source .venv/bin/activate
 ```
 
+**In a git worktree, run `scripts/dev-setup.sh` first, before anything else.** It
+roots at the checkout you stand in, so it builds a `.venv` and native extension
+*local to that worktree* and prints the absolute `source …/.venv/bin/activate` for
+it. Activate that one. Never reuse, activate, or build into another checkout's
+`.venv`: a shared venv cross-wires the native extension and its staleness stamp
+between worktrees, so `pytest` silently imports the wrong `.so`. The tooling now
+refuses a cross-checkout venv loudly rather than corrupting it.
+
 The full local gate before a native change:
 
 ```bash

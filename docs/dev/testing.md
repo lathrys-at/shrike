@@ -13,6 +13,16 @@ the pinned interpreter (`.python-version`, via pyenv if present, else
 Rust `shrike_native` extension. **`pip install` alone does not build the
 extension** — that is a separate Bazel build, run by `scripts/build-native.sh`.
 
+`dev-setup.sh` roots at **the checkout you run it from** (the current git
+worktree), not at the script's location, so each worktree gets its **own**
+isolated `.venv` and native extension. This is load-bearing: the native
+extension is pip-installed into `$VIRTUAL_ENV` and its staleness stamp lives
+there, so two worktrees sharing one venv clobber each other's `.so` and stamp —
+`pytest` then imports the wrong build. In a worktree, run `scripts/dev-setup.sh`
+first and activate the venv it prints (`source <worktree>/.venv/bin/activate`);
+never activate another checkout's. `build-native.sh` refuses a `$VIRTUAL_ENV`
+that lives outside the current checkout rather than cross-wiring it.
+
 Python 3.12 is the supported interpreter (the `anki` package requires Python
 ≥ 3.11). After setup, refreshes of the native extension happen for you: with
 direnv, `.envrc` rebuilds a stale extension on `cd`; without it, `pytest` fails

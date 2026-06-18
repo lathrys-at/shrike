@@ -17,8 +17,8 @@ consumes the lock.
 ## Contents
 
 ### Environment & native build
-- `dev-setup.sh` — the one-step, idempotent dev environment (venv, editable install, native build).
-- `build-native.sh` — rebuilds the `shrike_native` extension into the venv (the pip-lane inner loop).
+- `dev-setup.sh` — the one-step, idempotent dev environment (venv, editable install, native build). Roots at the checkout you run it from, so each git worktree gets its **own** isolated `.venv` + extension; run it first in a fresh worktree and activate the venv it prints.
+- `build-native.sh` — rebuilds the `shrike_native` extension into the venv (the pip-lane inner loop). Refuses a `$VIRTUAL_ENV` that lives outside the current checkout (the worktree cross-wire guard).
 - `native-stale.sh` / `native-stamp.sh` — the staleness check + per-venv stamp that drive the auto-rebuild and the pytest backstop.
 - `update-anki-descriptors.sh` — refreshes the checked-in anki protobuf descriptor set after an anki tag bump (writes into `shrike-core/`).
 

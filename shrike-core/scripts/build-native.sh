@@ -29,6 +29,28 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# Worktree isolation guard. The build always reads this tree (cd above) but the
+# install + stamp below land in $VIRTUAL_ENV. If that venv belongs to ANOTHER
+# checkout, the two disagree: we'd build this worktree's extension into another
+# worktree's venv and stamp it there — the silent cross-wire that makes pytest
+# import the wrong .so. Require the active venv to live inside this checkout. An
+# unset VIRTUAL_ENV is the CI/system-python path (uv pip install --system) and is
+# left untouched on purpose.
+if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+  here="$(pwd -P)"
+  venv_real="$(cd "$VIRTUAL_ENV" 2>/dev/null && pwd -P || echo "$VIRTUAL_ENV")"
+  case "$venv_real/" in
+    "$here/"*) : ;;
+    *) echo "build-native: refusing to cross-wire checkouts." >&2
+       echo "  active venv : $VIRTUAL_ENV" >&2
+       echo "  this tree   : $here" >&2
+       echo "  That venv belongs to a different checkout (worktree mix-up)." >&2
+       echo "  Fix: deactivate, then in THIS tree run" >&2
+       echo "       scripts/dev-setup.sh && source .venv/bin/activate" >&2
+       exit 1 ;;
+  esac
+fi
+
 BAZEL_FLAGS=()
 MODE="fastbuild"
 for arg in "$@"; do
