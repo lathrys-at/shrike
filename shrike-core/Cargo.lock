@@ -5260,7 +5260,6 @@ dependencies = [
  "shrike-error",
  "tokio",
  "tracing",
- "ureq",
  "url",
 ]
 

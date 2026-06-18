@@ -1,11 +1,12 @@
 # A kernel-unaware, low-level networking-safety crate (#592): the SSRF
 # classifier (Python `ipaddress.is_global` parity), the resolve-and-vet helper,
-# and the IP-pinned agent/client builders (sync ureq + async reqwest). It is
-# SHARED by the kernel (shrike-kernel's media_fetch) AND the remote engine crates
-# (shrike-embed-remote, shrike-describe-remote) — so the one SSRF control lives
-# in one place, not copied per consumer. Pure Rust, depends on NO engine crate
-# and NOT on shrike-kernel (it sits BELOW both), so the //shrike-core:layering_check
-# kernel-purity and engine-purity rules both stay satisfied.
+# the IP-pinned async reqwest client builders, and the centralized per-hop re-vet
+# loops the consumers ride (#721 S2). It is SHARED by the kernel (shrike-kernel's
+# media_fetch, via shrike-media) AND the remote engine crates (shrike-engine's
+# embed/describe) — so the one SSRF control lives in one place, not copied per
+# consumer. Pure Rust, depends on NO engine crate and NOT on shrike-kernel (it
+# sits BELOW both), so the //shrike-core:layering_check kernel-purity and
+# engine-purity rules both stay satisfied.
 [package]
 name = "shrike-network"
 version = "0.1.0"
@@ -17,23 +18,22 @@ name = "shrike_network"
 
 [dependencies]
 shrike-error = { workspace = true }
-# SYNCHRONOUS client — no runtime (the workspace's runtime-less HTTP precedent,
-# the still-current media fetch + remote-engine path). Removed once #721 S2
-# ports those consumers onto the async reqwest client below and ureq goes away.
-ureq = "2"
 url = "2"
 tracing = "0.1"
-# ASYNC client (#721): the reqwest/hyper sibling of the ureq agents, driven by
-# the harness runtime. Added UNCONDITIONALLY (not behind a feature): reqwest is
-# already universally in the lock — every build that pulls this crate also pulls
-# anki -> reqwest 0.12 (the server via shrike-pyo3, mobile via shrike-cabi) — so
-# this adds ~no tree weight, and a feature added in S1 would only be deleted in
-# S2 when ureq goes. `rustls-tls` REUSES the same rustls ureq already links (the
-# only TLS stack in the lock; no native-tls/openssl) and bundles webpki CA roots
-# (no native cert-store dependency — right for the mobile/minimal posture, #338).
-# `default-features = false` keeps native-tls off (the `charset` feature would
-# pull it back via `default-tls`, so it is deliberately omitted). `stream` lets
-# the caller size-cap the body WHILE reading; `socks` preserves proxy-env support.
+# The centralized media-GET loop ([`fetch_pinned_get`]) size-caps the body WHILE
+# streaming reqwest's `bytes_stream()` — `StreamExt::next`. default-features off
+# keeps it alloc-light (no executor — the harness runtime drives).
+futures-util = { version = "0.3", default-features = false }
+# ASYNC client (#721): the ONLY transport now that ureq is gone (#721 S2). Added
+# UNCONDITIONALLY (not behind a feature): reqwest is already universally in the
+# lock — every build that pulls this crate also pulls anki -> reqwest 0.12 (the
+# server via shrike-pyo3, mobile via shrike-cabi) — so this adds ~no tree weight.
+# `rustls-tls` is the only TLS stack in the lock (no native-tls/openssl) and
+# bundles webpki CA roots (no native cert-store dependency — right for the
+# mobile/minimal posture, #338). `default-features = false` keeps native-tls off
+# (the `charset` feature would pull it back via `default-tls`, so it is
+# deliberately omitted). `stream` lets the caller size-cap the body WHILE reading;
+# `socks` preserves proxy-env support.
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "json",

@@ -26,18 +26,26 @@
 //!   (no `is_global` gate);
 //! - [`same_host_redirect`]: vet a redirect for the endpoint posture (same-host
 //!   only), shared by every manual redirect-following loop;
-//! - the SYNC `ureq` builders ([`pinned_agent`], [`pinned_endpoint_agent`]) and
-//!   their ASYNC `reqwest` siblings ([`pinned_async_client`],
-//!   [`pinned_endpoint_async_client`], #721): a client whose connection is
-//!   pinned to one fixed `SocketAddr` (the vetted IP) with auto-redirects OFF,
-//!   so the caller follows + re-vets each hop itself. The async pair pins via
+//! - the async `reqwest` builders ([`pinned_async_client`],
+//!   [`pinned_endpoint_async_client`]): a client whose connection is pinned to
+//!   one fixed `SocketAddr` (the vetted IP) with auto-redirects OFF, so the
+//!   caller follows + re-vets each hop itself. They pin via
 //!   `reqwest::ClientBuilder::resolve` (a per-host DNS override, no connect-time
-//!   re-resolution) keeping SNI/cert/`Host` on the name.
+//!   re-resolution) keeping SNI/cert/`Host` on the name;
+//! - the centralized redirect-following loops the consumers ride
+//!   ([`fetch_pinned_get`] for the untrusted-media GET, [`post_pinned_with_revet`]
+//!   for the operator-endpoint POST, #721 S2): ONE audited copy of the per-hop
+//!   SSRF re-vet, parameterised by which posture re-vets each hop
+//!   ([`RevetPolicy`]). Engine policy (retry/backoff/`Retry-After`/api-key/
+//!   item-level status) stays with the consumer — the helpers own only the
+//!   pinned-send + per-hop re-vet + the body size-cap.
 //!
 //! Pure Rust, NO engine crate and NOT `shrike-kernel` — it sits BELOW both, so
 //! the kernel-purity and engine-purity layering rules both stay satisfied. The
-//! `ureq` (sync) and `reqwest` (async) builders coexist during the #721 port;
-//! `ureq` is removed once S2 moves the consumers onto the async client.
+//! transport is async `reqwest` only: the synchronous `ureq` agents were
+//! removed in #721 S2 once every consumer (media fetch + the remote engines)
+//! moved onto the async client (`ureq` survives only in the unrelated
+//! `shrike-llama-server` loopback health probe, a managed-crate concern).
 
 #![deny(missing_docs)]
 #![deny(
@@ -46,9 +54,11 @@
     clippy::missing_safety_doc
 )]
 
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use shrike_error::{NativeError, NativeResult};
 
 /// The hop cap shared by every manual redirect-following loop in the tree (the
@@ -229,59 +239,11 @@ pub fn same_host_redirect(from: &url::Url, location: &str) -> NativeResult<url::
     Ok(target)
 }
 
-/// A ureq agent that connects ONLY to `pinned` (the vetted IP) on `port`,
-/// ignoring the netloc ureq would otherwise re-resolve, with auto-redirects
-/// OFF so the caller follows + re-vets each hop manually. The URL keeps the
-/// hostname, so TLS SNI + certificate validation verify against the name (the
-/// Host header is right by construction) while the socket goes where we
-/// checked — closing the DNS-rebinding TOCTOU.
-pub fn pinned_agent(pinned: IpAddr, port: u16, timeout: Duration) -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout(timeout)
-        .redirects(0)
-        .resolver(move |_netloc: &str| -> std::io::Result<Vec<SocketAddr>> {
-            Ok(vec![SocketAddr::new(pinned, port)])
-        })
-        .build()
-}
-
-/// Build an IP-pinned agent for an OPERATOR-CONFIGURED endpoint base URL: parse
-/// it, resolve its host (WITHOUT the `is_global` gate — the operator trusts the
-/// host, e.g. loopback llama-server / a tailnet), and pin the connection to
-/// that one address. Returns the agent plus the parsed base URL (which the
-/// caller keeps for the same-host redirect comparison). The pin closes the
-/// DNS-rebinding TOCTOU even for a trusted host; redirects are OFF so the caller
-/// applies [`same_host_redirect`] per hop.
-///
-/// # Errors
-///
-/// Returns an `InvalidInput` [`NativeError`] if `base_url` is not a valid URL, its
-/// scheme is not `http`/`https`, it has no host, or that host does not resolve.
-pub fn pinned_endpoint_agent(
-    base_url: &str,
-    timeout: Duration,
-) -> NativeResult<(ureq::Agent, url::Url)> {
-    let base =
-        url::Url::parse(base_url).map_err(|e| invalid(format!("invalid endpoint URL: {e}")))?;
-    let scheme = base.scheme();
-    if scheme != "http" && scheme != "https" {
-        return Err(invalid(format!(
-            "endpoint URL must be http(s), got scheme '{scheme}'"
-        )));
-    }
-    let host = base
-        .host_str()
-        .ok_or_else(|| invalid("endpoint URL has no host"))?
-        .to_string();
-    let port = base.port_or_known_default().unwrap_or(0);
-    let pinned = resolve_pinned(&host)?;
-    Ok((pinned_agent(pinned, port, timeout), base))
-}
-
 /// A reqwest async client that connects ONLY to `pinned` (the vetted IP),
 /// ignoring the host's real DNS, with auto-redirects OFF so the caller follows
-/// and re-vets each hop manually. The async sibling of [`pinned_agent`] (#721):
-/// `reqwest::ClientBuilder::resolve(host, addr)` installs a per-host DNS
+/// and re-vets each hop manually (the low-level builder under
+/// [`fetch_pinned_get`], #721): `reqwest::ClientBuilder::resolve(host, addr)`
+/// installs a per-host DNS
 /// override for the client's life, so every connection to `host` uses `addr`
 /// and reqwest never re-resolves the name at connect time — closing the
 /// DNS-rebinding TOCTOU. The request URL keeps the hostname, so TLS SNI +
@@ -296,10 +258,10 @@ pub fn pinned_endpoint_agent(
 ///
 /// NOTE: a configured HTTP/SOCKS proxy short-circuits the DNS override —
 /// reqwest connects to the *proxy* and the proxy resolves the name, so the pin
-/// governs only the DIRECT-connection case (the SSRF surface). This matches the
-/// sync `ureq` agent's behavior exactly: a configured proxy is an operator
-/// opt-in to route through it. Proxy env (`HTTP_PROXY`/`ALL_PROXY`/…, SOCKS via
-/// the `socks` feature) is honored, preserving the current posture.
+/// governs only the DIRECT-connection case (the SSRF surface). A configured
+/// proxy is an operator opt-in to route through it (the posture the prior sync
+/// agent carried, preserved). Proxy env (`HTTP_PROXY`/`ALL_PROXY`/…, SOCKS via
+/// the `socks` feature) is honored.
 ///
 /// # Errors
 ///
@@ -324,8 +286,8 @@ pub fn pinned_async_client(
 /// Build an IP-pinned async client for an OPERATOR-CONFIGURED endpoint base URL:
 /// parse it, resolve its host (WITHOUT the `is_global` gate — the operator
 /// trusts the host, e.g. loopback llama-server / a tailnet) via [`resolve_pinned`],
-/// and pin the connection to that one address. The async sibling of
-/// [`pinned_endpoint_agent`] (#721). Returns the client plus the parsed base URL
+/// and pin the connection to that one address (the low-level builder under
+/// [`post_pinned_with_revet`], #721). Returns the client plus the parsed base URL
 /// (which the caller keeps for the [`same_host_redirect`] comparison). The pin
 /// closes the DNS-rebinding TOCTOU even for a trusted host; redirects are OFF so
 /// the caller applies [`same_host_redirect`] per hop.
@@ -354,6 +316,171 @@ pub fn pinned_endpoint_async_client(
     let pinned = resolve_pinned(&host)?;
     let client = pinned_async_client(pinned, &host, timeout)?;
     Ok((client, base))
+}
+
+// ── the centralized per-hop re-vet loops (#721 S2) ───────────────────────────
+// ONE audited copy of the manual redirect-following + SSRF re-vet the two
+// consumers (the untrusted-media GET, the operator-endpoint POST) used to
+// hand-roll. The posture differs only in how each hop is re-vetted; engine
+// policy (retry/backoff/`Retry-After`/api-key/item-level status) stays with the
+// consumer — these helpers own only the pinned-send + per-hop re-vet + cap.
+
+/// Download a URL with the untrusted-media SSRF posture (`store_media`'s url
+/// path), following redirects manually and re-vetting EVERY hop: each hop's
+/// host is resolved and refused unless every resolved address is globally
+/// routable ([`ip_is_allowed`]), then the connection is pinned to the vetted IP
+/// (the URL keeps the name, so SNI/cert/`Host` ride the name). Capped at
+/// [`MAX_REDIRECTS`]; the body is size-capped WHILE streaming (an oversize body
+/// is rejected before it is fully buffered). Returns `(bytes, content_type)`.
+///
+/// With `allow_private` the is_global gate AND the pin are off (the operator
+/// opted into trusted internal hosts) — system DNS, same as the Python facade's
+/// switch. Redirects are still followed manually and capped, but each hop's host
+/// is no longer is_global-gated.
+///
+/// # Errors
+///
+/// Returns an `InvalidInput` [`NativeError`] if the URL is malformed, uses a
+/// non-http(s) scheme, has no host, a hop resolves to a non-public address
+/// (unless `allow_private`), the redirect cap is exceeded, the request fails, or
+/// the body exceeds `max_bytes`; an `Unavailable` [`NativeError`] if the client
+/// cannot be built.
+pub async fn fetch_pinned_get(
+    url: &str,
+    allow_private: bool,
+    timeout: Duration,
+    max_bytes: usize,
+) -> NativeResult<(Vec<u8>, Option<String>)> {
+    let mut logical = url.to_string();
+    for _hop in 0..=MAX_REDIRECTS {
+        let parsed = url::Url::parse(&logical).map_err(|e| invalid(format!("invalid URL: {e}")))?;
+        let scheme = parsed.scheme();
+        if scheme != "http" && scheme != "https" {
+            return Err(invalid(format!("unsupported URL scheme: {scheme}")));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| invalid("URL has no host"))?
+            .to_string();
+
+        // Pin the connection: the per-host DNS override hands reqwest the vetted
+        // IP while the URL keeps the hostname, so SNI/cert/Host all see the name
+        // and the socket goes where we checked. With allow_private, system DNS.
+        let client = if allow_private {
+            reqwest::Client::builder()
+                .timeout(timeout)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| NativeError::unavailable(format!("could not build HTTP client: {e}")))?
+        } else {
+            // The is_global gate, applied to EVERY hop's host (a redirect to a
+            // private/metadata host is refused here, before any socket to it).
+            let pinned = resolve_public_ip(&host)?;
+            pinned_async_client(pinned, &host, timeout)?
+        };
+
+        let resp = client
+            .get(&logical)
+            .send()
+            .await
+            .map_err(|e| invalid(format!("fetch failed: {e}")))?;
+        let status = resp.status();
+        if status.is_redirection() {
+            let location = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| invalid("redirect response without a Location header"))?;
+            // Resolve relative against the LOGICAL url; the next loop re-vets the
+            // new host (this is what closes the redirect-to-private SSRF vector).
+            logical = parsed
+                .join(location)
+                .map_err(|e| invalid(format!("bad redirect location: {e}")))?
+                .to_string();
+            continue;
+        }
+        if !status.is_success() {
+            return Err(invalid(format!("HTTP error {status} fetching {logical}")));
+        }
+
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.split(';').next().unwrap_or("").trim().to_string())
+            .filter(|ct| !ct.is_empty());
+
+        // Size-cap WHILE streaming: stop as soon as the running total exceeds the
+        // cap, never buffering an oversize body whole.
+        let mut body = Vec::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| invalid(format!("read failed: {e}")))?;
+            body.extend_from_slice(&chunk);
+            if body.len() > max_bytes {
+                return Err(invalid(format!("download exceeds the {max_bytes}-byte limit")));
+            }
+        }
+        return Ok((body, content_type));
+    }
+    Err(invalid(format!("too many redirects (>{MAX_REDIRECTS})")))
+}
+
+/// One hop's terminal outcome on the operator-endpoint POST path: either a
+/// redirect to follow (re-vetted same-host) or the caller's done value.
+/// The consumer's per-URL closure returns this so [`post_pinned_with_revet`]
+/// drives the redirect loop while the consumer owns the send + retry policy.
+pub enum RevetStep<T> {
+    /// A 3xx whose `Location` header value the loop must re-vet and follow.
+    Redirect(String),
+    /// A terminal (non-3xx) outcome the caller produced — returned as-is.
+    Done(T),
+}
+
+/// Follow redirects on the operator-configured endpoint posture, re-vetting
+/// EVERY hop as same-host ([`same_host_redirect`]): a remote endpoint that
+/// 30x-es you to a DIFFERENT host is the SSRF vector, so a cross-host
+/// (or schemeless/hostless) redirect is refused. The connection stays pinned to
+/// the base host's already-vetted IP throughout (a same-host redirect can't
+/// rebind to a new address). Capped at [`MAX_REDIRECTS`].
+///
+/// `send_one` is the consumer's per-URL send (its retry/backoff/`Retry-After`/
+/// api-key/item-level policy lives inside it). It returns [`RevetStep`]:
+/// `Redirect(location)` for a 3xx the loop should re-vet + follow, or `Done(T)`
+/// for any terminal outcome (a 2xx response, or a status the consumer maps).
+/// `start` is the absolute URL of the first request; `base` is the parsed base
+/// URL the first request was sent to (the same-host comparison anchor).
+///
+/// # Errors
+///
+/// Returns the consumer's error from `send_one`, an `InvalidInput`
+/// [`NativeError`] for a redirect without a `Location` header or a refused
+/// cross-host redirect, or an `Unavailable` [`NativeError`] if the cap is
+/// exceeded.
+pub async fn post_pinned_with_revet<T, F, Fut>(
+    start: String,
+    base: url::Url,
+    mut send_one: F,
+) -> NativeResult<T>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = NativeResult<RevetStep<T>>>,
+{
+    let mut current = start;
+    let mut from = base;
+    for _hop in 0..=MAX_REDIRECTS {
+        match send_one(current.clone()).await? {
+            RevetStep::Done(value) => return Ok(value),
+            RevetStep::Redirect(location) => {
+                let target = same_host_redirect(&from, &location)?;
+                current = target.to_string();
+                from = target;
+            }
+        }
+    }
+    Err(NativeError::unavailable(format!(
+        "too many redirects (>{MAX_REDIRECTS})"
+    )))
 }
 
 #[cfg(test)]
