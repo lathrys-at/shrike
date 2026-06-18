@@ -561,3 +561,35 @@ class TestWaitForServer:
         assert result.exit_code == 0
         main.assert_called_once()
         assert "foreground" in result.output
+
+    def test_server_main_patchable_even_without_real_attr(self):
+        """`mock.patch("shrike.server.main", ...)` must hold even when `main` is not
+        a real attribute on the `shrike.server` module object — pins the #732 fix.
+
+        #730 made `shrike.server` a package whose `__init__` eagerly re-exported
+        `main` (`from shrike.server.server import main`), binding it as a real
+        module attribute. Under the shared-process test runner (xdist) the package
+        could be observed in a partially-initialized state where that attribute was
+        absent, and this exact `patch` raised `AttributeError: module
+        'shrike.server' ... does not have the attribute 'main'` (the CI failure on
+        #732). The re-export is now lazy (module `__getattr__`), so `main` resolves
+        on access regardless of whether it is materialized as a real attribute.
+
+        This reproduces the failing state deterministically by removing any real
+        `main` attribute before patching: with the old eager re-export the patch
+        raises AttributeError (no `__getattr__` fallback); with the lazy re-export
+        it succeeds. So this test FAILS against the bug and PASSES against the fix.
+        """
+        import shrike.server
+
+        # Simulate the partial/contaminated module state: no real `main` attribute.
+        shrike.server.__dict__.pop("main", None)
+
+        with patch("shrike.server.main", MagicMock()) as m:
+            import shrike.server
+
+            assert shrike.server.main is m
+        # After the patch exits, `main` still resolves (the lazy __getattr__).
+        import shrike.server
+
+        assert callable(shrike.server.main)
