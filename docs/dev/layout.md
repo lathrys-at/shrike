@@ -54,25 +54,39 @@ harness/engines/
 
 ## `shrike-core/` — the Rust workspace
 
+Crates are grouped by role (a pure path grouping; no crate is renamed by it):
+
 ```
 shrike-core/
-├── shrike-kernel/        # the kernel: collection + index orchestration + derived + fusion
-├── shrike-collection/    # anki via its protobuf service layer (the only anki coupling)
-├── shrike-index/         # per-modality USearch engine
-├── shrike-derived/       # FTS5 trigram engine
-├── shrike-engine-api/    # the engine contract: kernel-facing async traits, sync compute
-│                         #   traits, the Blocking adapter, WithPolicy, the batch probe
-├── shrike-engine/        # engine impls, feature-gated by family (onnx / remote / apple)
-├── shrike-llama-server/  # llama-server lifecycle manager (spawn/health/reap/stop)
-├── shrike-platform/      # raw Swift/C-ABI recognizer glue (Vision OCR + Speech ASR)
-├── shrike-schemas/       # serde + schemars wire types (canonical; schemas.py binds to these)
-├── shrike-ffi/           # the shared error taxonomy
-└── shrike-pyo3/          # the pyo3 binding (the only pyo3 crate) + the shrike_native package
+├── contracts/                # the floor: wire types, error taxonomy, the engine firewall
+│   ├── shrike-error/            # the shared error taxonomy
+│   ├── shrike-schemas/          # serde + schemars wire types (canonical; schemas.py binds to these)
+│   ├── shrike-engine-api/       # the engine contract: kernel-facing async traits, sync compute
+│   │                            #   traits, the Blocking adapter, WithPolicy, the batch probe
+│   └── shrike-store/            # the derived-cache store primitive
+├── runtime/                  # the kernel and the stores it orchestrates
+│   ├── shrike-kernel/           # the kernel: collection + index orchestration + derived + fusion
+│   ├── shrike-collection/       # anki via its protobuf service layer (the only anki coupling)
+│   ├── shrike-index/            # per-modality USearch engine
+│   ├── shrike-derived/          # FTS5 trigram engine
+│   └── shrike-cache/            # per-collection cache layout (index/derived subdirs + namespacing)
+├── engines/                  # engine-contract impls + the platform glue they parse
+│   ├── shrike-engine/           # engine impls, feature-gated by family (onnx / remote / apple)
+│   └── shrike-platform/         # raw Swift/C-ABI recognizer glue (Vision OCR + Speech ASR)
+├── managed/                  # subprocess lifecycle (manage-class, not engines)
+│   ├── shrike-process/          # generic managed-subprocess lifecycle (ManagedProcess + reaper)
+│   └── shrike-llama-server/     # llama-server lifecycle (spawn/health/reap/stop)
+├── utility/                  # low-level crates below the kernel and engines
+│   ├── shrike-network/          # the SSRF-pinned network primitives
+│   ├── shrike-image/            # the CLIP pixel pipeline
+│   └── shrike-media/            # inbound media: SSRF fetch + decode + MIME
+└── bindings/                 # the host-language bindings
+    ├── shrike-pyo3/             # the pyo3 binding (the only pyo3 crate) + the shrike_native package
+    └── shrike-cabi/             # the C-ABI mobile binding (cdylib, zero CPython)
 ```
 
-A few supporting crates carry reusable pieces: `shrike-process`
-(`ManagedProcess` + supervisor, used by the llama-server manager), `shrike-media`
-(media fetch + MIME), and `shrike-image` (the CLIP pixel pipeline).
+The layering check (`shrike-core/layering_check.py`) enforces the role order —
+the kernel may depend on contracts and utility crates, never on an engine crate.
 
 ## `scripts/` vs `tools/` vs `bin/`
 

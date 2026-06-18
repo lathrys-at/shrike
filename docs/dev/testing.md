@@ -11,7 +11,7 @@ This is one idempotent step — re-run it any time as a repair button. It picks
 the pinned interpreter (`.python-version`, via pyenv if present, else
 `python3.12`), installs the editable package plus dev tooling, and builds the
 Rust `shrike_native` extension. **`pip install` alone does not build the
-extension** — that is a separate cargo step.
+extension** — that is a separate Bazel build, run by `scripts/build-native.sh`.
 
 Python 3.12 is the supported interpreter (the `anki` package requires Python
 ≥ 3.11). After setup, refreshes of the native extension happen for you: with
@@ -19,13 +19,20 @@ direnv, `.envrc` rebuilds a stale extension on `cd`; without it, `pytest` fails
 loudly (before importing the extension) rather than silently loading a stale
 `.so`.
 
-Cacheable dev artifacts — downloaded toolchains, test models, build inputs — go
-in the repo-root `.cache/` (gitignored), so they stay with the checkout instead
-of polluting `~/.cache` or colliding across checkouts. Two intentional
-exceptions live under `~/.cache`: the bazelisk launcher cache, and the shared
-test-model cache (`SHRIKE_TEST_MODEL_DIR`, default
-`~/.cache/shrike-test-models`). This dev/build caching is separate from the
-*application's* runtime cache directory.
+Cacheable dev artifacts live under a Shrike-owned cache (never `/tmp`), in two
+tiers by lifetime:
+
+- **Shared dev cache `~/.cache/shrike-dev/`** (`$XDG_CACHE_HOME` honored) — the
+  checkout-*independent* artifacts shared across worktrees: the `./bazel`/bazelisk
+  toolchains (under `build/`) and the downloaded test-fixture models (under
+  `models/`, overridable via `SHRIKE_TEST_MODEL_DIR`), each pinned under a
+  version-encoded subdir so two checkouts can't collide or serve a stale artifact.
+- **Per-checkout cache `<repo>/.cache/`** (gitignored) — cheap, checkout-*specific*
+  scratch and derived data, and the home for any throwaway file.
+
+The `shrike-dev` namespace is deliberately distinct from the *application's* own
+runtime cache (on Linux `~/.cache/shrike/` via XDG — see
+[`server-runtime.md`](server-runtime.md)), which it would otherwise collide with.
 
 ## Running the tests
 
@@ -50,10 +57,12 @@ fixtures, which spawn a dedicated collection. Embedding tests use their own
 
 ## The native (Rust) workspace
 
-The Rust workspace lives in `shrike-core/` (run `cargo` from there). The Python
-extension is rebuilt into the venv with `scripts/build-native.sh`, the fast
-inner loop for the pip lane. You rarely run it by hand: direnv rebuilds a stale
-extension on `cd`, and `pytest` aborts loudly if the `.so` is stale.
+The Rust workspace lives in `shrike-core/` (run `cargo` from there for
+`fmt`/`clippy`/`test`). The `shrike_native` extension is rebuilt into the venv by
+`scripts/build-native.sh`, which builds it **via Bazel** — the same `_native.so`
+the release wheel ships, so the inner loop and the canonical artifact share one
+build graph. You rarely run it by hand: direnv rebuilds a stale extension on
+`cd`, and `pytest` aborts loudly if the `.so` is stale.
 
 The full local gate for a native change:
 
@@ -74,12 +83,12 @@ guide.
 All three must pass cleanly:
 
 ```bash
-ruff check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/
-ruff format --check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/
+ruff check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/bindings/shrike-pyo3/python/
+ruff format --check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/bindings/shrike-pyo3/python/
 mypy --config-file shrike-py/pyproject.toml shrike-py/src/shrike/
 ```
 
-`shrike-core/shrike-pyo3/python/` is the extension's Python shim. It sits outside
+`shrike-core/bindings/shrike-pyo3/python/` is the extension's Python shim. It sits outside
 `src/`, so it must be named explicitly or it falls into no lint scope.
 
 CI runs on every PR (`.github/workflows/test.yml`): a `lint` job and a `tests`

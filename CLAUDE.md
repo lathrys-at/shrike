@@ -49,14 +49,14 @@ scripts/build-native.sh && pytest shrike-py/tests/unit shrike-py/tests/native -q
 Lint + type-check (all three clean):
 
 ```bash
-ruff check  shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/
-ruff format --check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/
+ruff check  shrike-py/src/shrike/ shrike-py/tests/ shrike-core/bindings/shrike-pyo3/python/
+ruff format --check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/bindings/shrike-pyo3/python/
 mypy --config-file shrike-py/pyproject.toml shrike-py/src/shrike/
 ```
 
-`pip install` does **not** build the native extension (a separate cargo step, run by
-direnv or `scripts/build-native.sh`; `pytest` aborts if the `.so` is stale). Python 3.12
-via pyenv. Coverage, the test-sharing model, and the Bazel lanes are in
+`pip install` does **not** build the native extension (a separate Bazel build via
+`scripts/build-native.sh`, also run for you by direnv; `pytest` aborts if the `.so` is
+stale). Python 3.12 via pyenv. Coverage, the test-sharing model, and the Bazel lanes are in
 [`docs/dev/testing.md`](docs/dev/testing.md).
 
 ## Conventions you must follow
