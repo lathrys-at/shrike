@@ -83,15 +83,15 @@ class DrivenRuntime:
         advancing only while it parks in ``recv``, starving timers/IO."""
         if not self._driven or self._threads:
             return
-        io = threading.Thread(target=shrike_native.drive_io, name="shrike-drive-io")
+        io = threading.Thread(target=shrike_native.drive_io, name="shrike-io")
         self._threads.append(io)
         io.start()
         # The barrier: returns once the IO thread is inside its block_on and owns
         # the drivers, so the leaves below can't claim driver ownership.
         shrike_native.runtime_probe()
-        leaves = [threading.Thread(target=shrike_native.drive_sync, name="shrike-drive-sync")]
+        leaves = [threading.Thread(target=shrike_native.drive_sync, name="shrike-sync")]
         leaves += [
-            threading.Thread(target=shrike_native.drive_compute, name=f"shrike-drive-compute-{i}")
+            threading.Thread(target=shrike_native.drive_compute, name=f"shrike-work-{i}")
             for i in range(self._compute_threads)
         ]
         for thread in leaves:
