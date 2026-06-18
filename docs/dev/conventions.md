@@ -11,6 +11,32 @@
 - Batch operations use **per-item try/except** so one failure doesn't block the
   batch; results carry a per-item `status`.
 
+## Comments document the code, not its history
+
+Comments document the code; **rationale and history live elsewhere** — in issues,
+PR bodies, and [`decisions.md`](decisions.md). `git blame` already traces when and
+why a line changed, so a comment that re-states that goes stale the moment it is
+written ("when was *recently*?").
+
+**Keep** a comment only if it is:
+
+- **future-facing code documentation** — a non-obvious invariant, a
+  looks-wrong-but-correct-because-X guard, a `// SAFETY:` justification, or
+  algorithmic rationale a future reader genuinely needs; or
+- **interface documentation** — a docstring on a public module, class, or function
+  (the contract).
+
+**Drop** the historical/contextual narrative: `(#NNN)` issue citations, "changed in
+the X pass", "as of today / for now", and session-generated context-vomit.
+
+The test is the comment's *value*, not a keyword. A comment that explains the code
+stays even if it happens to cite an issue — strip the historical scaffolding (the
+`(#NNN)`, the "as of" framing) and keep the explanation. A comment whose value is
+*purely* historical drops entirely. The same "no historical narrative" trim applies
+*within* an interface docstring. It is judgment per comment, never a blunt regex
+sweep — a naive "delete every line with `#NNN`" would destroy genuinely valuable
+explanations (the `// SAFETY:` blocks, the CVE-class rationale in path handling).
+
 ## Schema house style: make illegal states unrepresentable
 
 The wire models in `schemas.py` follow one rule: when a field's presence is

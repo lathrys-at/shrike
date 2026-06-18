@@ -70,6 +70,9 @@ stale). Python 3.12 via pyenv. Coverage, the test-sharing model, and the Bazel l
   loops; one transaction per batch; never hold a lock across file writes.
 - **One INFO log line per served call**; per-module loggers; `%s` formatting, not
   f-strings.
+- **Comments document the code, not its history** — keep future-facing code docs
+  (invariants, `// SAFETY:`) and interface docstrings; `(#NNN)`/"as of today"
+  history goes in issues, PRs, and `decisions.md`.
 
 The reasoning is in [`docs/dev/conventions.md`](docs/dev/conventions.md).
 
