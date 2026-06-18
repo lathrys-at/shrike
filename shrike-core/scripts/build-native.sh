@@ -29,26 +29,31 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-# Worktree isolation guard. The build always reads this tree (cd above) but the
-# install + stamp below land in $VIRTUAL_ENV. If that venv belongs to ANOTHER
-# checkout, the two disagree: we'd build this worktree's extension into another
-# worktree's venv and stamp it there — the silent cross-wire that makes pytest
-# import the wrong .so. Require the active venv to live inside this checkout. An
-# unset VIRTUAL_ENV is the CI/system-python path (uv pip install --system) and is
-# left untouched on purpose.
+# Worktree isolation guard. The build reads this tree (cd above) but the install +
+# stamp below land in $VIRTUAL_ENV; if that venv belongs to a different checkout,
+# the build lands in the wrong venv and stamps it — the silent cross-wire that
+# makes pytest import another worktree's .so. The test is checkout *identity*, not
+# path containment: agent worktrees nest under the main checkout
+# (.claude/worktrees/*), so a containment test would wave a worktree's venv
+# through while standing in main. Resolve the venv's own git worktree root and
+# require it to be this checkout. A venv outside any git tree (a deliberate
+# external venv) belongs to no checkout and is left alone, as is an unset
+# VIRTUAL_ENV (the CI/system-python path: uv pip install --system).
 if [[ -n "${VIRTUAL_ENV:-}" ]]; then
   here="$(pwd -P)"
   venv_real="$(cd "$VIRTUAL_ENV" 2>/dev/null && pwd -P || echo "$VIRTUAL_ENV")"
-  case "$venv_real/" in
-    "$here/"*) : ;;
-    *) echo "build-native: refusing to cross-wire checkouts." >&2
-       echo "  active venv : $VIRTUAL_ENV" >&2
-       echo "  this tree   : $here" >&2
-       echo "  That venv belongs to a different checkout (worktree mix-up)." >&2
-       echo "  Fix: deactivate, then in THIS tree run" >&2
-       echo "       scripts/dev-setup.sh && source .venv/bin/activate" >&2
-       exit 1 ;;
-  esac
+  vtop="$(git -C "$venv_real" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -n "$vtop" ]]; then vtop="$(cd "$vtop" && pwd -P)"; fi
+  if [[ -n "$vtop" && "$vtop" != "$here" ]]; then
+    echo "build-native: refusing to cross-wire checkouts." >&2
+    echo "  active venv : $VIRTUAL_ENV" >&2
+    echo "  venv's tree : $vtop" >&2
+    echo "  this tree   : $here" >&2
+    echo "  That venv belongs to a different checkout (worktree mix-up)." >&2
+    echo "  Fix: deactivate, then in THIS tree run" >&2
+    echo "       scripts/dev-setup.sh && source .venv/bin/activate" >&2
+    exit 1
+  fi
 fi
 
 BAZEL_FLAGS=()

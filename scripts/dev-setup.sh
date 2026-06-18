@@ -15,24 +15,27 @@
 # matching python3.X off PATH.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# Root at the checkout we're standing in, not at this script's location. Run from
-# a git worktree — even via the main checkout's copy of the script — and we set up
-# THAT worktree: its own .venv and its own native extension. This cwd-rooting is
-# what keeps each worktree's dev env isolated instead of cross-wiring into another
-# checkout's venv. Fall back to the script dir only outside a git tree.
+# Root at the checkout the script runs in, not at its own location. Run from a git
+# worktree — even via the main checkout's copy of the script — and setup targets
+# THAT worktree: its own .venv and native extension. This cwd-rooting is what keeps
+# each worktree's dev env isolated instead of cross-wiring into another checkout's
+# venv. Fall back to the script dir only outside a git tree.
 ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$HERE/..")"
-ROOT="$(cd "$ROOT" && pwd)"
+ROOT="$(cd "$ROOT" && pwd -P)"
 cd "$ROOT"
 
-# A venv from ANOTHER checkout being active is the classic worktree cross-wire.
-# We always target this checkout's own .venv below (the activate on the next step
-# re-points VIRTUAL_ENV), but say so plainly rather than letting it look honored.
+# Note an active venv from ANOTHER checkout (the classic worktree cross-wire).
+# Setup always targets this checkout's own .venv below — the activate on the next
+# step re-points VIRTUAL_ENV — but say so plainly rather than let it look honored.
+# Identity, not containment: nested worktrees mean a containment test mislabels a
+# worktree's venv as local while standing in main (see build-native.sh).
 if [[ -n "${VIRTUAL_ENV:-}" ]]; then
   active="$(cd "$VIRTUAL_ENV" 2>/dev/null && pwd -P || echo "$VIRTUAL_ENV")"
-  case "$active/" in
-    "$ROOT/"*) : ;;
-    *) echo "==> ignoring active VIRTUAL_ENV from another checkout ($VIRTUAL_ENV)" ;;
-  esac
+  vtop="$(git -C "$active" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -n "$vtop" ]]; then vtop="$(cd "$vtop" && pwd -P)"; fi
+  if [[ -n "$vtop" && "$vtop" != "$ROOT" ]]; then
+    echo "==> ignoring active VIRTUAL_ENV from another checkout ($VIRTUAL_ENV)"
+  fi
 fi
 
 PYVER="$(tr -d '[:space:]' <.python-version)"   # e.g. 3.12.13
