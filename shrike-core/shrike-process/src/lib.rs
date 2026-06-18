@@ -23,6 +23,13 @@
 //! under a pool thread (`asyncio.to_thread`), so a reclaimed pool thread could
 //! kill a live server. The PID-file reaper is the deliberate alternative.
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::Path;
@@ -65,6 +72,11 @@ pub trait ManagedProcess {
     /// Resolve the executable to spawn (override > env > PATH, validated). An
     /// unavailable binary is the policy's to report — typically
     /// [`NativeError::unavailable`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error (typically [`NativeError::unavailable`]) when the
+    /// implementation cannot resolve a usable executable.
     fn binary(&self) -> NativeResult<String>;
 
     /// The exact argv (including `argv[0]`, the binary) to spawn. Shrike-owned
@@ -177,6 +189,10 @@ impl<P: ManagedProcess> Supervisor<P> {
     }
 
     /// True while the spawned child is alive (a poll, not a cached flag).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared PID-cell mutex is poisoned (a prior holder panicked).
     pub fn running(&mut self) -> bool {
         let alive = match self.child.as_mut() {
             Some(child) => matches!(child.try_wait(), Ok(None)),
@@ -191,6 +207,16 @@ impl<P: ManagedProcess> Supervisor<P> {
     /// Spawn the process and wait for it to become healthy. Reaps any orphan
     /// first. On health timeout the child is stopped and the error carries its
     /// exit code (if it died).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::Unavailable`] if the policy cannot resolve its
+    /// binary, the spawn fails, or the child does not become healthy within the
+    /// health-wait window (the error carries the observed exit code).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared PID-cell mutex is poisoned (a prior holder panicked).
     pub fn start(&mut self) -> NativeResult<()> {
         if self.running() {
             tracing::warn!(

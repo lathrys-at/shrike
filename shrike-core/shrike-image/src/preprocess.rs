@@ -21,6 +21,11 @@ pub struct PreprocessConfig {
 
 impl PreprocessConfig {
     /// Build from slices (the shape the FFI hands across), validating arity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidInput`] if `mean` or `std` is not exactly
+    /// three channels.
     pub fn from_slices(resize: u32, crop: u32, mean: &[f32], std: &[f32]) -> NativeResult<Self> {
         if mean.len() != 3 || std.len() != 3 {
             return Err(NativeError::invalid_input(
@@ -38,6 +43,11 @@ impl PreprocessConfig {
 
 /// One image's bytes → CHW f32 (length `3·crop²`): decode, resize shortest edge,
 /// center-crop, rescale to `[0,1]`, per-channel normalize, channel-major layout.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::InvalidInput`] if `bytes` is not a decodable image or
+/// decodes to a zero-sized image.
 pub fn preprocess_to_chw(bytes: &[u8], cfg: &PreprocessConfig) -> NativeResult<Vec<f32>> {
     let c = cfg.crop as usize;
     let mut out = Vec::with_capacity(3 * c * c);
@@ -48,6 +58,12 @@ pub fn preprocess_to_chw(bytes: &[u8], cfg: &PreprocessConfig) -> NativeResult<V
 /// Preprocess each image and **append** its CHW plane to `out` in order — the
 /// flat `[N, 3, crop, crop]` tensor the vision graph feeds on. `out` is appended
 /// to (not cleared), so a caller may pre-reserve `images.len()·3·crop²`.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::InvalidInput`] on the first image that is not a
+/// decodable image or decodes to a zero-sized image; `out` keeps the planes
+/// appended for the images processed before the failure.
 pub fn preprocess_batch_into(
     out: &mut Vec<f32>,
     images: &[&[u8]],
@@ -102,6 +118,11 @@ fn resize_shortest_edge(img: &image::RgbImage, nw: u32, nh: u32) -> NativeResult
 /// the per-channel affine `(p/255 − mean)/std` is hoisted to FMA constants and
 /// the strided HWC→CHW scatter is rewritten as three contiguous plane passes
 /// (one per channel), each a tight loop the compiler autovectorizes.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::InvalidInput`] if `bytes` is not a decodable image or
+/// decodes to a zero-sized image.
 pub fn preprocess_into_chw(
     out: &mut Vec<f32>,
     bytes: &[u8],

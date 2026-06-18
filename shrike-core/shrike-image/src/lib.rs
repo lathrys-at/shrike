@@ -29,6 +29,13 @@
 //! the tolerance, so it is genuinely vector-affecting and belongs behind a
 //! consumer-fingerprint mechanism, not this crate's default — see #767.)
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 mod preprocess;
 pub use preprocess::{
     preprocess_batch_into, preprocess_into_chw, preprocess_to_chw, PreprocessConfig,

@@ -30,6 +30,13 @@
 //! NOT `shrike-kernel` — it sits BELOW both, so the kernel-purity and
 //! engine-purity layering rules both stay satisfied.
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
@@ -132,6 +139,11 @@ pub fn ip_is_allowed(addr: IpAddr) -> bool {
 /// to it. The attacker-supplied path (`store_media`) uses this; the
 /// operator-configured remote endpoints pin without this gate (see
 /// [`resolve_pinned`]).
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::InvalidInput`] if `host` does not resolve, or if any
+/// resolved address fails the SSRF allowlist (non-global or multicast).
 pub fn resolve_public_ip(host: &str) -> NativeResult<IpAddr> {
     let addrs: Vec<SocketAddr> = (host, 0u16)
         .to_socket_addrs()
@@ -155,6 +167,11 @@ pub fn resolve_public_ip(host: &str) -> NativeResult<IpAddr> {
 /// (loopback llama-server, a tailnet host). Returns the first resolved
 /// address so the caller can pin the connection to it (closing the
 /// DNS-rebinding TOCTOU even for a trusted host).
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::InvalidInput`] if `host` does not resolve to any
+/// address.
 pub fn resolve_pinned(host: &str) -> NativeResult<IpAddr> {
     (host, 0u16)
         .to_socket_addrs()
@@ -174,6 +191,12 @@ pub fn resolve_pinned(host: &str) -> NativeResult<IpAddr> {
 ///
 /// `from` is the URL the request was sent to; `location` is the raw `Location`
 /// header (may be relative). Relative locations resolve against `from`.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::InvalidInput`] if `location` is not a valid URL
+/// relative to `from`, if the resolved scheme is not `http`/`https`, or if the
+/// target host is absent or differs from `from`'s host.
 pub fn same_host_redirect(from: &url::Url, location: &str) -> NativeResult<url::Url> {
     let target = from
         .join(location)
@@ -220,6 +243,11 @@ pub fn pinned_agent(pinned: IpAddr, port: u16, timeout: Duration) -> ureq::Agent
 /// caller keeps for the same-host redirect comparison). The pin closes the
 /// DNS-rebinding TOCTOU even for a trusted host; redirects are OFF so the caller
 /// applies [`same_host_redirect`] per hop.
+///
+/// # Errors
+///
+/// Returns [`ErrorKind::InvalidInput`] if `base_url` is not a valid URL, its
+/// scheme is not `http`/`https`, it has no host, or that host does not resolve.
 pub fn pinned_endpoint_agent(
     base_url: &str,
     timeout: Duration,

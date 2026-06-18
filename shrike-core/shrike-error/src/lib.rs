@@ -44,6 +44,13 @@
 //! [`ResultExt::context`] / [`NativeError::with_source`], which boxes through
 //! `Into<BoxError>` and needs no leaf dependency in this crate.
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 use std::error::Error;
 
 use tracing_error::SpanTrace;
@@ -206,10 +213,21 @@ pub type NativeResult<T> = Result<T, NativeError>;
 pub trait ResultExt<T> {
     /// Map any error into a `NativeError` of `kind` with `message` as the label
     /// and the original error as the source.
+    ///
+    /// # Errors
+    ///
+    /// Returns the mapped `NativeError` when `self` is `Err`; an `Ok` value
+    /// passes through unchanged.
     fn context(self, kind: ErrorKind, message: impl Into<String>) -> NativeResult<T>;
 
     /// Map any error into a `NativeError` of `kind`, building the label lazily
     /// (only on the error path).
+    ///
+    /// # Errors
+    ///
+    /// Returns the mapped `NativeError` when `self` is `Err`, calling `message`
+    /// to build the label only on that path; an `Ok` value passes through
+    /// unchanged.
     fn with_context<F, S>(self, kind: ErrorKind, message: F) -> NativeResult<T>
     where
         F: FnOnce() -> S,

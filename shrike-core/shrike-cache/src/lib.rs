@@ -17,6 +17,13 @@
 //! collection) can't be canonicalized — we fall back to a lexical absolutize so
 //! the key is still stable across runs.
 
+#![deny(missing_docs)]
+#![deny(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_safety_doc
+)]
+
 use std::path::{Path, PathBuf};
 
 use blake2::digest::consts::U16;
