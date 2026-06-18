@@ -1,11 +1,11 @@
-//! Tag-centroid vectors (#178/#179): each curated tag becomes a
+//! Tag-centroid vectors: each curated tag becomes a
 //! content-grounded concept vector — the **renormalized mean of its member
 //! notes' TEXT vectors** — stored in the engine's `tag.text` space, keyed by
 //! a stable hash of the tag string. Membership is exact (one pass over
 //! `notes.tags`), with hierarchy rolled up by prefix aggregation
 //! (`a::b::c` contributes to `a::b::c`, `a::b`, and `a`).
 //!
-//! Layout decision (#178, recorded in docs/dev/decisions.md): the tag space lives
+//! Layout decision (recorded in docs/dev/decisions.md): the tag space lives
 //! in the SAME engine as the note-item spaces (same model/dim/metric — a tag
 //! centroid is only meaningful in the notes' space) under a distinct space
 //! name, so note searches scoped to [`crate::NOTE_MODALITIES`] can never
@@ -30,7 +30,7 @@ use shrike_store::VectorIndex;
 
 use crate::TAG_TEXT_SPACE;
 
-/// Hygiene knobs (#179: "a curation surface — make them configurable"). The
+/// Hygiene knobs (a curation surface — they are configurable). The
 /// defaults live here; the harness threads overrides through
 /// [`TagCentroidConfig`].
 ///
@@ -42,7 +42,7 @@ pub const DEFAULT_MAX_COVERAGE: f64 = 0.5;
 /// Tags never given a centroid (Anki's own bookkeeping tags).
 pub const DEFAULT_BLOCKLIST: &[&str] = &["leech", "marked"];
 
-/// Per-tag ceiling on members scored during query expansion (#445): a huge
+/// Per-tag ceiling on members scored during query expansion: a huge
 /// tag — approaching the whole collection at 100k notes — would otherwise
 /// pay a vector read + dot product per member on every query it activates
 /// for. Tags over the ceiling are stride-sampled (deterministic, spread
@@ -84,7 +84,7 @@ impl TagCentroidConfig {
 /// never collide with the sign conventions of note ids). Fixed-size
 /// `Blake2b<U8>` — the same digest-length parameter block (so the same
 /// bytes) as `Blake2bVar::new(8)`, without the per-call fallible
-/// construction (#382).
+/// construction.
 pub fn tag_key(tag: &str) -> i64 {
     let out = Blake2b::<U8>::digest(tag.as_bytes());
     (i64::from_be_bytes(out.into())) & i64::MAX
@@ -168,7 +168,7 @@ impl TagKeyMap {
     }
 
     /// The not-yet-`seen` members behind a centroid key, stride-sampled down
-    /// to `ceiling` under the read lock (#445) — the expansion's bounded
+    /// to `ceiling` under the read lock — the expansion's bounded
     /// working set, never the full member clone `members()` hands out. The
     /// stride is deterministic and spreads the sample across the member
     /// range rather than biasing toward the lowest note ids.
@@ -211,7 +211,7 @@ impl TagKeyMap {
     }
 
     /// Whether any of `ids` is currently a member of any tag — the in-memory
-    /// half of the op-tail relevance probe (#445): a delete (or an update
+    /// half of the op-tail relevance probe: a delete (or an update
     /// that removed tags) changes membership only if the note was IN it.
     /// One pass over the member lists (~sub-ms even at 100k members).
     ///
@@ -236,7 +236,7 @@ impl TagKeyMap {
     }
 }
 
-/// Coalescing background refresher (#445): write-op tails previously ran the
+/// Coalescing background refresher: write-op tails previously ran the
 /// full centroid recompute INLINE — O(tagged-notes) on every upsert/delete,
 /// serialized on the op. `request` returns immediately: the first request
 /// spawns a refresh right away (an isolated op's centroids land as fast as
@@ -359,7 +359,7 @@ impl TagRefresher {
                 .await??;
             // `recompute` is O(collection) CPU + engine reads/writes (a vector
             // per distinct tagged note, then a wholesale tag-space rebuild). It
-            // MUST NOT run on a runtime worker (#445: blocking/compute work rides
+            // MUST NOT run on a runtime worker (blocking/compute work rides
             // `spawn_blocking`, never a worker thread) — at 100k notes it would
             // stall the worker for the whole recompute. Hand it to the blocking
             // pool with owned/Arc captures.
@@ -395,7 +395,7 @@ pub fn recompute(
     keys: &TagKeyMap,
 ) -> NativeResult<usize> {
     let members_by_tag = membership(rows);
-    // Each distinct member's text vector is fetched ONCE (#445): a note in N
+    // Each distinct member's text vector is fetched ONCE: a note in N
     // tags (and every `::` prefix) previously paid N engine lock + copy round
     // trips — ~200k fetches per recompute at 100k notes with hierarchy.
     let mut vec_cache: std::collections::HashMap<i64, Option<Vec<f32>>> =
@@ -466,7 +466,7 @@ pub fn recompute(
     Ok(built)
 }
 
-/// Retrieval knobs (#179): how many top tags may activate per query, and the
+/// Retrieval knobs: how many top tags may activate per query, and the
 /// note-ranking cap so one giant tag can't flood the fusion.
 ///
 /// Maximum tags that may activate for a single query.
@@ -478,11 +478,11 @@ pub const TAG_RANK_CAP: usize = 50;
 /// a centroid is a MEAN over members, so dilution systematically lowers its
 /// attainable cosine against any single query (a perfectly on-topic tag with
 /// one off-topic member already sits well under the best member's score).
-/// Offline calibration against the tag space (the #201b approach) is the
+/// Offline calibration against the tag space is the
 /// future refinement; this fixed floor is the v1 knob.
 pub const TAG_ACTIVATION: f64 = 0.35;
 
-/// The tag retrieval signal (#179): rank the `tag.text` space with the query
+/// The tag retrieval signal: rank the `tag.text` space with the query
 /// vector, activate tags whose centroid cosine clears `threshold` (the same
 /// floor the semantic note ranking uses — centroids live in the text space,
 /// so the scales are commensurable), cap activation at `top_tags`, and expand
@@ -522,7 +522,7 @@ pub fn tag_ranking(
         if f64::from(1.0 - dist) < threshold {
             break;
         }
-        // Fresh-first (#445): members an earlier (better) tag already ranked
+        // Fresh-first: members an earlier (better) tag already ranked
         // would only be skipped *after* scoring — filtering them up front
         // means hierarchy overlap is never re-scored, and pushing the fresh
         // subset in score order is exactly what the full sort + skip did.
@@ -532,7 +532,7 @@ pub fn tag_ranking(
         }
         let mut scored = engine.dot_scores("text", &fresh, query);
         // Only the top `needed` ever leave this loop iteration — partition
-        // them out, then order just that slice (#445: a huge tag previously
+        // them out, then order just that slice (a huge tag previously
         // paid a full O(m log m) sort to fill a 50-slot cap).
         let needed = cap - out.len();
         if scored.len() > needed {
@@ -653,7 +653,7 @@ mod tests {
     #[test]
     fn tag_ranking_dedupes_across_overlapping_tags() {
         // Hierarchy overlap: `a::b`'s member is also `a`'s (roll-up). The
-        // fresh-first expansion (#445) must still surface each note once,
+        // fresh-first expansion must still surface each note once,
         // best tag first.
         let engine = MultiModalIndex::new(vec![
             "text".to_string(),

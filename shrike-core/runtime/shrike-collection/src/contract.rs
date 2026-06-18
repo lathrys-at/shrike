@@ -1,13 +1,12 @@
-//! The collection contract (#389 PR B; rehomed here in #706): the typed
+//! The collection contract: the typed
 //! surface the kernel and the host bindings drive — anki never leaks through
 //! it (the canonical impl, this crate's `CollectionCore`, keeps its protobuf
-//! adapter private). Sequenced after #391 so every method speaks shrike-schemas
-//! types, not JSON strings.
+//! adapter private). Every method speaks shrike-schemas types, not JSON strings.
 //!
 //! Lives in `shrike-collection` (not the store-contract crate) because this
 //! crate is the SOLE implementer and every consumer (kernel/pyo3/cabi) already
 //! depends on it — homing the trait beside its only impl removes the edge a
-//! separate contract crate would have forced (#706).
+//! separate contract crate would have forced.
 
 use std::collections::BTreeMap;
 
@@ -23,7 +22,7 @@ use shrike_schemas::{
     UpsertNoteResult,
 };
 
-/// What `create_note` does about a first-field duplicate (the #77 policy).
+/// What `create_note` does about a first-field duplicate (the duplicate policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DuplicatePolicy {
     /// Report the duplicate as an error; do not write the note (the default).
@@ -62,7 +61,7 @@ pub enum CreateOutcome {
     SkippedDuplicate,
 }
 
-/// The GUID-conflict / update condition for an imported note or notetype (#72)
+/// The GUID-conflict / update condition for an imported note or notetype
 /// — mirrors `anki_proto::import_export::ImportAnkiPackageUpdateCondition`. An
 /// imported note with the same GUID as an existing one: `IfNewer` updates it
 /// only when the incoming note is newer; `Always` always overwrites; `Never`
@@ -96,7 +95,7 @@ impl ImportUpdateCondition {
     }
 }
 
-/// The import conflict/merge knobs Shrike exposes (#72). Defaults match anki
+/// The import conflict/merge knobs Shrike exposes. Defaults match anki
 /// desktop and Shrike's authoring posture: same-GUID notes/notetypes update
 /// only IF_NEWER, scheduling is NOT imported (Shrike manages cards, it does not
 /// review), notetypes are not merged by name. `with_deck_configs` is deferred
@@ -125,7 +124,7 @@ impl Default for ImportOptions {
     }
 }
 
-/// Per-bucket counts from an import (#72) — the summary of anki's
+/// Per-bucket counts from an import — the summary of anki's
 /// `ImportResponse.Log`. Counts, not note-id lists (the lists are too noisy for
 /// the tool response; the buckets are what a caller acts on).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -188,13 +187,13 @@ pub struct ServiceNote {
 pub type OwnedFieldRow = (i64, Vec<String>, Vec<String>);
 
 // `PreparedMedia`/`PreparedMediaSource` — the interface between the inbound
-// "acquire + validate untrusted bytes" half (`shrike-media`, #711) and this
+// "acquire + validate untrusted bytes" half (`shrike-media`) and this
 // crate's store-write tail (`store_prepared_media`). Defined in shrike-media
 // (the floor crate the kernel fans the prepare onto) and re-exported here so
 // `shrike_collection::PreparedMedia` keeps working for every consumer.
 pub use shrike_media::{PreparedMedia, PreparedMediaSource};
 
-/// The package format an export writes (#71). `.apkg` is the scoped,
+/// The package format an export writes. `.apkg` is the scoped,
 /// shareable note package; `.colpkg` is a whole-collection backup (no scope).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageFormat {
@@ -204,7 +203,7 @@ pub enum PackageFormat {
     Colpkg,
 }
 
-/// What an export covers (#71): the whole collection, one deck (by the
+/// What an export covers: the whole collection, one deck (by the
 /// deck-ref convention — name / numeric id / `#id`), or an explicit note set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportScope {
@@ -216,7 +215,7 @@ pub enum ExportScope {
     Notes(Vec<i64>),
 }
 
-/// One export request, resolved at the op layer (#71). The host has already
+/// One export request, resolved at the op layer. The host has already
 /// gated `out_path` (the path-safety check) before this reaches the store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportRequest {
@@ -235,7 +234,7 @@ pub struct ExportRequest {
     pub legacy: bool,
 }
 
-/// The export outcome (#71): notes written + the on-disk path the package
+/// The export outcome: notes written + the on-disk path the package
 /// landed at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportOutcome {
@@ -252,7 +251,7 @@ pub struct ExportOutcome {
 /// Scheduling is the KERNEL's: every call runs on its collection task-actor
 /// (FIFO by construction), so impls may block inside methods. The
 /// `release`/`ensure_open`/`reopen` trio is the cooperative idle-release
-/// lifecycle (#64); a store with no lock to share may no-op `release` and
+/// lifecycle; a store with no lock to share may no-op `release` and
 /// report `ensure_open` = false.
 pub trait Collection: Send + Sync {
     // ── lifecycle ────────────────────────────────────────────────────────
@@ -350,14 +349,14 @@ pub trait Collection: Send + Sync {
         note_ids: &[i64],
     ) -> NativeResult<Vec<(i64, String, String, String)>>;
     /// `(note_id, image_names)` for notes that reference images at all —
-    /// the recognition sweep's scoped read (#445).
+    /// the recognition sweep's scoped read.
     ///
     /// # Errors
     ///
     /// Returns an error if the read fails.
     fn note_image_refs(&self) -> NativeResult<Vec<(i64, Vec<String>)>>;
     /// `(note_id, sound_names)` for notes that reference `[sound:…]` audio at
-    /// all — the ASR recognition sweep's scoped read (#485), the audio twin of
+    /// all — the ASR recognition sweep's scoped read, the audio twin of
     /// [`Self::note_image_refs`].
     ///
     /// # Errors
@@ -443,7 +442,7 @@ pub trait Collection: Send + Sync {
     ) -> NativeResult<CollectionInfo>;
 
     // ── note writes ──────────────────────────────────────────────────────
-    /// Create one note under the #77 duplicate policy.
+    /// Create one note under the duplicate policy.
     ///
     /// # Errors
     ///
@@ -476,7 +475,7 @@ pub trait Collection: Send + Sync {
     ///
     /// Returns an error if the write fails.
     fn delete_notes(&self, note_ids: &[i64]) -> NativeResult<usize>;
-    /// Create or update notes in bulk under the #77 duplicate policy, with a
+    /// Create or update notes in bulk under the duplicate policy, with a
     /// per-item result union (one failure does not sink the batch).
     ///
     /// # Errors
@@ -490,7 +489,7 @@ pub trait Collection: Send + Sync {
         policy: DuplicatePolicy,
         dry_run: bool,
     ) -> NativeResult<Vec<UpsertNoteResult>>;
-    /// Import an `.apkg`/`.colpkg` package (#72). MUTATES the collection (bumps
+    /// Import an `.apkg`/`.colpkg` package. MUTATES the collection (bumps
     /// `col.mod`), so the kernel op MUST follow with a drift reconcile and MUST
     /// NOT advance the index watermark first. Returns per-bucket counts.
     ///
@@ -654,7 +653,7 @@ pub trait Collection: Send + Sync {
         data: &[u8],
         content_type: Option<&str>,
     ) -> NativeResult<StoreMediaResult>;
-    /// The write half of the kernel's re-homed store (#490): byte sources
+    /// The write half of the kernel's re-homed store: byte sources
     /// arrive prepared; `path` items run their gates here.
     ///
     /// # Errors
@@ -694,8 +693,8 @@ pub trait Collection: Send + Sync {
     ///
     /// Returns an error if the media check fails.
     fn media_check(&self) -> NativeResult<CollectionCheckResponse>;
-    /// The #89 cleanups; the removed-note-id list rides out of band for the
-    /// kernel's sidecar tail, never the wire.
+    /// The collection cleanups; the removed-note-id list rides out of band for
+    /// the kernel's sidecar tail, never the wire.
     ///
     /// # Errors
     ///
@@ -708,7 +707,7 @@ pub trait Collection: Send + Sync {
         unused_media: bool,
         dry_run: bool,
     ) -> NativeResult<(CollectionPruneResponse, Vec<i64>)>;
-    /// Export the collection (or a scope of it) to an Anki package (#71).
+    /// Export the collection (or a scope of it) to an Anki package.
     /// Read-only on the data; holds the collection for the package write, so
     /// the kernel runs it on the actor like every other op. The caller has
     /// already gated `out_path`.

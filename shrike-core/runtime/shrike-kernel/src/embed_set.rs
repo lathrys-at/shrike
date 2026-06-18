@@ -1,5 +1,5 @@
 //! The embed slot generalized from ONE service to an ordered SET of embedding
-//! spaces (#233, the multi-space substrate's foundation — #229).
+//! spaces (the multi-space substrate's foundation).
 //!
 //! Each [`EmbedSpace`] wraps an [`EmbedService`](crate::EmbedService) (the
 //! existing text-embedder-plus-optional-image-half) with its **space key**
@@ -8,11 +8,11 @@
 //! **role**: which note modalities it is PRIMARY for, and whether it is
 //! text-capable for query routing.
 //!
-//! This PR (#233) lands the **carrier + the routing metadata** only. The
+//! This carrier lands the **carrier + the routing metadata** only. The
 //! fan-out — index-narrow (note items → their per-modality primary space) and
-//! query-wide (a query → every text-capable space, RRF-fused) — is PR-B/C
-//! (#232/#234). The kernel's index/search paths still consume exactly ONE
-//! engine this PR ([`EmbedSpaces::primary`]), so with one declared embedder
+//! query-wide (a query → every text-capable space, RRF-fused) — is a later
+//! stage. The kernel's index/search paths still consume exactly ONE
+//! engine here ([`EmbedSpaces::primary`]), so with one declared embedder
 //! every on-disk artifact and fused ranking stays bit-identical to the
 //! single-slot era: single-space is the structurally-degenerate case of the
 //! general set, never a parallel branch.
@@ -41,7 +41,7 @@ impl EmbedSpace {
     /// Whether this space can embed a TEXT query — the query-routing flag.
     /// Every [`Embedder`](crate::Embedder) embeds text, so a text embedder is
     /// always text-capable; the flag exists as the explicit routing seam the
-    /// query fan-out reads in PR-C.
+    /// query fan-out reads.
     pub fn text_capable(&self) -> bool {
         true
     }
@@ -54,7 +54,7 @@ impl EmbedSpace {
     }
 }
 
-/// The ordered set of attached embedding spaces (#233).
+/// The ordered set of attached embedding spaces.
 ///
 /// Insertion-ordered, keyed by content fingerprint with replace-on-same-key
 /// (an existing key's slot is updated in place, preserving its position — a
@@ -105,7 +105,7 @@ impl EmbedSpaces {
     }
 
     /// The PRIMARY text space — the first text-capable space in insertion
-    /// order. This is the one engine the index/search paths consume this PR;
+    /// order. This is the one engine the index/search paths consume here;
     /// with one declared embedder it is the sole space (byte-identical to the
     /// single-slot `embed_service()`).
     pub fn primary(&self) -> Option<Arc<EmbedService>> {
@@ -116,7 +116,7 @@ impl EmbedSpaces {
     }
 
     /// The first image-capable space's service — the per-modality primary for
-    /// `image` (metadata only this PR; the index fan-out is PR-B).
+    /// `image` (metadata only here; the index fan-out is a later stage).
     pub fn primary_image(&self) -> Option<Arc<EmbedService>> {
         self.spaces
             .iter()
@@ -124,7 +124,7 @@ impl EmbedSpaces {
             .map(|s| Arc::clone(&s.service))
     }
 
-    /// The per-modality-PRIMARY text space as `(key, service)` (#232's write
+    /// The per-modality-PRIMARY text space as `(key, service)` (the write
     /// routing): the first text-capable space — the ONE space a note's text
     /// items are embedded into. `None` when no text-capable space is attached.
     pub fn text_primary_keyed(&self) -> Option<(Option<String>, Arc<EmbedService>)> {
@@ -134,7 +134,7 @@ impl EmbedSpaces {
             .map(|s| (s.key.clone(), Arc::clone(&s.service)))
     }
 
-    /// The per-modality-PRIMARY image space as `(key, service)` (#232's write
+    /// The per-modality-PRIMARY image space as `(key, service)` (the write
     /// routing): the first image-capable space — the ONE space a note's image
     /// items are embedded into (index-narrow: never every image-capable space).
     /// `None` when no image-capable space is attached (a text-only deployment).
@@ -146,14 +146,14 @@ impl EmbedSpaces {
     }
 
     /// The ordered set (services), for the query fan-out / status surfaces
-    /// (unused by the index path this PR).
+    /// (unused by the index path here).
     pub fn services(&self) -> Vec<Arc<EmbedService>> {
         self.spaces.iter().map(|s| Arc::clone(&s.service)).collect()
     }
 
     /// Every text-capable space's service in insertion order — what the query
-    /// fan-out (PR-C) embeds the query into; the index path does not use it
-    /// this PR.
+    /// fan-out embeds the query into; the index path does not use it
+    /// here.
     pub fn text_capable_services(&self) -> Vec<Arc<EmbedService>> {
         self.spaces
             .iter()
@@ -163,7 +163,7 @@ impl EmbedSpaces {
     }
 
     /// The SECONDARY text-capable spaces — every text-capable space AFTER the
-    /// primary (the first text-capable one) — as `(key, service)` pairs (#234).
+    /// primary (the first text-capable one) — as `(key, service)` pairs.
     /// The cross-space query fan-out embeds the query into each of these and
     /// searches its own index space (matched by `key`); the primary rides the
     /// existing single-engine path. A space with no key (`None`) is skipped — it

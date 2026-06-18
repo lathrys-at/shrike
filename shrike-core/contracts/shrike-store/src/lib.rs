@@ -1,19 +1,18 @@
-//! The store contract (#389) — the missing half of #342's plugin
-//! architecture. Engines (embed/recognize) became pluggable there; the
-//! kernel's STORES stayed concrete. These traits make the deployment ladder
-//! composition: a beefy server runs all-local impls, mobile (#226) runs local
+//! The store contract — the missing half of the plugin
+//! architecture. Engines (embed/recognize) are pluggable; this makes the
+//! kernel's STORES pluggable too. These traits make the deployment ladder
+//! composition: a beefy server runs all-local impls, mobile runs local
 //! stores + platform engines, a wasm thin client substitutes remote impls for
 //! stores it can't host.
 //!
-//! Slimmed in #706: the `Collection` trait + its vocabulary moved into
-//! `shrike-collection` (its sole implementer — homing the trait beside its only
-//! impl removes the edge a separate contract crate forced). What stays here are
-//! the two traits with *two* impl crates each over disjoint backends —
-//! [`VectorIndex`] (`shrike-index`) and [`DerivedStore`] (`shrike-derived`) —
-//! which therefore CANNOT live in either impl crate (the dependency points the
-//! other way). (The `MEDIA_MAX_BYTES` policy value moved to `shrike-media` in
-//! #711, now that both the collection write tail and the media fetch/decode
-//! caps depend on that crate.)
+//! The `Collection` trait + its vocabulary live in `shrike-collection` (its
+//! sole implementer — homing the trait beside its only impl removes the edge a
+//! separate contract crate forced). What stays here are the two traits with
+//! *two* impl crates each over disjoint backends — [`VectorIndex`]
+//! (`shrike-index`) and [`DerivedStore`] (`shrike-derived`) — which therefore
+//! CANNOT live in either impl crate (the dependency points the other way). (The
+//! `MEDIA_MAX_BYTES` policy value lives in `shrike-media`, since both the
+//! collection write tail and the media fetch/decode caps depend on that crate.)
 //!
 //! Shape rules (the engine contract's, restated for stores):
 //! - **Sync traits.** Scheduling is the KERNEL's concern — index/derived calls
@@ -49,7 +48,7 @@ pub type MatchRow = (i64, String, String, Option<String>, Option<String>);
 pub type LexicalRow = (i64, String, String, Option<String>);
 
 /// The per-modality vector store the kernel's index orchestration maintains
-/// and the search paths rank against (#201a's sub-index layout is the
+/// and the search paths rank against (the per-modality sub-index layout is the
 /// canonical impl: `shrike-index`'s usearch engine).
 ///
 /// `save`/`restore` speak directory paths — persistence is the impl's
@@ -62,7 +61,7 @@ pub trait VectorIndex: Send + Sync {
     fn ndim(&self) -> Option<usize>;
     /// Per-modality `(name, size)` vector counts.
     fn modality_sizes(&self) -> Vec<(String, usize)>;
-    /// Per-modality `(name, size, ndim)` — the status breakdown (#684). Unlike
+    /// Per-modality `(name, size, ndim)` — the status breakdown. Unlike
     /// [`modality_sizes`](Self::modality_sizes) it carries each sub-index's own
     /// dimensionality (text 768-dim, image 512-dim under CLIP), which the single
     /// top-level [`ndim`](Self::ndim) (the text modality's) can't express.
@@ -88,13 +87,13 @@ pub trait VectorIndex: Send + Sync {
     fn restore(&self, dir: &str, candidates: Option<&[i64]>) -> bool;
     /// Persist state under `dir`.
     ///
-    /// **`save` must not block `search`** (#588): a save runs on the kernel's
+    /// **`save` must not block `search`**: a save runs on the kernel's
     /// blocking pool concurrently with the search paths (the debounced/burst
     /// flush every 60s/100 changes, and `close()`), so an impl must not hold a
     /// lock across its on-disk write that `search_by_modality` also needs —
     /// otherwise every concurrent search stalls for the full save window. An
     /// impl with internal mutation locking should snapshot/serialize under the
-    /// lock and write outside it (the #445 "never hold a lock across file
+    /// lock and write outside it (the "never hold a lock across file
     /// writes" rule).
     ///
     /// # Errors
@@ -112,14 +111,14 @@ pub trait VectorIndex: Send + Sync {
     /// number of vectors REMOVED from the text modality (the note count —
     /// one text vector per note). NOT the number remaining: the canonical
     /// impl and the kernel consumer both read this as the removed count, and
-    /// the kernel reports it as such (#608).
+    /// the kernel reports it as such.
     ///
     /// # Errors
     ///
     /// Returns an error if the backend rejects the removal.
     fn remove(&self, keys: &[i64]) -> NativeResult<usize>;
     /// Rank each query against each (selected) modality separately — the
-    /// per-modality RRF signals (#201a).
+    /// per-modality RRF signals.
     ///
     /// # Errors
     ///
@@ -146,7 +145,7 @@ pub trait VectorIndex: Send + Sync {
     /// Dot products of `query` against the listed keys' vectors in one
     /// modality (the tag-centroid scorer's read).
     fn dot_scores(&self, modality: &str, keys: &[i64], query: &[f32]) -> Vec<(i64, f32)>;
-    /// The intra-modal activation calibration (#201b): sample stored text
+    /// The intra-modal activation calibration: sample stored text
     /// vectors as pseudo-queries against each non-text modality.
     ///
     /// # Errors
@@ -161,7 +160,7 @@ pub trait VectorIndex: Send + Sync {
     ) -> NativeResult<ActivationStats>;
 }
 
-/// The derived-text store (#98) — the FTS5 trigram sidecar's contract:
+/// The derived-text store — the FTS5 trigram sidecar's contract:
 /// `(note_id, source, ref)`-keyed rows backing the lexical search signals,
 /// plus the recognition bookkeeping (segments, below-gate markers, the
 /// fingerprint meta) and the `col_mod` watermark.
@@ -184,7 +183,7 @@ pub trait DerivedStore: Send + Sync {
         source: &str,
         refs_text: &[(String, String)],
     ) -> NativeResult<()>;
-    /// One transaction over many notes (#445): the batch ingest.
+    /// One transaction over many notes: the batch ingest.
     ///
     /// # Errors
     ///
@@ -206,7 +205,7 @@ pub trait DerivedStore: Send + Sync {
     /// The stored drift watermark (the `col.mod` the store was last reconciled
     /// to), or `None` before the first build.
     fn get_col_mod(&self) -> Option<i64>;
-    /// Stamp the drift watermark. INVARIANT (#585): set `value` ONLY after the
+    /// Stamp the drift watermark. INVARIANT: set `value` ONLY after the
     /// rows for every write up to `value`'s `col.mod` are durably committed —
     /// the watermark is the sole drift signal, so over-stamping it silently
     /// hides an un-ingested note from substring/fuzzy search forever. A
@@ -251,7 +250,7 @@ pub trait DerivedStore: Send + Sync {
         source: &str,
         note_ids: &[i64],
     ) -> NativeResult<Vec<(i64, String, String)>>;
-    /// Below-gate markers (#416): judged-once bookkeeping for items the
+    /// Below-gate markers: judged-once bookkeeping for items the
     /// recognition gate dropped.
     ///
     /// # Errors
@@ -270,8 +269,8 @@ pub trait DerivedStore: Send + Sync {
     ///
     /// Returns an error if the delete fails.
     fn clear_gated(&self, source: &str) -> NativeResult<()>;
-    /// Per-segment recognition structure (#228), JSON per (note, ref). The
-    /// read half has no production caller yet — seamed for #230 (occlusion),
+    /// Per-segment recognition structure, JSON per (note, ref). The
+    /// read half has no production caller yet — seamed for occlusion,
     /// which reads the boxes back.
     ///
     /// # Errors
@@ -297,7 +296,7 @@ pub trait DerivedStore: Send + Sync {
     ) -> NativeResult<Option<String>>;
     /// Raw FTS5 MATCH (the expression is the impl's syntax), scoped.
     /// `exclude_sources` drops rows whose `source` is in the set BEFORE
-    /// ranking/limiting (#485): a VectorOnly recognition source (VLM
+    /// ranking/limiting: a VectorOnly recognition source (VLM
     /// describe) is stored for provenance + reconcile but must never surface
     /// on a lexical query — an empty slice is the historical behaviour.
     ///
@@ -314,7 +313,7 @@ pub trait DerivedStore: Send + Sync {
     ) -> NativeResult<Vec<MatchRow>>;
     /// Fast substring candidates; `None` = the query can't be served (too
     /// short for the tokenizer) and the caller falls back. `exclude_sources`
-    /// hides VectorOnly sources (#485) — see [`Self::match_rows`].
+    /// hides VectorOnly sources — see [`Self::match_rows`].
     ///
     /// # Errors
     ///
@@ -326,8 +325,8 @@ pub trait DerivedStore: Send + Sync {
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
     ) -> NativeResult<Option<Vec<LexicalRow>>>;
-    /// Trigram/typo ranking — the `fuzzy` RRF signal (#98). `exclude_sources`
-    /// hides VectorOnly sources (#485) — see [`Self::match_rows`].
+    /// Trigram/typo ranking — the `fuzzy` RRF signal. `exclude_sources`
+    /// hides VectorOnly sources — see [`Self::match_rows`].
     ///
     /// # Errors
     ///

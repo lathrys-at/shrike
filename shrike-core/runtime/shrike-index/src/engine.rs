@@ -1,12 +1,11 @@
-//! The native index engine (#273): per-modality usearch sub-indexes behind the
-//! frozen `IndexEngine` surface (#267).
+//! The native index engine: per-modality usearch sub-indexes behind the
+//! frozen `IndexEngine` surface.
 //!
 //! Implements exactly what `shrike.index_engine.UsearchIndexEngine` does —
 //! per-modality sub-index files (`index.usearch` / `index.<m>.usearch`),
 //! max-sim-per-note dedup, the empty-index phantom-hit guard (inert under this
 //! binding, kept as part of the frozen contract), stale-file deletion on save,
-//! and the #201b activation calibration — instance-per-space, no global state
-//! (#232's multi-space manager is "make N engines").
+//! and the activation calibration — instance-per-space, no global state.
 //!
 //! One binding gap shapes this module: usearch's Rust crate (2.25.3) exposes
 //! no key-enumeration API (the Python binding's `Index.keys`), so the engine
@@ -30,13 +29,13 @@ use crate::new_index;
 /// Mirrors `shrike.index_engine.SEARCH_OVERFETCH`.
 const SEARCH_OVERFETCH: usize = 4;
 
-// Canonical docs live in shrike-store (#389); re-exported here so the
-// pre-trait import paths keep working.
+// Canonical docs live in shrike-store; re-exported here so the older
+// import paths keep working.
 pub use shrike_store::{ActivationStats, ModalityRanking};
 
 struct Sub {
     /// `Arc` so [`MultiModalIndex::save`] can clone a cheap handle under the
-    /// state lock and serialize+write it *outside* the lock (#588). usearch's
+    /// state lock and serialize+write it *outside* the lock. usearch's
     /// `Index` is `Send + Sync` with its own internal locking; the
     /// `save_mutation` guard excludes the in-place mutators
     /// ([`add`](MultiModalIndex::add)/[`remove`](MultiModalIndex::remove)) for
@@ -68,7 +67,7 @@ struct State {
 }
 
 /// The per-modality USearch vector store: a text sub-index plus one
-/// sub-index per non-text modality (the #201a layout), each ranked separately.
+/// sub-index per non-text modality, each ranked separately.
 pub struct MultiModalIndex {
     /// Known modalities in load order (TEXT first — it keeps the original
     /// index.usearch filename). Mirrors `_INDEX_MODALITIES`.
@@ -77,7 +76,7 @@ pub struct MultiModalIndex {
     state: Mutex<State>,
     /// Serializes [`save`](Self::save) against the in-place byte mutators
     /// ([`add`](Self::add)/[`remove`](Self::remove)) **without** gating
-    /// [`search_by_modality`](Self::search_by_modality) (#588). `save` clones a
+    /// [`search_by_modality`](Self::search_by_modality). `save` clones a
     /// cheap `Arc` to each sub-index under the `state` lock, releases that lock,
     /// then serializes+writes the file while holding only this guard — so a
     /// concurrent search (which takes only the `state` lock) is never blocked
@@ -106,8 +105,8 @@ fn ensure_capacity(index: &Index, extra: usize) -> NativeResult<()> {
     let needed = index.size() + extra;
     if needed > index.capacity() {
         // Grow 1.5× (or straight to the request when larger): amortizes like
-        // the old next_power_of_two doubling without over-allocating up to
-        // ~2× a large collection's footprint on the last step (#382).
+        // next_power_of_two doubling without over-allocating up to
+        // ~2× a large collection's footprint on the last step.
         let target = needed.max(index.capacity() + index.capacity() / 2).max(64);
         index
             .reserve(target)
@@ -167,7 +166,7 @@ impl MultiModalIndex {
             .collect()
     }
 
-    /// Per-modality `(name, size, ndim)` (#684): each sub-index reports its OWN
+    /// Per-modality `(name, size, ndim)`: each sub-index reports its OWN
     /// dimensionality (the text and image sub-indexes differ under CLIP). `ndim`
     /// is `None` for an empty sub-index (usearch reports 0 dimensions before the
     /// first vector sets the width; surface that as "unknown", not 0).
@@ -284,9 +283,9 @@ impl MultiModalIndex {
     /// Each file lands atomically: usearch's `save` truncates in place, so it
     /// writes a same-directory `.tmp` first and a rename replaces the
     /// canonical file — a crash mid-save leaves the old file complete, never
-    /// a truncation (#381).
+    /// a truncation.
     ///
-    /// **The state lock is NOT held across the file write (#588, the #445
+    /// **The state lock is NOT held across the file write (the
     /// "never hold a lock across file writes" rule one layer below
     /// `IndexOrchestrator::save`).** Under the `state` lock we only snapshot a
     /// cheap `Arc` handle to each sub-index (plus the loaded-modality set); the
@@ -311,7 +310,7 @@ impl MultiModalIndex {
     pub fn save(&self, dir: &str) -> NativeResult<()> {
         // Exclude the in-place byte mutators for the whole serialize+write, but
         // not searches (which take only the `state` lock). Taken before the
-        // `state` lock to keep a single lock order (#588).
+        // `state` lock to keep a single lock order.
         let _mutation = self.lock_save_mutation();
         let base = Path::new(dir);
         std::fs::create_dir_all(base)
@@ -375,7 +374,7 @@ impl MultiModalIndex {
             return Ok(());
         }
         let ndim = vectors[0].len();
-        // Exclude a concurrent save's serialization read of this Index (#588).
+        // Exclude a concurrent save's serialization read of this Index.
         let _mutation = self.lock_save_mutation();
         let mut state = self.lock();
         if !state.indexes.contains_key(modality) {
@@ -402,7 +401,7 @@ impl MultiModalIndex {
     ///
     /// Returns an error if the backend rejects a removal.
     pub fn remove(&self, keys: &[i64]) -> NativeResult<usize> {
-        // Exclude a concurrent save's serialization read of this Index (#588).
+        // Exclude a concurrent save's serialization read of this Index.
         let _mutation = self.lock_save_mutation();
         let mut state = self.lock();
         if keys.is_empty() || state.indexes.is_empty() {
@@ -454,12 +453,12 @@ impl MultiModalIndex {
             }
             // Also subsumes the Python binding's empty-index phantom-(0, 0)
             // guard: an empty sub-index never reaches the hit loop, so no
-            // per-hit phantom check is needed (frozen-contract parity, #382).
+            // per-hit phantom check is needed (frozen-contract parity).
             if sub.index.size() == 0 {
                 continue;
             }
-            // Clamp the over-fetch to what THIS sub-index can actually return
-            // (#684/#685): usearch's `search(query, count)` reserves AND
+            // Clamp the over-fetch to what THIS sub-index can actually return:
+            // usearch's `search(query, count)` reserves AND
             // zero-fills `count` result slots up front (lib.cpp search_) before
             // the graph walk, so an unclamped `fetch` allocates work proportional
             // to `count`, not to the hits. With `limit=0` the caller sets
@@ -541,7 +540,7 @@ impl MultiModalIndex {
     }
 
     /// Dot-score each key's FIRST stored vector against `query` in one lock
-    /// hold (#445): the tag expansion previously paid a mutex acquire plus a
+    /// hold: the tag expansion otherwise pays a mutex acquire plus a
     /// full per-vector heap clone per member via `modality_get`. Each key's
     /// vectors are read into one reused buffer and only `(key, dot)` pairs
     /// come back; missing keys are skipped, a query/ndim mismatch returns
@@ -591,7 +590,7 @@ impl MultiModalIndex {
         let mut buf = vec![0.0f32; count * ndim];
         let copied = index.get(key, &mut buf).ok()?;
         // count() sized the buffer; a short read would mean the index
-        // mutated under us (the lock forbids it) or a usearch bug (#382).
+        // mutated under us (the lock forbids it) or a usearch bug.
         debug_assert_eq!(
             copied, count,
             "usearch get returned fewer vectors than count"
@@ -603,11 +602,11 @@ impl MultiModalIndex {
         )
     }
 
-    /// Per-(non-text-)modality best-match stats for the activation gate
-    /// (#201b): sample stored text vectors as pseudo-queries (deterministic),
+    /// Per-(non-text-)modality best-match stats for the activation gate:
+    /// sample stored text vectors as pseudo-queries (deterministic),
     /// search each non-text modality, record the best non-self match.
     ///
-    /// Lock discipline (#395): the sample keys and their query vectors are
+    /// Lock discipline: the sample keys and their query vectors are
     /// snapshotted under ONE short hold, then each search takes its own brief
     /// hold — so a calibration over hundreds of samples never stalls the
     /// whole index behind a single multi-hundred-millisecond lock. Fully
@@ -647,7 +646,7 @@ impl MultiModalIndex {
 
             // Deterministic sample: a PARTIAL LCG Fisher-Yates over the
             // sorted keys — only the first `sample_size` slots are drawn, so
-            // a large collection isn't fully shuffled to take 256 (#395).
+            // a large collection isn't fully shuffled to take 256.
             // Stable across runs of this engine; deliberately NOT numpy's
             // sampler — the stats are statistical, never byte-pinned.
             let mut keys: Vec<i64> = text_sub.counts.keys().copied().collect();
@@ -718,7 +717,7 @@ impl MultiModalIndex {
     }
 }
 
-/// The store contract (#389): every method forwards to the inherent impl, so
+/// The store contract: every method forwards to the inherent impl, so
 /// the concrete engine keeps its full API while the kernel consumes
 /// `Arc<dyn VectorIndex>`.
 impl shrike_store::VectorIndex for MultiModalIndex {
@@ -849,7 +848,7 @@ mod tests {
 
     #[test]
     fn search_k_far_exceeding_size_is_lossless_and_bounded() {
-        // The `limit=0` over-fetch path (#684/#685): the caller passes
+        // The `limit=0` over-fetch path: the caller passes
         // `k = index.size`, the engine over-fetches `SEARCH_OVERFETCH * k`, and
         // the per-sub-index clamp keeps usearch's `search(query, count)` from
         // reserving+zero-filling a buffer far larger than the sub-index. A `k`
@@ -989,7 +988,7 @@ mod tests {
 
     #[test]
     fn calibration_survives_self_hit_heavy_samples() {
-        // #446: every note's image vector IS its text vector, so each
+        // Every note's image vector IS its text vector, so each
         // pseudo-query's nearest image hit is its own note. At k=1 the
         // self-hit exclusion then records nothing — the sample silently
         // shrinks to zero and the gate disables. k=2 (the kernel's CALIB_K)

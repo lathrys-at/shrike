@@ -1,16 +1,15 @@
-//! Rust collection core over anki's protobuf service layer (#278, slice 1).
+//! Rust collection core over anki's protobuf service layer.
 //!
-//! Slice-1 architecture (this crate is PR 1 of the slice's series):
+//! Architecture:
 //!
 //! - **`adapter`** — the ONE anki-coupled module. Everything reaches anki
 //!   through `Backend::run_service_method` / `run_db_command_bytes` (the exact
 //!   rsbridge surface pylib binds) with `anki_proto` messages — never the bare
-//!   crate API (#277 verdict review, binding). Tag bumps are churn here only.
+//!   crate API (binding). Tag bumps are churn here only.
 //! - **`CollectionCore`** (below) — Shrike's op layer, written against the
-//!   adapter. This PR carries the vertical slice: open/close, the `col.mod`
+//!   adapter. It carries the vertical slice: open/close, the `col.mod`
 //!   watermark, the full search grammar, note read/create/update/delete, and
-//!   the #77 duplicate policy on create. Later PRs in the series extend the op
-//!   inventory (tracked on #278); the **wholesale facade cutover stays off**
+//!   the duplicate policy on create. The **wholesale facade cutover stays off**
 //!   until coverage is complete — the hard safety rule (never co-manage one
 //!   collection from two cores in a process) forbids per-op fallback, so the
 //!   core is reachable only through the parity harness until then.
@@ -38,21 +37,21 @@ pub use embed_text::{extract_image_refs, extract_sound_refs, EMBED_TEXT_VERSION}
 use shrike_error::{NativeError, NativeResult};
 
 // The collection contract — the `Collection` trait + its vocabulary — lives in
-// this crate (#706, rehomed from the store-contract crate beside its sole impl).
+// this crate (homed beside its sole impl).
 pub use contract::{
     Collection, CreateOutcome, DuplicatePolicy, ExportOutcome, ExportRequest, ExportScope,
     ImportOptions, ImportSummary, ImportUpdateCondition, OwnedFieldRow, PackageFormat,
     PreparedMedia, PreparedMediaSource, ServiceNote,
 };
 
-/// Shrike's collection core, slice-1 vertical. One instance owns one open
+/// Shrike's collection core. One instance owns one open
 /// collection (instance-per-collection, no global state), mirroring the
 /// CollectionWrapper lifecycle it will eventually back.
 pub struct CollectionCore {
     adapter: ServiceAdapter,
     collection_path: String,
     media_dir: String,
-    /// Cooperative idle-release state (#64): set by `release`, cleared by
+    /// Cooperative idle-release state: set by `release`, cleared by
     /// `reopen` — `ensure_open` re-acquires on demand so an op that lands
     /// while released self-heals instead of erroring CollectionNotOpen.
     released: std::sync::atomic::AtomicBool,
@@ -91,7 +90,7 @@ impl CollectionCore {
         self.adapter.close_collection()
     }
 
-    /// Release the collection (cooperative idle-release, #64): close, keeping
+    /// Release the collection (cooperative idle-release): close, keeping
     /// the instance reusable via [`reopen`]. Already-closed is a no-op.
     ///
     /// # Errors
@@ -121,7 +120,7 @@ impl CollectionCore {
         Ok(true)
     }
 
-    /// Re-acquire after a release (#64/#79). The file opened fine at boot, so
+    /// Re-acquire after a release. The file opened fine at boot, so
     /// a failure here is overwhelmingly lock contention (another process —
     /// usually Anki desktop — holds it), not corruption: it surfaces as the
     /// BUSY tier, mirroring the Python wrapper's contextual classification.
@@ -222,7 +221,7 @@ impl CollectionCore {
         self.adapter.get_note(note_id)
     }
 
-    /// Create a note under the #77 policy: Anki's own `fields_check` runs
+    /// Create a note under the duplicate policy: Anki's own `fields_check` runs
     /// first; structural problems (empty first field, broken cloze) are always
     /// errors, a first-field duplicate is governed by `policy`.
     ///
@@ -335,11 +334,11 @@ impl CollectionCore {
     }
 }
 
-/// The store contract impl (#389): every method forwards to the inherent impl,
+/// The store contract impl: every method forwards to the inherent impl,
 /// so the concrete core keeps its full API while the kernel and the host
 /// bindings consume `dyn Collection`. (The trait itself lives in
 /// [`crate::contract`]; this is the impl-only module — named distinctly so the
-/// two don't collide, #706.)
+/// two don't collide.)
 #[allow(clippy::use_self)]
 mod contract_impl {
     use super::{CollectionCore, CreateOutcome, DuplicatePolicy, NativeResult};
@@ -680,7 +679,7 @@ mod tests {
     use super::*;
 
     /// Test shim: drive the typed upsert with a JSON literal, assert on the
-    /// serialized results (the pre-#391 call shape the assertions were
+    /// serialized results (the older call shape the assertions were
     /// written against).
     fn upsert_json(
         core: &CollectionCore,
@@ -694,7 +693,7 @@ mod tests {
         serde_json::to_value(&results).unwrap()
     }
 
-    /// The deck counterpart (#391): JSON literals in, the typed op's
+    /// The deck counterpart: JSON literals in, the typed op's
     /// serialized results out, keeping the pre-typed assertions verbatim.
     fn upsert_decks_json(core: &CollectionCore, decks_json: &str) -> serde_json::Value {
         let decks: Vec<shrike_schemas::DeckInput> = serde_json::from_str(decks_json).unwrap();
@@ -702,7 +701,7 @@ mod tests {
         serde_json::to_value(&results).unwrap()
     }
 
-    /// The note-type counterparts (#391): JSON literals in, the typed ops'
+    /// The note-type counterparts: JSON literals in, the typed ops'
     /// serialized results out, keeping the pre-typed assertions verbatim.
     fn note_types_json(core: &CollectionCore, json_str: &str) -> serde_json::Value {
         let inputs: Vec<shrike_schemas::NoteTypeInput> = serde_json::from_str(json_str).unwrap();
@@ -879,11 +878,11 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    /// #589 (S8b-1): an update whose deck ref resolves to no deck must report
-    /// an error WITHOUT having written the fields. The old order committed the
-    /// fields/tags via update_note and only THEN resolved the deck, so a bad
-    /// `#id` ref half-wrote the note (and bumped col.mod) — create_note_named
-    /// resolves the deck before its write, and update_note_named now mirrors it.
+    /// An update whose deck ref resolves to no deck must report
+    /// an error WITHOUT having written the fields. Resolving the deck after the
+    /// write would half-write the note (and bump col.mod) on a bad `#id` ref —
+    /// create_note_named resolves the deck before its write, and
+    /// update_note_named mirrors it.
     #[test]
     fn s8b_update_bad_deck_half_writes_fields() {
         let (core, dir) = temp_core();
@@ -974,8 +973,8 @@ mod tests {
         assert_eq!(rows[0].1, "field");
         assert_eq!(rows[0].2, "Front");
 
-        // list_notes: tag filter, full fields, wire shape (typed since #391
-        // phase 2; asserted through the host-edge wire view — plain serde).
+        // list_notes: tag filter, full fields, wire shape (typed;
+        // asserted through the host-edge wire view — plain serde).
         let listed = serde_json::to_value(
             core.list_notes(None, None, Some(&["bio".into()]), None, None, true, 50)
                 .unwrap(),
@@ -1050,7 +1049,7 @@ mod tests {
 
     #[test]
     fn read_wire_is_plain_serde_with_explicit_nulls() {
-        // #391 phase 2 (the to_wire retirement): ONE wire convention — plain
+        // ONE wire convention — plain
         // serde of the schema types, where an unset `Option` is an explicit
         // `null`, never a pruned key (the Pydantic shape the schema contract
         // test pins). Shape-level, deliberately not byte-level: every
@@ -1113,7 +1112,7 @@ mod tests {
     fn note_types_round_trip() {
         // Step-4 tripwires (the legacy schema11 RPCs) + the ported note-type
         // ops, against a real temp collection — including the data-safety
-        // property the #76/#99 history demands: note data survives renames
+        // property: note data survives renames
         // and identity-based moves.
         let (core, dir) = temp_core();
 
@@ -1261,7 +1260,7 @@ mod tests {
 
     #[test]
     fn note_type_results_wire_shape() {
-        // Pin the host-parsed wire of the typed note-type returns (#391):
+        // Pin the host-parsed wire of the typed note-type returns:
         // status tags and field names exactly as the Pydantic models expect.
         use shrike_schemas::{
             DeleteNoteTypeResult, FindReplaceNoteTypesResponse, MigrateNoteTypeResponse,
@@ -1498,7 +1497,7 @@ mod tests {
 
         // store_prepared_media: per-item errors never sink the batch (the
         // sequential prepare lives at the binding edge over the kernel's
-        // shared prepare since #389 B2 — a Failed slot is already an error).
+        // shared prepare — a Failed slot is already an error).
         let prepared = vec![
             PreparedMedia {
                 index: 0,
@@ -1533,7 +1532,7 @@ mod tests {
 
     #[test]
     fn export_writes_through_a_planted_basename_symlink_safely() {
-        // Shared-host hazard (#71 security): another user plants a symlink at
+        // Shared-host hazard: another user plants a symlink at
         // the export basename pointing OUTSIDE the root. The temp+atomic-rename
         // write must REPLACE that symlink with the real package, never follow
         // it (which would redirect the operator-privileged write to the target).
@@ -1597,7 +1596,7 @@ mod tests {
 
     #[test]
     fn export_does_not_write_through_a_pre_planted_temp_dir_name() {
-        // The #71 review hazard: the package's write target must not be a path
+        // The review hazard: the package's write target must not be a path
         // an attacker can pre-create. The export mkdtemp's a securely-random,
         // EXCLUSIVELY-created subdir in the parent — so even a pre-planted entry
         // can't be the write target. Verify the package lands at the requested
@@ -1666,7 +1665,7 @@ mod tests {
 
     #[test]
     fn busy_surface_release_reopen() {
-        // The #64/#65 contention story: a second holder makes reopen BUSY;
+        // The contention story: a second holder makes reopen BUSY;
         // releasing hands the lock over; reopening after the holder leaves
         // succeeds. (The second core never successfully co-manages the
         // collection — it exists to HOLD the lock, which is the scenario the
@@ -1713,7 +1712,7 @@ mod tests {
         let (core, dir) = temp_core();
 
         // Named-fields upsert: create (auto-creating a nested deck), with
-        // the #77 policy + reason vocabulary.
+        // the duplicate policy + reason vocabulary.
         let batch = serde_json::json!([
             {"note_type": "Basic", "deck": "Science::Physics",
              "fields": {"Front": "alpha", "Back": "beta"}, "tags": ["t1"]},
@@ -1864,7 +1863,7 @@ mod tests {
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
-    /// #394 (interim gate): every hand-transcribed `(service, method)` index
+    /// The interim gate: every hand-transcribed `(service, method)` index
     /// in adapter.rs must be EXERCISED against a real collection — a bumped
     /// anki whose dispatcher reordered would shift indices silently if any
     /// constant escaped its tripwire. The test self-scans the constants from
@@ -2044,7 +2043,7 @@ mod tests {
         core.delete_media(&["drive.png".to_string()]).unwrap();
         core.prune(true, true, true, true, false).unwrap();
 
-        // Export (#71): a scoped .apkg (ExportAnkiPackage) and a whole-
+        // Export: a scoped .apkg (ExportAnkiPackage) and a whole-
         // collection .colpkg (ExportCollectionPackage) — so both export
         // method constants dispatch. The colpkg consumes+reopens the
         // collection internally, so it goes last; the apkg leaves it open.
@@ -2057,7 +2056,7 @@ mod tests {
             legacy: false,
         })
         .unwrap();
-        // Import (#72): dispatch the import RPC so its method constant is
+        // Import: dispatch the import RPC so its method constant is
         // covered. A nonexistent package errors AFTER the dispatch is recorded
         // (record_dispatch precedes run_service_method in `call`), so the
         // tripwire is satisfied; real import correctness is covered end-to-end

@@ -1,5 +1,5 @@
-//! Empirical batch-safety self-check for embedding engines (#342 P4, the
-//! Rust port of `shrike/embed_batching.py` — shared engine policy, so every
+//! Empirical batch-safety self-check for embedding engines (mirrors
+//! `shrike/embed_batching.py` — shared engine policy, so every
 //! host composes batch policy the same way).
 //!
 //! Some engines produce a *different* vector for a text depending on what
@@ -150,7 +150,7 @@ fn owned_texts() -> Vec<String> {
     BATCH_PROBE_TEXTS.iter().map(|s| s.to_string()).collect()
 }
 
-// ── vision probe set (#211) ──────────────────────────────────────────────────
+// ── vision probe set ─────────────────────────────────────────────────────────
 //
 // The image analogue of `BATCH_PROBE_TEXTS`. int8 vision graphs drift under
 // batching for the same reason text ones do — a per-tensor activation scale
@@ -365,7 +365,7 @@ pub fn max_probe_drift<E: EmbedText + ?Sized>(engine: &E) -> NativeResult<f64> {
     Ok(drift(&reference, &batched))
 }
 
-// ── the vision probe (#211) ──────────────────────────────────────────────────
+// ── the vision probe ─────────────────────────────────────────────────────────
 
 /// The image analogue of [`probe_max_safe_batch`]: the batch size proven safe
 /// for the *vision* path, or 1 (embed serially). Same tolerance discipline,
@@ -520,7 +520,7 @@ mod tests {
         batch_variant: bool,
         /// Emit `NaN` for every element of a *batched* embed — the int8
         /// magnitude-extreme failure mode. Serial stays finite, so the model
-        /// is batch-variant and must probe to serial (#587).
+        /// is batch-variant and must probe to serial.
         nan_batched: bool,
         fail_serial: bool,
         fail_batched: bool,
@@ -586,16 +586,16 @@ mod tests {
 
     /// A model whose batched embed produces `NaN` (the int8 magnitude-extreme
     /// failure mode) is batch-**variant** and must probe to serial. Regression
-    /// guard for #587: `drift`'s old `max.max((finite - NaN).abs())` swallowed
+    /// guard: a `max.max((finite - NaN).abs())` would swallow
     /// the `NaN` (Rust `f64::max` returns the non-`NaN` operand), so the model
-    /// was declared safe (`safe_batch = 64`) → a note's vector became
+    /// would be declared safe (`safe_batch = 64`) → a note's vector becomes
     /// batch-dependent → reconcile (small chunks) ≠ rebuild (64-chunks).
     #[test]
     fn nan_batched_engine_probes_to_serial() {
-        // The floating-point facts the old code tripped on (#587): the diff
+        // The floating-point facts a naive max would trip on: the diff
         // against a NaN is NaN, and `f64::max` discards a NaN operand — so the
-        // running `max` stayed 0.0 (≤ BATCH_DRIFT_TOL, i.e. "safe"), silently
-        // dropping the drift.
+        // running `max` would stay 0.0 (≤ BATCH_DRIFT_TOL, i.e. "safe"),
+        // silently dropping the drift.
         assert!((1.0_f64 - f64::NAN).abs().is_nan());
         assert_eq!(0.0_f64.max(f64::NAN), 0.0);
 
@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(probe_max_safe_batch(&toy).unwrap(), 1);
     }
 
-    // ── vision probe (#211) ──────────────────────────────────────────────
+    // ── vision probe ─────────────────────────────────────────────────────
 
     /// The image analogue of [`Toy`]: per-image vectors keyed by byte length
     /// (the probe images differ, so serial vectors differ), optionally
@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn image_probe_set_matches_the_text_ceiling() {
         // Sized to the text set so a uniform-safe pair's min(text, vision)
-        // doesn't lower the batch (#211).
+        // doesn't lower the batch.
         assert_eq!(IMAGE_PROBE_COUNT, BATCH_PROBE_TEXTS.len());
         assert_eq!(batch_probe_images().len(), IMAGE_PROBE_COUNT);
     }

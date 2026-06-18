@@ -1,4 +1,4 @@
-//! The watermark over-certification guard (#585/#590).
+//! The watermark over-certification guard.
 //!
 //! The index and derived watermarks (`col_mod`) are the *only* drift signal:
 //! `check_drift`/`rebuild_derived` reconcile iff `stored_watermark !=
@@ -14,9 +14,9 @@
 //!    concurrent op B's write-job can interleave between op A's write-job and op
 //!    A's advance, so by the time op A advances, `live col.mod` already reflects
 //!    B's not-yet-indexed write. Reading the *live* `col.mod` at advance time
-//!    (the pre-#585 bug) stamps B's write as certified.
+//!    (the older bug) stamps B's write as certified.
 //! 2. **A tail can fail after the collection write committed** (embed backend
-//!    down, transient index/ingest error — #590). The note is in the collection
+//!    down, transient index/ingest error). The note is in the collection
 //!    but absent from the index/FTS5; the watermark must be left behind so boot
 //!    drift heals it.
 //!
@@ -25,7 +25,7 @@
 //! completion advance the watermark to the captured value ONLY IF
 //!
 //! - this op's tail SUCCEEDED (a failed/partial tail leaves the watermark
-//!   behind — #590), AND
+//!   behind), AND
 //! - no other still-in-flight write has a captured `col.mod ≤ V` (an earlier or
 //!   concurrent write that hasn't been indexed yet must not be certified by us),
 //!   AND
@@ -168,7 +168,7 @@ impl WatermarkTracker {
     /// job that read `col_mod` (the tracker is held by an `Arc` so it can be
     /// cloned into the job closure) — the actor's FIFO is what orders
     /// registration with concurrent writes (see the module docs). A post-await
-    /// continuation call is unordered and reintroduces the #585 race.
+    /// continuation call is unordered and reintroduces the race.
     ///
     /// # Panics
     ///
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn an_earlier_inflight_write_blocks_a_later_completion() {
-        // The #585 interleave: op B writes col.mod 100 (parks, in flight); op A
+        // The interleave: op B writes col.mod 100 (parks, in flight); op A
         // writes col.mod 200 and completes FIRST. A must NOT certify 200,
         // because B's 100 ≤ 200 is still un-indexed.
         let t = WatermarkTracker::default();
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn an_earlier_failure_poisons_until_a_reconcile_clears_it() {
-        // The #585 keystone: B (col.mod 100) FAILS its tail → its note is
+        // The keystone: B (col.mod 100) FAILS its tail → its note is
         // genuinely un-indexed. A (200) completing AFTER must NOT certify 200,
         // or B's note is lost forever (watermark == live col.mod → drift quiet).
         let t = WatermarkTracker::default();
@@ -354,8 +354,8 @@ mod tests {
         );
     }
 
-    // ── Cross-review guards (#588 peer review): seams that, if they regressed,
-    // would silently re-open the #585 silent-loss bug. Pure tracker-level, like
+    // ── Cross-review guards: seams that, if they regressed,
+    // would silently re-open the silent-loss bug. Pure tracker-level, like
     // the rest of this module.
 
     /// (a') A later SUCCESS cannot jump a poison left by an EARLIER FAILURE. The

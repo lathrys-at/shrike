@@ -1,7 +1,6 @@
-//! Reciprocal Rank Fusion — the kernel's fusion stage (#274, moved here in
-//! #380 so the kernel stopped naming shrike-compute, whose other half dragged
-//! the whole ort engine stack into the link; the crate itself dissolved in
-//! #443).
+//! Reciprocal Rank Fusion — the kernel's fusion stage (moved here so the
+//! kernel stopped naming shrike-compute, whose other half dragged the whole
+//! ort engine stack into the link; the crate itself has since dissolved).
 //!
 //! [`rrf_fuse`] is a byte-faithful port of `shrike/search_fusion.py` (the
 //! frozen reference spec): same canonical sorted-signal accumulation order
@@ -19,7 +18,7 @@ pub const RRF_K: i64 = 60;
 /// blindness to magnitude is wrong — see `search_fusion.py`).
 pub const PRIORITY_SIGNAL: &str = "exact";
 
-/// The CANONICAL per-signal RRF weights for fused search (#388): `fuzzy`
+/// The CANONICAL per-signal RRF weights for fused search: `fuzzy`
 /// below the rest — a near-miss is weaker evidence than a literal or
 /// semantic hit. The single source of truth; the action defaults to these
 /// when the host passes none (the host parameter stays as an override
@@ -59,7 +58,7 @@ pub fn rrf_fuse(
 
     for (signal, ids) in ordered {
         // Sanitize a non-finite weight to the default (1.0) BEFORE it reaches
-        // the score accumulation and the sort (#611). A NaN weight poisons a
+        // the score accumulation and the sort. A NaN weight poisons a
         // note's score to NaN, and the two impls order NaN scores differently —
         // Rust's `total_cmp` total-orders NaN, while the reference's Python sort
         // key (`-score`) leaves NaN comparisons false → input-order-dependent —
@@ -91,8 +90,8 @@ pub fn rrf_fuse(
         let tier_a = i32::from(!a.2.iter().any(|(s, _)| priority_signals.contains(s)));
         let tier_b = i32::from(!b.2.iter().any(|(s, _)| priority_signals.contains(s)));
         // total_cmp, not partial_cmp().expect(): a defensive total order so the
-        // sort can never panic the actor (#382). Non-finite weights are
-        // sanitized above (#611), so scores are finite for any finite ranking
+        // sort can never panic the actor. Non-finite weights are
+        // sanitized above, so scores are finite for any finite ranking
         // input; this is the belt-and-suspenders for any residual non-finite
         // score, and matches the reference's deterministic ordering on finite
         // scores. Reference parity holds because no NaN reaches this sort.
@@ -152,8 +151,8 @@ mod tests {
 
     #[test]
     fn nan_weight_does_not_panic() {
-        // #382: a NaN weight from config must not panic the actor and must be
-        // deterministic. #611: it is now sanitized to the default before the
+        // A NaN weight from config must not panic the actor and must be
+        // deterministic. It is sanitized to the default before the
         // sort, so it produces a finite, well-ordered result.
         let mut weights = BTreeMap::new();
         weights.insert("text".to_string(), f64::NAN);
@@ -173,11 +172,11 @@ mod tests {
 
     #[test]
     fn non_finite_weight_is_sanitized_to_the_default_order() {
-        // #611: a NaN/inf/-inf weight is coerced to the default (1.0) before the
+        // A NaN/inf/-inf weight is coerced to the default (1.0) before the
         // sort, so the fused ORDER is identical to the all-default-weights run.
         // This is the property the frozen-reference parity contract depends on
-        // (the reference, search_fusion.py, applies the same coercion). Uses the
-        // repro's exact shape: rankings {text:[1,2,3], exact:[3,2]}, priority
+        // (the reference, search_fusion.py, applies the same coercion). Shape:
+        // rankings {text:[1,2,3], exact:[3,2]}, priority
         // {exact}, weight {text: <non-finite>} → must equal the default order.
         let rankings = vec![
             ("text".to_string(), vec![1, 2, 3]),
@@ -206,7 +205,7 @@ mod tests {
 
     #[test]
     fn finite_weights_are_unchanged_by_the_sanitizer() {
-        // The #611 guard must not touch finite weights — including 0.0 and a
+        // The sanitizer guard must not touch finite weights — including 0.0 and a
         // negative weight, which are meaningful scales and must flow through.
         let rankings = vec![
             ("text".to_string(), vec![1, 2, 3]),

@@ -1,15 +1,15 @@
-//! Note-type operations (#278 series, step 4) — the port of
+//! Note-type operations — the port of
 //! `shrike/note_types.py` plus `_migrate_note_type` from `collection.py`.
 //!
 //! Everything operates on the **schema11 JSON dicts** through the same legacy
 //! RPCs pylib's ModelManager uses (`update_dict` → `update_notetype_legacy`,
 //! `new_field`/`new_template` → stock-Basic clones), so the ord-based
 //! data/card migration semantics are identical by construction. The
-//! positional-vs-identity reconciliation (#76), the simulate-then-apply
+//! positional-vs-identity reconciliation, the simulate-then-apply
 //! atomicity, and the result shapes are ported verbatim (the tests/native
 //! parity harness compares result dicts against the Python implementation).
 //!
-//! The public surface speaks shrike-schemas types both directions (#391);
+//! The public surface speaks shrike-schemas types both directions;
 //! only the anki legacy-notetype dicts stay `serde_json::Value` — that's
 //! anki's own schema, not our wire.
 
@@ -149,7 +149,7 @@ impl CollectionCore {
     }
 
     /// `upsert_note_types`: create or update note-type definitions in bulk
-    /// (per-item try/except, the position-keyed replace with the #76
+    /// (per-item try/except, the position-keyed replace with the
     /// unsound-move rejection).
     ///
     /// # Errors
@@ -514,7 +514,7 @@ impl CollectionCore {
         let sub = |value: &str| -> (String, usize) {
             // Count via find_iter (what replace_all walks anyway), then
             // expand the template in ONE replace_all — not a discarded
-            // counting pass plus a second expansion pass (#382).
+            // counting pass plus a second expansion pass.
             let count = pattern.find_iter(value).filter(|m| m.is_ok()).count();
             if count == 0 {
                 return (value.to_string(), 0);
@@ -652,9 +652,8 @@ impl CollectionCore {
         template_map: &BTreeMap<String, String>,
         dry_run: bool,
     ) -> NativeResult<MigrateNoteTypeResponse> {
-        // One (id, mid) query (#445): the per-note get_note loop paid a full
-        // note-proto RPC per note just to learn the shared source type and
-        // validate existence.
+        // One (id, mid) query to learn the shared source type and validate
+        // existence — instead of a full note-proto RPC per note.
         let mut mid_of: HashMap<i64, i64> = HashMap::new();
         if !note_ids.is_empty() {
             let sql = format!(

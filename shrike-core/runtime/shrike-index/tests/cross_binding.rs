@@ -1,4 +1,4 @@
-//! Cross-binding on-disk compatibility (#272): load an index written by
+//! Cross-binding on-disk compatibility: load an index written by
 //! usearch-python 2.25.3, verify contents, write one back for Python to read.
 //! Driven by SHRIKE_USEARCH_COMPAT_DIR (the spike runner sets it); skipped
 //! silently when unset so `cargo test` stays hermetic.

@@ -1,5 +1,5 @@
 //! The shared error taxonomy every Shrike native crate returns across the FFI
-//! seam (#269, epic #265; rewritten to thiserror in #705).
+//! seam.
 //!
 //! This crate is **pure Rust** — no `pyo3`. It defines one thing: [`NativeError`],
 //! the error every native compute crate returns, and its [`ErrorKind`] projection.
@@ -107,7 +107,7 @@ impl std::fmt::Display for ErrorKind {
 
 /// The error type every Shrike native crate returns across the FFI seam.
 ///
-/// Constructors capture the current `tracing` span trace (#308): with the
+/// Constructors capture the current `tracing` span trace: with the
 /// harness-installed subscriber active, [`NativeError::trace`] renders the span
 /// context the error crossed (which op, which batch, which engine), and the
 /// binding layer attaches it to the Python exception (PEP 678 notes) — so a

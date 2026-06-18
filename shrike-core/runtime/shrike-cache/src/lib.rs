@@ -1,14 +1,14 @@
-//! Per-collection cache layout (#67): the path-derived identity that namespaces
+//! Per-collection cache layout: the path-derived identity that namespaces
 //! a collection's vector index under the shared cache dir.
 //!
-//! Once one daemon serves several collections (the multi-collection milestone,
-//! #15), their indexes must not collide. The load-bearing boundary (#69):
+//! Once one daemon serves several collections, their indexes must not collide.
+//! The load-bearing boundary:
 //! **index identity keys on a stable function of the collection FILE PATH,
 //! never the profile name.** Every collection has a path; not every collection
 //! is registered, so the path is the only identity always available — which is
-//! exactly what lets #67 land independently of the registry (#66) and how the
-//! routing capstone (#68) wires them (a selector resolves name → path via the
-//! registry, and the path determines the index namespace here).
+//! exactly what lets per-collection layout work independently of the registry,
+//! and how the routing capstone wires them (a selector resolves name → path via
+//! the registry, and the path determines the index namespace here).
 //!
 //! The namespace is a blake2b digest of the *canonicalized* collection path
 //! (hex). Canonicalization folds `..`, symlinks, and a relative-vs-absolute
@@ -36,7 +36,7 @@ use blake2::{Blake2b, Digest};
 pub const INDEX_SUBDIR: &str = "index";
 
 /// The subdirectory under the cache dir that holds the per-collection derived
-/// stores (`<cache_dir>/derived/<namespace>/shrike.db`, #547). A parallel
+/// stores (`<cache_dir>/derived/<namespace>/shrike.db`). A parallel
 /// subtree to [`INDEX_SUBDIR`] — same path-derived namespacing as the index,
 /// preserving the deliberate index-vs-derived separation, so two collections
 /// sharing one daemon's cache dir never share one `shrike.db` (which would
@@ -70,7 +70,7 @@ pub fn index_dir(cache_dir: &str, collection_path: &str) -> PathBuf {
 }
 
 /// The per-collection derived-store path:
-/// `<cache_dir>/derived/<namespace>/shrike.db` (#547). The same path-derived
+/// `<cache_dir>/derived/<namespace>/shrike.db`. The same path-derived
 /// `<namespace>` as [`index_dir`], under a parallel `derived/` subtree — so a
 /// daemon serving several collections gives each its own `shrike.db`.
 ///
@@ -94,7 +94,7 @@ pub fn owner_identity(collection_path: &str) -> String {
     canonicalize_for_identity(collection_path)
 }
 
-/// Where a collection's vector index lives and who owns it (#67): the directory
+/// Where a collection's vector index lives and who owns it: the directory
 /// the `IndexOrchestrator` opens over, plus the owner identity it stamps into
 /// (and checks against) `index.meta.json`. Bundled so the kernel's `assemble`
 /// takes one layout argument rather than a dir + an owner pair.
@@ -109,7 +109,7 @@ pub struct IndexLayout {
 
 impl IndexLayout {
     /// The per-collection layout: the namespaced dir under `cache_dir` plus the
-    /// collection's owner identity. Also migrates an existing flat (pre-#67)
+    /// collection's owner identity. Also migrates an existing flat (older)
     /// single-collection layout into this namespace, losslessly, so the
     /// long-standing single-collection user keeps their built index.
     #[must_use]
@@ -147,13 +147,13 @@ const INDEX_FILES: &[&str] = &[
 /// Migrate an existing single-collection FLAT index layout
 /// (`<cache_dir>/index.usearch` + `index.meta.json`) into this collection's
 /// namespace (`<index_dir>/…`), losslessly, so the long-standing single-
-/// collection user keeps their built index across the #67 upgrade (no spurious
+/// collection user keeps their built index across the upgrade (no spurious
 /// full rebuild).
 ///
 /// Guarded conservatively — the migration runs ONLY when all hold:
 /// - the namespaced dir has no index yet (never clobber a namespaced index);
 /// - the flat layout has both `index.usearch` and `index.meta.json`;
-/// - the flat meta records no owner (a pre-#67 index — the common case) OR an
+/// - the flat meta records no owner (an older index — the common case) OR an
 ///   owner matching this collection (so a flat index that some other path
 ///   wrote is never adopted into the wrong namespace).
 ///
@@ -174,7 +174,7 @@ pub fn migrate_flat_layout(cache_dir: &str, index_dir: &Path, collection_path: &
         return;
     }
 
-    // Adopt the flat index only when its recorded owner is absent (pre-#67) or
+    // Adopt the flat index only when its recorded owner is absent (older) or
     // matches this collection — never steal another collection's flat index.
     if !flat_owner_matches(&flat_meta, collection_path) {
         return;
@@ -204,7 +204,7 @@ pub fn migrate_flat_layout(cache_dir: &str, index_dir: &Path, collection_path: &
 
 /// Migrate an existing single-collection FLAT derived store
 /// (`<cache_dir>/shrike.db`) into this collection's namespace
-/// (`<cache_dir>/derived/<namespace>/shrike.db`, #547), so the long-standing
+/// (`<cache_dir>/derived/<namespace>/shrike.db`), so the long-standing
 /// single-collection user keeps their built FTS5/OCR derived data across the
 /// upgrade without even the (cheap, model-free) rebuild a relocation would
 /// otherwise force.
@@ -216,7 +216,7 @@ pub fn migrate_flat_layout(cache_dir: &str, index_dir: &Path, collection_path: &
 /// Unlike the index there is **no owner check**: the derived store is a SQLite
 /// file that records no owning collection (only a `col_mod` watermark inside).
 /// Two facts make adopting it safe anyway. (1) A flat `shrike.db` can only be
-/// the *pre-#547 single-collection* user's — multi-collection mode never wrote
+/// the *earlier single-collection* user's — multi-collection mode never wrote
 /// one (it post-dates this change), so on the upgrade open there is exactly one
 /// collection and no ambiguity about whose db it is. (2) Even an unlucky
 /// adoption self-heals: the derived store rebuilds on a `col_mod` mismatch, so
@@ -269,7 +269,7 @@ pub fn migrate_flat_derived(cache_dir: &str, collection_path: &str) {
 }
 
 /// Read the flat meta's `collection` owner field and compare to this
-/// collection. Absent owner (pre-#67) → adopt; present + matching → adopt;
+/// collection. Absent owner (older) → adopt; present + matching → adopt;
 /// present + different → refuse. A corrupt/unreadable meta refuses (we can't
 /// prove ownership, so don't steal it).
 fn flat_owner_matches(flat_meta: &Path, collection_path: &str) -> bool {
@@ -280,7 +280,7 @@ fn flat_owner_matches(flat_meta: &Path, collection_path: &str) -> bool {
         return false;
     };
     match value.get("collection").and_then(|c| c.as_str()) {
-        None => true, // pre-#67: no owner recorded → the single-collection user
+        None => true, // older: no owner recorded → the single-collection user
         Some(owner) => owner == owner_identity(collection_path),
     }
 }
@@ -386,7 +386,7 @@ mod tests {
         dir
     }
 
-    /// Lay down a fake flat index in `cache` (the pre-#67 layout). `meta` is the
+    /// Lay down a fake flat index in `cache` (the older flat layout). `meta` is the
     /// raw `index.meta.json` contents.
     fn write_flat(cache: &Path, meta: &str) {
         std::fs::write(cache.join("index.usearch"), b"engine-bytes").unwrap();
@@ -519,7 +519,7 @@ mod tests {
         std::fs::remove_dir_all(&cache).ok();
     }
 
-    // -- derived store namespacing (#547) ------------------------------------
+    // -- derived store namespacing ------------------------------------------
 
     #[test]
     fn derived_db_path_nests_under_the_derived_subdir() {
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn two_collections_derive_to_distinct_db_files() {
-        // The isolation property #547 buys: two collections sharing one cache
+        // The isolation property: two collections sharing one cache
         // dir get distinct shrike.db files (no substring/fuzzy/OCR bleed).
         let a = derived_db_path("/cache", "/coll/a.anki2");
         let b = derived_db_path("/cache", "/coll/b.anki2");
@@ -552,7 +552,7 @@ mod tests {
         assert!(b.starts_with(Path::new("/cache").join(DERIVED_SUBDIR)));
     }
 
-    /// Lay down a fake flat derived store in `cache` (the pre-#547 layout),
+    /// Lay down a fake flat derived store in `cache` (the older flat layout),
     /// with optional WAL/SHM sidecars.
     fn write_flat_derived(cache: &Path, with_sidecars: bool) {
         std::fs::write(cache.join(DERIVED_DB_NAME), b"sqlite-bytes").unwrap();

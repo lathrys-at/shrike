@@ -1,16 +1,15 @@
-//! #590 (= S6-1) regression test: the maintained write tail is BEST-EFFORT.
+//! Regression test: the maintained write tail is BEST-EFFORT.
 //!
 //! A note committed to the collection must not have the WHOLE call fail because
 //! a downstream embed/index/derived step erred (the committed-but-errored
-//! window). The pre-#590 tail `?`-propagated → MCP `isError` → the caller, told
+//! window). A tail that `?`-propagated → MCP `isError` → the caller, told
 //! a committed write "failed", retries → spurious Duplicate / double-write.
 //!
-//! This is the audit's `s6_repro.rs`, INVERTED from characterizing (it asserted
-//! `result.is_err()` at fa54f8c) to assert the FIXED behaviour: the call
-//! returns `Ok` with the per-item results even though the embedder is down, and
-//! a follow-up dry-run confirms the note WAS committed (it now reports a
-//! duplicate). It pairs with the in-crate `s6_best_effort_*` tests and the
-//! `s5_interleaved_*` / `s6_2_derived_*` watermark tests.
+//! Asserts the behaviour: the call returns `Ok` with the per-item results even
+//! though the embedder is down, and a follow-up dry-run confirms the note WAS
+//! committed (it now reports a duplicate). It pairs with the in-crate
+//! `s6_best_effort_*` tests and the `s5_interleaved_*` / `s6_2_derived_*`
+//! watermark tests.
 
 use std::sync::Arc;
 
@@ -67,8 +66,8 @@ fn upsert_wire_returns_ok_results_even_when_the_embed_tail_fails() {
             .upsert_notes_wire(notes, shrike_collection::DuplicatePolicy::Error, false)
             .await;
 
-        // FIXED (#590): the tail is best-effort — the committed write returns
-        // Ok with the per-item result, NOT an Err. (RED at fa54f8c: was Err.)
+        // The tail is best-effort — the committed write returns
+        // Ok with the per-item result, NOT an Err.
         let results = result.expect("committed write must return Ok despite a failed embed tail");
         assert_eq!(results.len(), 1, "one note in, one result out");
         assert!(

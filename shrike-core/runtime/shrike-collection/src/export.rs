@@ -1,4 +1,4 @@
-//! Collection/deck export to an Anki package (#71).
+//! Collection/deck export to an Anki package.
 //!
 //! The op layer over the two anki exporters the `adapter` wraps: the modern
 //! `.apkg` exporter (`ExportAnkiPackage` — whole-collection, deck, or
@@ -26,7 +26,7 @@ impl CollectionCore {
     /// it and performs the anki export. `.colpkg` rejects any non-whole scope —
     /// it is a whole-collection backup by definition.
     ///
-    /// **Symlink-safe write (#71).** anki's exporters write to the exact path
+    /// **Symlink-safe write.** anki's exporters write to the exact path
     /// handed in with create/truncate and NO `O_NOFOLLOW`, following a symlink
     /// at that path. On a shared-host export root another local user could
     /// redirect this operator-privileged write outside the root by planting a
