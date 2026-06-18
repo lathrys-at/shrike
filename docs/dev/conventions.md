@@ -40,6 +40,25 @@ stays even if it happens to cite an issue — strip the historical scaffolding (
 sweep — a naive "delete every line with `#NNN`" would destroy genuinely valuable
 explanations (the `// SAFETY:` blocks, the CVE-class rationale in path handling).
 
+## Write for a developer, not a session
+
+Comments, commit messages, issue bodies, and PR descriptions are read by **human
+developers who lack your session's context but know the codebase**. Write to that
+audience, always — never to the person driving a coding session:
+
+- **No session voice.** Never address "you" the prompter, never narrate what an
+  agent did this session, and never quote or paraphrase the conversation with a
+  user ("as we discussed", "per your request", "the user wanted…"). The reader
+  wasn't there; that framing is noise to them.
+- **Direct and terse.** State what is true and why it's non-obvious, in as few
+  words as it takes. Cut filler, hedging, throat-clearing, and anything that just
+  restates the code.
+- **No context-vomit.** Don't disgorge the reasoning trail, the alternatives tried
+  this session, or a play-by-play. The durable *why* goes in
+  [`decisions.md`](decisions.md); the rest is not written down.
+
+Trust the reader to read the code. Tell them the part they can't infer, plainly.
+
 ## Schema house style: make illegal states unrepresentable
 
 The wire models in `schemas.py` follow one rule: when a field's presence is

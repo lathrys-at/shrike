@@ -73,6 +73,10 @@ stale). Python 3.12 via pyenv. Coverage, the test-sharing model, and the Bazel l
 - **Comments document the code, not its history** — keep future-facing code docs
   (invariants, `// SAFETY:`) and interface docstrings; `(#NNN)`/"as of today"
   history goes in issues, PRs, and `decisions.md`.
+- **Write for a developer, not a session** — code comments, commit messages, issues,
+  and PR bodies are for human developers who lack session context but know the code:
+  direct, terse, no "Claude-in-a-session" voice, no addressing the prompter, no
+  quoting the user conversation, no context-vomit.
 
 The reasoning is in [`docs/dev/conventions.md`](docs/dev/conventions.md).
 
