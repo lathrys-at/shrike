@@ -21,7 +21,7 @@ rust_library(
     deps = [
         "//shrike-core/shrike-engine-api:shrike_engine_api",
         "//shrike-core/shrike-error:shrike_error",
-        "@crates//:image",
+        "//shrike-core/shrike-image:shrike_image",
         "@crates//:ndarray",
         "@crates//:ort",
         "@crates//:tokenizers",

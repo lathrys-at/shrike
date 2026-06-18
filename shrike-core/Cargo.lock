@@ -1902,6 +1902,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast_image_resize"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbc7fe45cf92b43817ff62a3723e862b85bd1d06288f63007f7645d1d2f7a060"
+dependencies = [
+ "bytemuck",
+ "cfg-if",
+ "document-features",
+ "image",
+ "num-traits",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5057,11 +5071,11 @@ dependencies = [
 name = "shrike-embed"
 version = "0.0.0"
 dependencies = [
- "image",
  "ndarray 0.17.2",
  "ort",
  "shrike-engine-api",
  "shrike-error",
+ "shrike-image",
  "tokenizers",
  "tracing",
 ]
@@ -5086,10 +5100,10 @@ name = "shrike-engine-api"
 version = "0.1.0"
 dependencies = [
  "futures",
- "image",
  "serde",
  "serde_json",
  "shrike-error",
+ "shrike-image",
  "tokio",
 ]
 
@@ -5101,6 +5115,15 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-error",
+]
+
+[[package]]
+name = "shrike-image"
+version = "0.1.0"
+dependencies = [
+ "fast_image_resize",
+ "image",
+ "shrike-error",
 ]
 
 [[package]]

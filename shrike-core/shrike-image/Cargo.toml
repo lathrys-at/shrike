@@ -1,0 +1,40 @@
+# Generic image preprocessing for the CLIP pixel pipeline (#707, epic #703).
+#
+# A LEAF utility crate: byte -> decode -> resize-shortest-edge -> center-crop ->
+# rescale/normalize -> CHW f32, plus a dependency-free 24-bit BMP encoder. NO
+# engine/kernel/Shrike-domain logic — `shrike-embed`'s CLIP engine is just its
+# first consumer (enforced by //shrike-core:layering_check, LAYER_FLOOR). The
+# only Shrike coupling is the shared error taxonomy (shrike-error, itself a
+# floor crate), so call sites keep the `NativeResult` they already used.
+[package]
+name = "shrike-image"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[features]
+# `accel` (default): the autovectorizable contiguous-plane normalize/CHW path.
+# It is the *same* affine math as the scalar reference (per-channel FMA), so it
+# matches within the golden image-prep tolerance — no IMAGE_PREP_VERSION_RS bump.
+default = ["accel"]
+accel = []
+# `backend-fir` (opt-in): swap the shortest-edge resize onto `fast_image_resize`
+# (SSE4.1/AVX2/NEON). Its bicubic uses the *same* Catmull-Rom coefficient as the
+# `image` crate's, so it matches the scalar reference within the golden tolerance
+# (pinned by `fir_matches_image_resize_within_tolerance`). Off => the pure-`image`
+# scalar resize (minimal-core, no SIMD intrinsics crate).
+backend-fir = ["dep:fast_image_resize"]
+
+[dependencies]
+shrike-error = { workspace = true }
+# Decode, the scalar Catmull-Rom resize, and center-crop. The format feature set
+# mirrors `shrike-embed`'s prior `image` dep exactly so decode behaviour is
+# unchanged by the move (#707).
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+    "bmp",
+] }
+fast_image_resize = { version = "5", optional = true, features = ["image"] }

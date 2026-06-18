@@ -1,0 +1,28 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//shrike-core:__subpackages__"])
+
+exports_files(["Cargo.toml"])
+
+# Generic image preprocessing for the CLIP pixel pipeline (#707): decode →
+# resize-shortest-edge → center-crop → rescale/normalize → CHW f32, plus the
+# dependency-free 24-bit BMP encoder. A layer-FLOOR crate (enforced by
+# //shrike-core:layering_check) — image/shrike-error only, NO kernel or engine
+# coupling. The accelerated normalize/CHW path is the default; `backend-fir`
+# (fast_image_resize) stays opt-in so it isn't pulled into the server build.
+rust_library(
+    name = "shrike_image",
+    srcs = glob(["src/**/*.rs"]),
+    crate_features = ["accel"],
+    edition = "2021",
+    deps = [
+        "//shrike-core/shrike-error:shrike_error",
+        "@crates//:image",
+    ],
+)
+
+rust_test(
+    name = "shrike_image_test",
+    size = "small",
+    crate = ":shrike_image",
+)

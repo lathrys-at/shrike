@@ -64,6 +64,7 @@ ENGINE_CRATES = {
 LAYER_FLOOR = {
     "shrike-cache",  # per-collection cache layout (#712) — index/derived subdirs + namespacing
     "shrike-error",
+    "shrike-image",  # the CLIP byte->pixels->CHW pipeline (#707) — decode/resize/normalize + BMP encode
     "shrike-network",
     "shrike-schemas",
     "shrike-engine-api",  # the kernel<->ort firewall — a thin contract, stays floor

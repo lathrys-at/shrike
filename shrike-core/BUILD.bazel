@@ -26,6 +26,7 @@ py_test(
         "//shrike-core/shrike-describe-remote:Cargo.toml",
         "//shrike-core/shrike-engine-api:Cargo.toml",
         "//shrike-core/shrike-error:Cargo.toml",
+        "//shrike-core/shrike-image:Cargo.toml",
         "//shrike-core/shrike-index:Cargo.toml",
         "//shrike-core/shrike-kernel:Cargo.toml",
         "//shrike-core/shrike-llama-server:Cargo.toml",

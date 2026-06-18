@@ -1,7 +1,8 @@
 # The engine contract crate (#342): the traits the kernel consumes and every
-# engine crate implements. A LEAF — no engine deps, no kernel dep, no pyo3,
-# no runtime. If a change here needs more than shrike-error + futures + serde,
-# it belongs somewhere else.
+# engine crate implements. A floor crate — no engine deps, no kernel dep, no
+# pyo3, no runtime; its only non-trivial sibling dep is shrike-image (another
+# floor utility), for the probe's BMP encoder (#707). A change needing more than
+# shrike-error + futures + serde (+ that encoder) belongs somewhere else.
 [package]
 name = "shrike-engine-api"
 version = "0.1.0"
@@ -10,6 +11,9 @@ license = "AGPL-3.0-or-later"
 
 [dependencies]
 shrike-error = { workspace = true }
+# The vision batch-safety probe synthesizes its BMP image set via shrike-image's
+# dependency-free encoder (#707) — format code lives there, not in this leaf.
+shrike-image = { workspace = true }
 # Runtime-agnostic future types only — no tokio (or any executor) assumption,
 # the same rule as the kernel (#308/#310).
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
@@ -22,6 +26,3 @@ tokio = { version = "1", features = ["rt"] }
 serde_json = "1"
 futures = { version = "0.3", features = ["executor"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-# Test-only: decode the pure-Rust-encoded BMP probe images to verify they're
-# valid (production code emits raw bytes — no image dep in the leaf crate).
-image = { version = "0.25", default-features = false, features = ["bmp"] }

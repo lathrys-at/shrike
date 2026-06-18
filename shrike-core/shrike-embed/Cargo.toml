@@ -37,6 +37,7 @@ ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dy
 # is structural. onig matches the python wheel's regex engine.
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 ndarray = "0.17"
-# Image decode + resize/crop for the CLIP vision path (#271) — replaces PIL.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+# The CLIP byte->pixels->CHW pipeline (#707) — the `image` decode/resize/crop +
+# the accelerated normalize live here now, behind a clean API (was inline).
+shrike-image = { workspace = true }
 tracing = "0.1"

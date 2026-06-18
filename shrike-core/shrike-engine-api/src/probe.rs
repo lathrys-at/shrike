@@ -166,9 +166,10 @@ fn owned_texts() -> Vec<String> {
 // text.
 //
 // Each entry is a tiny RGB image built at probe time (no fixture files),
-// encoded as an uncompressed BMP in pure Rust so this leaf crate gains no
-// image-encode dependency. The set is heterogeneous and its *length* is the
-// vision batching ceiling — sized to match the text set (64) so the CLIP
+// encoded as an uncompressed BMP via shrike-image's dependency-free encoder
+// (the format code lives there, #707, not in this contract leaf). The set is
+// heterogeneous and its *length* is the vision batching ceiling — sized to
+// match the text set (64) so the CLIP
 // engine's `min(text, vision)` never lowers a uniform-safe pair's batch (both
 // probe to 64), collapsing to 1 only when a path is genuinely batch-variant.
 
@@ -256,53 +257,19 @@ fn probe_pixel(idx: usize, x: u32, y: u32) -> [u8; 3] {
 }
 
 /// One synthetic probe image, encoded as an uncompressed 24-bit BMP
-/// [`MediaItem`]. BMP is emitted in pure Rust (a fixed 54-byte header + raw
-/// BGR rows) so this contract crate stays a LEAF — no `image`/`png`
-/// dependency to *encode* the probe set. Engines decode it via the `image`
-/// crate, which reads 24-bit BMP losslessly, so the pixels the engine sees
-/// are exactly `probe_pixel`'s.
+/// [`MediaItem`] via [`shrike_image::encode_bmp`] (the BMP-format code lives in
+/// the image utility crate, not this contract leaf — #707). 24-bit BMP
+/// round-trips losslessly through any decoder, so the pixels an engine sees are
+/// exactly `probe_pixel`'s.
 fn probe_image(idx: usize) -> MediaItem {
-    MediaItem::from_named(&format!("probe-{idx}.bmp"), encode_bmp(idx))
+    MediaItem::from_named(&format!("probe-{idx}.bmp"), encode_probe_bmp(idx))
 }
 
 /// Uncompressed 24-bit BMP of `IMAGE_PROBE_SIDE`² pixels from [`probe_pixel`].
-/// Bottom-up BGR rows padded to a 4-byte boundary (the BMP format) — minimal,
-/// dependency-free, and round-trips losslessly through any BMP decoder.
-fn encode_bmp(idx: usize) -> Vec<u8> {
-    let s = IMAGE_PROBE_SIDE;
-    let row_bytes = (s * 3) as usize;
-    let padding = (4 - row_bytes % 4) % 4;
-    let stride = row_bytes + padding;
-    let pixel_data = stride * s as usize;
-    let file_size = 54 + pixel_data;
-
-    let mut out = Vec::with_capacity(file_size);
-    // -- BITMAPFILEHEADER (14 bytes) --
-    out.extend_from_slice(b"BM");
-    out.extend_from_slice(&(file_size as u32).to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes()); // reserved
-    out.extend_from_slice(&54u32.to_le_bytes()); // pixel-data offset
-                                                 // -- BITMAPINFOHEADER (40 bytes) --
-    out.extend_from_slice(&40u32.to_le_bytes()); // header size
-    out.extend_from_slice(&(s as i32).to_le_bytes()); // width
-    out.extend_from_slice(&(s as i32).to_le_bytes()); // height (+ = bottom-up)
-    out.extend_from_slice(&1u16.to_le_bytes()); // planes
-    out.extend_from_slice(&24u16.to_le_bytes()); // bits per pixel
-    out.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB (no compression)
-    out.extend_from_slice(&(pixel_data as u32).to_le_bytes()); // image size
-    out.extend_from_slice(&2835i32.to_le_bytes()); // x ppm (~72 dpi)
-    out.extend_from_slice(&2835i32.to_le_bytes()); // y ppm
-    out.extend_from_slice(&0u32.to_le_bytes()); // palette colours
-    out.extend_from_slice(&0u32.to_le_bytes()); // important colours
-                                                // -- pixel rows, bottom-up, BGR + per-row padding --
-    for y in (0..s).rev() {
-        for x in 0..s {
-            let [r, g, b] = probe_pixel(idx, x, y);
-            out.extend_from_slice(&[b, g, r]);
-        }
-        out.extend(std::iter::repeat_n(0u8, padding));
-    }
-    out
+fn encode_probe_bmp(idx: usize) -> Vec<u8> {
+    shrike_image::encode_bmp(IMAGE_PROBE_SIDE, IMAGE_PROBE_SIDE, |x, y| {
+        probe_pixel(idx, x, y)
+    })
 }
 
 /// The synthetic vision probe set (BMP-encoded [`MediaItem`]s).
@@ -315,7 +282,7 @@ fn owned_images() -> Vec<MediaItem> {
 /// hosts probe the *same* images. One BMP per entry; decoders read them
 /// losslessly.
 pub fn batch_probe_images() -> Vec<Vec<u8>> {
-    (0..IMAGE_PROBE_COUNT).map(encode_bmp).collect()
+    (0..IMAGE_PROBE_COUNT).map(encode_probe_bmp).collect()
 }
 
 /// The batch size proven safe (the probe-set size) or 1 (embed serially).
@@ -645,19 +612,15 @@ mod tests {
     }
 
     #[test]
-    fn image_probe_set_is_nonempty_and_decodable() {
+    fn image_probe_set_is_nonempty_and_heterogeneous() {
         let images = owned_images();
         assert_eq!(images.len(), IMAGE_PROBE_COUNT);
-        // Every probe image is a real, decodable bitmap with the expected
-        // dimensions — the engine's decoder must be able to read it.
+        // Each probe carries the expected MIME hint and a non-empty BMP body.
+        // BMP-decode validity (the round-trip through `image`) is the encoder's
+        // own contract, tested in shrike-image — this leaf no longer decodes.
         for (i, item) in images.iter().enumerate() {
-            let img = image::load_from_memory(&item.bytes)
-                .unwrap_or_else(|e| panic!("probe image {i} did not decode: {e}"));
-            assert_eq!(
-                (img.width(), img.height()),
-                (IMAGE_PROBE_SIDE, IMAGE_PROBE_SIDE),
-                "probe image {i} dimensions"
-            );
+            assert_eq!(item.mime.as_deref(), Some("image/bmp"), "probe {i} mime");
+            assert!(!item.bytes.is_empty(), "probe {i} body");
         }
         // The set is heterogeneous — every image's content is distinct
         // (including the hashed-speckle tail), so each contributes its own
