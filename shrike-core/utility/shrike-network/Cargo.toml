@@ -1,7 +1,7 @@
 # A kernel-unaware, low-level networking-safety crate (#592): the SSRF
 # classifier (Python `ipaddress.is_global` parity), the resolve-and-vet helper,
-# and the IP-pinned ureq agent builder. It is SHARED by the kernel
-# (shrike-kernel's media_fetch) AND the remote engine crates
+# and the IP-pinned agent/client builders (sync ureq + async reqwest). It is
+# SHARED by the kernel (shrike-kernel's media_fetch) AND the remote engine crates
 # (shrike-embed-remote, shrike-describe-remote) — so the one SSRF control lives
 # in one place, not copied per consumer. Pure Rust, depends on NO engine crate
 # and NOT on shrike-kernel (it sits BELOW both), so the //shrike-core:layering_check
@@ -17,8 +17,33 @@ name = "shrike_network"
 
 [dependencies]
 shrike-error = { workspace = true }
-# SYNCHRONOUS client — no tokio, no runtime (the workspace's runtime-less HTTP
-# precedent, same as the kernel's media fetch and the remote engines).
+# SYNCHRONOUS client — no runtime (the workspace's runtime-less HTTP precedent,
+# the still-current media fetch + remote-engine path). Removed once #721 S2
+# ports those consumers onto the async reqwest client below and ureq goes away.
 ureq = "2"
 url = "2"
 tracing = "0.1"
+# ASYNC client (#721): the reqwest/hyper sibling of the ureq agents, driven by
+# the harness runtime. Added UNCONDITIONALLY (not behind a feature): reqwest is
+# already universally in the lock — every build that pulls this crate also pulls
+# anki -> reqwest 0.12 (the server via shrike-pyo3, mobile via shrike-cabi) — so
+# this adds ~no tree weight, and a feature added in S1 would only be deleted in
+# S2 when ureq goes. `rustls-tls` REUSES the same rustls ureq already links (the
+# only TLS stack in the lock; no native-tls/openssl) and bundles webpki CA roots
+# (no native cert-store dependency — right for the mobile/minimal posture, #338).
+# `default-features = false` keeps native-tls off (the `charset` feature would
+# pull it back via `default-tls`, so it is deliberately omitted). `stream` lets
+# the caller size-cap the body WHILE reading; `socks` preserves proxy-env support.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+    "stream",
+    "socks",
+] }
+
+[dev-dependencies]
+# Drives the async client + the local canned test server in the integration tests.
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time"] }
+# The streaming body in the size-cap-while-reading test reads `bytes_stream()`.
+futures-util = "0.3"
+serde_json = "1"
