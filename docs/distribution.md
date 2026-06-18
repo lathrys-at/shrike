@@ -241,6 +241,27 @@ twine upload dist/*       # to the shrike-mcp PyPI project (needs its own upload
 After this upload `shrike-mcp` is frozen — never republished. The repo and
 release.yml only ever build/publish `shrike-py`.
 
+**Optional — a deprecation warning on `import shrike_mcp`.** The metadata-only
+form above is enough (the `shrike-py` dependency is the whole migration mechanism).
+If you also want a runtime nudge for anyone who reflexively `import shrike_mcp`s,
+drop `bypass-selection` and ship one tiny module instead:
+
+```bash
+# (same pyproject as above, but replace the [tool.hatch.build.targets.wheel] block with:)
+#   [tool.hatch.build.targets.wheel]
+#   packages = ["shrike_mcp"]
+mkdir shrike_mcp
+cat > shrike_mcp/__init__.py <<'PY'
+import warnings
+warnings.warn(
+    "shrike-mcp has been renamed to shrike-py. Install shrike-py and import shrike.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+PY
+python -m build && twine upload dist/*
+```
+
 ### PyPI trusted publishing (maintainer step)
 
 Before the next release tag, configure a PyPI **trusted publisher for `shrike-py`**
