@@ -40,7 +40,7 @@ from typing import Any
 
 import yaml
 
-from shrike.embedding_onnx_common import resolve_execution_providers
+from shrike.harness.engines.embedding.onnx_common import resolve_execution_providers
 
 logger = logging.getLogger("shrike.serve")
 

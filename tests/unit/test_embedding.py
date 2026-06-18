@@ -513,7 +513,7 @@ class TestEmbeddingRuntime:
         runtime = EmbeddingRuntime(backend="llama", model="/m.gguf")
         fake_be = MagicMock()
         fake_be.running = True
-        # _make_backend does `from shrike.embedding_onnx import OnnxBackend`, so
+        # _make_backend does `from shrike.harness.engines.embedding.onnx import OnnxBackend`, so
         # the patch target is the source module.
         with patch("shrike.harness.engines.embedding.onnx.OnnxBackend", return_value=fake_be):
             runtime.start(backend="onnx-rs")
