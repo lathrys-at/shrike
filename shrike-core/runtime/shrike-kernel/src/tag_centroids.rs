@@ -5,7 +5,7 @@
 //! `notes.tags`), with hierarchy rolled up by prefix aggregation
 //! (`a::b::c` contributes to `a::b::c`, `a::b`, and `a`).
 //!
-//! Layout decision (#178, recorded in docs/decisions.md): the tag space lives
+//! Layout decision (#178, recorded in docs/dev/decisions.md): the tag space lives
 //! in the SAME engine as the note-item spaces (same model/dim/metric — a tag
 //! centroid is only meaningful in the notes' space) under a distinct space
 //! name, so note searches scoped to [`crate::NOTE_MODALITIES`] can never

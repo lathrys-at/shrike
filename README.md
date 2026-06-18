@@ -2,7 +2,7 @@
 
 [![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/lathrys-at/shrike/badges/coverage.json)](https://github.com/lathrys-at/shrike/actions/workflows/coverage.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
-[![Python: 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
+[![Python: 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](shrike-py/pyproject.toml)
 
 Sometimes you want to work on your Anki collection without opening Anki. That's what Shrike is for. It's a command-line client and an MCP server for your collection, so you can manage cards from a terminal or hand them to an LLM agent.
 

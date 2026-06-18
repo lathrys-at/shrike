@@ -50,7 +50,7 @@ fix up their environment lives in `scripts/`, even if its output feeds a build.
 - `coverage_subprocess.pth` — the single committed coverage subprocess-capture
   hook (the one-line `.pth` that imports coverage only when
   `COVERAGE_PROCESS_START` is set). Copied into site-packages by
-  `scripts/coverage.sh` and by CLAUDE.md's by-hand recipe — one hook, one home
+  `scripts/coverage.sh` and by docs/dev/testing.md's by-hand recipe — one hook, one home
   (#700). It lives in `tools/` because it's build/test-lane plumbing, not a
   human entry point.
 

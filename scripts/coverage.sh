@@ -40,7 +40,7 @@ done
 # the server's lines read as uncovered. The .pth only imports coverage when
 # COVERAGE_PROCESS_START is set, so it costs nothing on other interpreter starts —
 # the same guard coverage's own auto-.pth uses. Copy the single committed hook
-# (tools/coverage_subprocess.pth — one source of truth, shared with CLAUDE.md's
+# (tools/coverage_subprocess.pth — one source of truth, shared with docs/dev/testing.md's
 # by-hand recipe) into site-packages. Idempotent.
 SITE=$(python -c 'import site; print(site.getsitepackages()[0])')
 HOOK="$SITE/coverage_subprocess.pth"

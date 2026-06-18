@@ -25,7 +25,7 @@ pub enum MediaKind {
 /// holding and provenance survives), but a [`Destination::VectorOnly`] source
 /// is excluded from the lexical surfaces (substring/fuzzy) — a literal hit on
 /// invisible generated prose can't be cleanly explained to a user
-/// (docs/decisions.md). Vector-worthy text mints a text-space vector either
+/// (docs/dev/decisions.md). Vector-worthy text mints a text-space vector either
 /// way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Destination {

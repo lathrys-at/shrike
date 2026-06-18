@@ -5422,7 +5422,7 @@ mod no_cpython_smoke {
 
             // ... but is NEVER reachable via LEXICAL search: a literal phrase
             // that lives ONLY in the describe prose must not hit on exact or
-            // fuzzy (the VectorOnly destination — docs/decisions.md).
+            // fuzzy (the VectorOnly destination — docs/dev/decisions.md).
             let lex = kernel.search("sunlit mountain valley", 5).await.unwrap();
             let lex_hit = lex.iter().find(|h| h.note_id == photo_id);
             assert!(

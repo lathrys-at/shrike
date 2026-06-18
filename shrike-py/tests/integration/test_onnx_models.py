@@ -168,7 +168,7 @@ class TestOnnxRealFp32:
     differs by ~1e-5 (different matmul kernels per batch shape), the same float-noise tier
     llama-server occupies and far below the probe tol, so it still measures batch-safe. A future
     GPU test lane would assert ``allclose(atol≈1e-4)`` / identical ranking, not byte-equality
-    (see docs/decisions.md, "Bit-exact is a CPU property")."""
+    (see docs/dev/decisions.md, "Bit-exact is a CPU property")."""
 
     @pytest.fixture(scope="class")
     def be(self, onnx_fp32_model: Path) -> Iterator[OnnxBackend]:

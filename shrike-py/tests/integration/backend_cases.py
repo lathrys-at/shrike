@@ -16,7 +16,7 @@ anything less must namespace itself (never a tolerance-only match).
 
 ``*_exact`` flags encode each runtime's determinism claim on CPU (CI runs CPU
 providers): the int8/fp32 ONNX paths are bit-exact; llama-server may sit on Metal
-locally, so its claims are tolerance-tier (see docs/decisions.md, "Bit-exact is a
+locally, so its claims are tolerance-tier (see docs/dev/decisions.md, "Bit-exact is a
 CPU property").
 """
 

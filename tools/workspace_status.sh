@@ -8,7 +8,7 @@
 # Off-tag it is a PEP 440 dev version: `X.Y.ZrcN.devM+g<hash>` continuing a
 # pre-release, else `X.Y.(Z+1).devM+g<hash>` (setuptools-scm guess-next-dev) — both
 # `[.dirty]`-suffixed for a dirty tree. (The project only tags vX.Y.Z / vX.Y.Z-rc.N,
-# per CLAUDE.md; the bash stays self-contained so a clean checkout builds without a
+# per CONTRIBUTING.md; the bash stays self-contained so a clean checkout builds without a
 # Python/hatch dependency on every build.)
 #
 # Wired via .bazelrc `build --workspace_status_command`. Keys printed as

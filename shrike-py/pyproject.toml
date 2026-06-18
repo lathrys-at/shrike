@@ -130,7 +130,7 @@ show_missing = true
 # gated route handlers, covered by the embedding lane rather than this gate.)
 # A target, not a CI gate: CI *reports* coverage (rc PRs + 3x/week, coverage.yml)
 # but never fails on it. Enforced only locally by `scripts/coverage.sh` (exits
-# non-zero below this) as a proactive self-check; see CLAUDE.md > Coverage.
+# non-zero below this) as a proactive self-check; see docs/dev/testing.md (Coverage).
 fail_under = 86
 
 [tool.mypy]

@@ -38,7 +38,7 @@
 //! `Handle::block_on` panics on a runtime worker and succeeds on a
 //! `spawn_blocking` pool thread — so a sync call cannot quietly land on a
 //! runtime worker without the test catching the dispatch-site regression. (See
-//! `docs/decisions.md` § "anki retains its sync runtime" for why a runtime
+//! `docs/dev/decisions.md` § "anki retains its sync runtime" for why a runtime
 //! handle-injection patch to anki was rejected in favour of this discipline.)
 //!
 //! The default is a multi-thread runtime; [`init_runtime`] lets a host (or

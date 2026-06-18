@@ -11,7 +11,7 @@ It is a **derived cache** like the kernel's vector index: rebuildable from the
 collection, ``col_mod`` drift detection, incremental on upsert/delete. It lives
 in our cache dir, deliberately **not** as tables in Anki's ``collection.anki2``
 — derived/rebuildable data must not ride Anki's sync or trip its schema checks
-(see ``docs/decisions.md``). Persistence is inherent to the SQLite file, so
+(see ``docs/dev/decisions.md``). Persistence is inherent to the SQLite file, so
 there is no debounced saver (unlike the vector index): writes are transactional
 and durable.
 

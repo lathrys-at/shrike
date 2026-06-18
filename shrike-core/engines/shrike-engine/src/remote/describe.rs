@@ -17,7 +17,7 @@
 //! `EMBED_TEXT_VERSION` — and the projector name for a local vision server,
 //! which `/v1/models` meta does NOT reflect).
 //!
-//! **Destination rule (settled in docs/decisions.md): VLM descriptions go
+//! **Destination rule (settled in docs/dev/decisions.md): VLM descriptions go
 //! to the embedding space only, never the trigram index.** Today's
 //! recognition pipeline ingests recognized text into the derived (lexical)
 //! store unconditionally, so this engine is constructible and tested but

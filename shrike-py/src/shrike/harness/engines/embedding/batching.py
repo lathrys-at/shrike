@@ -26,7 +26,7 @@ Two deliberate choices make the check trustworthy rather than wishful:
 - **We probe the batch size we actually use.** The probe compares against *one* batch of all
   probe texts, and the caller never batches larger than the probe-set size — so "proven safe"
   and "what we do" are the same size (no extrapolating from a small sweep to a larger runtime
-  batch). This is empirical, not a proof for *every* possible model; see `docs/decisions.md`
+  batch). This is empirical, not a proof for *every* possible model; see `docs/dev/decisions.md`
   for the heuristic caveat and the ONNX-specific deterministic fallback (scan for
   `DynamicQuantizeLinear`/`MatMulInteger`).
 """

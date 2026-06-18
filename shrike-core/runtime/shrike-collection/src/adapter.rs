@@ -1104,7 +1104,7 @@ fn decode_backend_error(bytes: &[u8]) -> NativeError {
 // `shrike_kernel::runtime` (pinned by its `sync_dispatch_pin` panic-repro
 // test), NOT a runtime-handle-injection patch to anki (rejected: the anki
 // patch mechanism is Bazel-only, so it would fork sync behaviour across build
-// lanes — see docs/decisions.md). This test stays as the today-true pin that
+// lanes — see docs/dev/decisions.md). This test stays as the today-true pin that
 // none of those services is on a Shrike call path yet.
 // (Backend dispatcher, tag 25.09.4: sync=41, ankiweb=45, ankihub=47 — none
 // may appear in the service indices above.)

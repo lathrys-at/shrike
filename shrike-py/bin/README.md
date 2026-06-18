@@ -24,5 +24,5 @@ The published `shrike` console script (`pyproject.toml` /
 launchers are the Bazel-runnable equivalents for dev and for tests that spawn a
 real server.
 
-See the [`scripts/` vs `tools/` vs `bin/` boundary](../tools/README.md#the-boundary)
+See the [`scripts/` vs `tools/` vs `bin/` boundary](../../tools/README.md#the-boundary)
 for how this package relates to `scripts/` and `tools/`.

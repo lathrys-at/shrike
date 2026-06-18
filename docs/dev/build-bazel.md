@@ -4,7 +4,7 @@ Bazel is the authoritative build: CI's test gate, the release artifacts, and
 the polyglot (Python + Rust + Swift) graph all run through it. You don't need
 it for day-to-day iteration — the pip lane (below) is faster for that — but
 anything you merge is ultimately proven by `bazel test`. The "why" lives in
-the ADR in [`docs/decisions.md`](decisions.md) ("Bazel as the polyglot build
+the ADR in [`docs/dev/decisions.md`](decisions.md) ("Bazel as the polyglot build
 system").
 
 ## Zero-install quick start
