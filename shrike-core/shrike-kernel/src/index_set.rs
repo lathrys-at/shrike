@@ -59,8 +59,11 @@ pub struct IndexSpace {
     /// The CONTENT fingerprint that keys this space, or `None` while the
     /// primary space is still un-bound (no embedder attached yet).
     pub key: Option<String>,
+    /// The orchestrator over this space's own dir/drift/hashes/persistence.
     pub orchestrator: Arc<IndexOrchestrator>,
+    /// The debounced saver driving this space's flushes.
     pub saver: Arc<DebouncedSaver>,
+    /// The modalities this space's engine spans.
     pub modalities: Vec<String>,
     /// Whether this space lives at the base index dir directly (the primary —
     /// the in-place-no-subdir migration rule) vs. a `<base>/<hash>/` subdir.
@@ -93,6 +96,11 @@ impl IndexSet {
     /// embedder attaches. `primary_modalities` is what the primary engine spans
     /// (the kernel passes the note modalities + the `tag.text` space, exactly as
     /// the single-engine build did).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the primary orchestrator cannot be materialized over
+    /// the base dir.
     pub fn open(
         base_dir: PathBuf,
         owner: Option<String>,
@@ -130,12 +138,20 @@ impl IndexSet {
     /// The PRIMARY orchestrator — the one engine the index/search paths consume
     /// this PR. With one declared embedder it is the sole space at the base dir,
     /// so every drift/reconcile/save/wire path is byte-identical to pre-#232.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn primary(&self) -> Arc<IndexOrchestrator> {
         Arc::clone(&self.spaces.read().expect("index set poisoned")[0].orchestrator)
     }
 
     /// The PRIMARY space's debounced saver — the index-maintenance tail's saver
     /// (the index path is primary-only this PR).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn primary_saver(&self) -> Arc<DebouncedSaver> {
         Arc::clone(&self.spaces.read().expect("index set poisoned")[0].saver)
     }
@@ -144,6 +160,10 @@ impl IndexSet {
     /// dedicated text space's engine. Tag centroids are a pure function of THAT
     /// space's text vectors — never fanned out across spaces with different
     /// geometries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn tag_engine(&self) -> Arc<dyn VectorIndex> {
         self.spaces.read().expect("index set poisoned")[0]
             .orchestrator
@@ -151,10 +171,21 @@ impl IndexSet {
     }
 
     /// The number of attached index spaces.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn len(&self) -> usize {
         self.spaces.read().expect("index set poisoned").len()
     }
 
+    /// Whether the set holds no spaces. The primary always exists (materialized
+    /// at open), so this is never truly true; it satisfies the clippy
+    /// `len`/`is_empty` pairing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn is_empty(&self) -> bool {
         // The primary always exists (materialized at open), so the set is never
         // truly empty; this satisfies the clippy len/is_empty pairing.
@@ -168,6 +199,15 @@ impl IndexSet {
     /// keeps its fingerprint); a NEW key materializes a secondary orchestrator
     /// in a `<base>/<hash>/` subdir over `modalities`. Returns the bound space's
     /// orchestrator.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a new secondary space's subdir cannot be created or
+    /// its fresh engine cannot be materialized.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn bind_space(
         &self,
         key: &str,
@@ -216,6 +256,10 @@ impl IndexSet {
 
     /// The orchestrator bound to `key`, if any (#232) — the kernel routes a
     /// space's index op to its own orchestrator through this.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn orchestrator_for(&self, key: &str) -> Option<Arc<IndexOrchestrator>> {
         self.spaces
             .read()
@@ -227,6 +271,10 @@ impl IndexSet {
 
     /// Every space's orchestrator, in declaration order (primary first) — the
     /// fan-out targets for removal and the watermark advance.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn all_orchestrators(&self) -> Vec<Arc<IndexOrchestrator>> {
         self.spaces
             .read()
@@ -238,6 +286,10 @@ impl IndexSet {
 
     /// Every space's saver, in declaration order — the fan-out for save
     /// requests after a maintained write.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned (a prior holder panicked).
     pub fn all_savers(&self) -> Vec<Arc<DebouncedSaver>> {
         self.spaces
             .read()
@@ -250,6 +302,10 @@ impl IndexSet {
     /// Remove a set of notes from EVERY space's index (#232): a deleted note
     /// leaves all indexes. Returns the primary's removal count (the one the
     /// single-space path returned, byte-identical for N=1).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any space's engine rejects the removal.
     pub fn remove_all(&self, note_ids: &[i64]) -> NativeResult<usize> {
         let orchestrators = self.all_orchestrators();
         let mut primary_removed = 0usize;

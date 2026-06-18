@@ -54,6 +54,11 @@ fn validate<T: DeserializeOwned>(name: &str, json: &str) -> NativeResult<T> {
 /// `note_type_details` selects which note types carry their full definition.
 /// Typed end-to-end (#391 phase 2): the core builds the canonical type, the
 /// action forwards it, and serialization happens once, at the host edge.
+///
+/// # Errors
+///
+/// Returns an error if the collection core fails to assemble the requested
+/// sections.
 pub fn collection_info(
     core: &dyn Collection,
     include: &[String],
@@ -67,17 +72,29 @@ pub fn collection_info(
 /// divergence recorded on the core's `list_notes`).
 #[derive(Debug, Clone, Default)]
 pub struct ListNotesParams {
+    /// Restrict to these note IDs.
     pub ids: Option<Vec<i64>>,
+    /// Restrict to notes in this deck.
     pub deck: Option<String>,
+    /// Restrict to notes carrying all of these tags.
     pub tags: Option<Vec<String>>,
+    /// Restrict to notes of this note type.
     pub note_type: Option<String>,
+    /// Restrict to notes modified at or after this epoch-seconds cutoff.
     pub modified_since_epoch: Option<i64>,
+    /// Whether to include field bodies in the result.
     pub with_fields: bool,
+    /// Maximum notes to return.
     pub limit: usize,
 }
 
 /// `list_notes` — filter/retrieve notes (filters ANDed; at least one given,
 /// enforced by the core as invalid input).
+///
+/// # Errors
+///
+/// Returns an error if no filter is given (invalid input) or the core read
+/// fails.
 pub fn list_notes(
     core: &dyn Collection,
     params: &ListNotesParams,
@@ -96,6 +113,11 @@ pub fn list_notes(
 /// `collection_query` — a raw Anki search expression (the read-only escape
 /// hatch, #97). A malformed expression is invalid input (isolation marks
 /// already stripped by the core's error decoding).
+///
+/// # Errors
+///
+/// Returns an error if the search expression is malformed (invalid input) or
+/// the core read fails.
 pub fn collection_query(
     core: &dyn Collection,
     query: &str,
@@ -437,21 +459,29 @@ fn round3(x: f64) -> f64 {
 /// (semantic only).
 #[derive(Debug, Clone)]
 pub struct SearchSource {
+    /// The result label this source's hits are annotated with.
     pub label: String,
+    /// The query text (or the anchor note's text).
     pub text: String,
+    /// Whether this is a query string (semantic + lexical) vs. an id anchor
+    /// (semantic only).
     pub is_query: bool,
 }
 
 /// The per-call arguments (orchestrator state injected by the harness).
 #[derive(Debug, Clone, Default)]
 pub struct SearchArgs {
+    /// Maximum fused results to return.
     pub top_k: usize,
+    /// The cosine floor for the text-calibrated semantic signal.
     pub threshold: f64,
     /// The RESOLVED deck name (semantic candidates filter on exact equality;
     /// the find_notes fallback uses `deck:` which includes children — the
     /// Python original's behaviour, ported faithfully).
     pub deck: Option<String>,
+    /// Restrict candidates to notes carrying all of these tags.
     pub tags: Vec<String>,
+    /// Note IDs to exclude from results (e.g. the anchor note itself).
     pub exclude: Vec<i64>,
     /// The #201b activation floor for the image modality (None = no gating).
     pub image_floor: Option<f64>,
@@ -1231,6 +1261,17 @@ fn fuse_cross_spaces(
 
 /// The fused search assembly (see module-section comment). `vectors` carries
 /// one query vector per source when `args.semantic`.
+///
+/// # Errors
+///
+/// Returns an error if semantic ranking is requested without an index, or any
+/// index/derived/collection read in the fusion fails.
+///
+/// # Panics
+///
+/// Panics only on an internal invariant violation — a candidate key collected
+/// from the assembled note map must still be present when scored
+/// (`expect("ordered key present")`).
 pub fn search_notes(
     core: &dyn Collection,
     index: Option<&dyn VectorIndex>,

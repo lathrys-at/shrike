@@ -156,7 +156,9 @@ pub struct WatermarkTracker {
 /// The pair of tokens one maintained write holds — one per watermark space.
 #[derive(Debug, Clone, Copy)]
 pub struct WriteTokens {
+    /// The token completing the index-watermark side.
     pub index: WriteToken,
+    /// The token completing the derived-watermark side.
     pub derived: WriteToken,
 }
 
@@ -167,6 +169,10 @@ impl WatermarkTracker {
     /// cloned into the job closure) — the actor's FIFO is what orders
     /// registration with concurrent writes (see the module docs). A post-await
     /// continuation call is unordered and reintroduces the #585 race.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (a prior holder panicked).
     pub fn register(&self, col_mod: i64) -> WriteTokens {
         WriteTokens {
             index: self
@@ -184,6 +190,10 @@ impl WatermarkTracker {
 
     /// Complete the INDEX-watermark side. `Some(V)` = advance the index
     /// watermark to `V`; `None` = leave it behind.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (a prior holder panicked).
     pub fn complete_index(&self, token: WriteToken, success: bool) -> Option<i64> {
         self.index
             .lock()
@@ -193,6 +203,10 @@ impl WatermarkTracker {
 
     /// Complete the DERIVED-watermark side. `Some(V)` = advance the derived
     /// watermark to `V`; `None` = leave it behind.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (a prior holder panicked).
     pub fn complete_derived(&self, token: WriteToken, success: bool) -> Option<i64> {
         self.derived
             .lock()
@@ -202,6 +216,10 @@ impl WatermarkTracker {
 
     /// Clear the INDEX poison floor — a full index reconcile/rebuild healed all
     /// prior index-tail failures.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (a prior holder panicked).
     pub fn clear_index_poison(&self) {
         self.index
             .lock()
@@ -211,6 +229,10 @@ impl WatermarkTracker {
 
     /// Clear the DERIVED poison floor — a full derived rebuild healed all prior
     /// derived-ingest failures.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (a prior holder panicked).
     pub fn clear_derived_poison(&self) {
         self.derived
             .lock()
@@ -221,6 +243,10 @@ impl WatermarkTracker {
     /// Test-only: how many index-side writes are currently in flight. Used to
     /// pin the FIFO-register-in-job guarantee (both writes in flight once their
     /// actor jobs have returned).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (a prior holder panicked).
     #[cfg(test)]
     pub fn index_in_flight(&self) -> usize {
         self.index

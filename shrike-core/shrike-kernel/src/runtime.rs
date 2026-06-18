@@ -56,8 +56,13 @@ use shrike_error::{NativeError, NativeResult};
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 /// Install a custom-built runtime before the first kernel op (the
-/// degenerate single-thread proof; a host with tuned pools). Errors with
-/// the runtime handed back if one is already installed.
+/// degenerate single-thread proof; a host with tuned pools).
+///
+/// # Errors
+///
+/// Returns `Err` carrying the supplied runtime back if one is already
+/// installed (the seam is set-once — the first [`handle`]/[`block_on`] call
+/// installs the multi-thread default if no host did).
 pub fn init_runtime(runtime: tokio::runtime::Runtime) -> Result<(), tokio::runtime::Runtime> {
     RUNTIME.set(runtime)
 }
@@ -78,9 +83,18 @@ pub(crate) fn handle() -> &'static tokio::runtime::Handle {
 }
 
 /// Drive a future to completion on the kernel runtime from a non-async
-/// context (tests; a synchronous embedded host). Panics if called from
-/// inside the runtime (tokio's nested-block_on guard) — async callers just
-/// `.await`.
+/// context (tests; a synchronous embedded host). Installs the multi-thread
+/// default on first use if no host called [`init_runtime`]. Async callers
+/// just `.await` instead.
+///
+/// # Panics
+///
+/// Panics if called from inside the runtime — a runtime worker thread is a
+/// runtime context, and `tokio`'s nested-`block_on` guard refuses there. This
+/// is the same guard the module's sync-dispatch discipline relies on: a
+/// kernel-side sync op that may `block_on` MUST ride `spawn_blocking` (a
+/// blocking-pool thread is not a runtime context), pinned by the
+/// `sync_dispatch_pin` test.
 pub fn block_on<F: Future>(future: F) -> F::Output {
     RUNTIME
         .get_or_init(|| {
@@ -100,6 +114,12 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// half-applied collection write from an abort would be far worse than a
 /// wasted compute) — byte-identical to the pre-#374 cancellation semantics.
 /// A oneshot that closes without a value means the op task panicked.
+///
+/// # Errors
+///
+/// The returned future yields the op's own `NativeResult`, plus an internal
+/// error if the op task vanished without producing one (the oneshot closed
+/// empty — i.e. the spawned task panicked).
 pub fn spawn_op<T: Send + 'static>(
     future: impl Future<Output = NativeResult<T>> + Send + 'static,
 ) -> impl Future<Output = NativeResult<T>> + Send + 'static {
