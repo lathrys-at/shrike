@@ -38,6 +38,9 @@ ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dy
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 ndarray = "0.17"
 # The CLIP byte->pixels->CHW pipeline (#707) — the `image` decode/resize/crop +
-# the accelerated normalize live here now, behind a clean API (was inline).
-shrike-image = { workspace = true }
+# the accelerated normalize live here now, behind a clean API (was inline). The
+# workspace dep is default-features = false (leaf-safe), so request the pipeline
+# explicitly: `preprocess` pulls the `image` crate (as the inline code did) and
+# `accel` is the FMA normalize.
+shrike-image = { workspace = true, features = ["preprocess", "accel"] }
 tracing = "0.1"

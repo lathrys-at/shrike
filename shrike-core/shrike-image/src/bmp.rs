@@ -54,7 +54,10 @@ mod tests {
 
     /// The encoded BMP round-trips losslessly through the `image` decoder: the
     /// dimensions and every pixel come back exactly as `pixel` produced them.
-    /// This is the home of the probe set's old decodability check.
+    /// This is the home of the probe set's old decodability check. Gated on
+    /// `preprocess` because it is the only config where `image` is a dep — the
+    /// dependency-free encoder above is tested by `header_offsets_and_size`.
+    #[cfg(feature = "preprocess")]
     #[test]
     fn bmp_round_trips_through_decoder() {
         let side = 17u32; // odd → exercises the row padding (51 % 4 != 0)

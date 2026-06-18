@@ -1,8 +1,10 @@
 # The engine contract crate (#342): the traits the kernel consumes and every
-# engine crate implements. A floor crate — no engine deps, no kernel dep, no
-# pyo3, no runtime; its only non-trivial sibling dep is shrike-image (another
-# floor utility), for the probe's BMP encoder (#707). A change needing more than
-# shrike-error + futures + serde (+ that encoder) belongs somewhere else.
+# engine crate implements. A LEAF — no engine deps, no kernel dep, no pyo3,
+# no runtime. It depends on shrike-image only for the dependency-free BMP encoder
+# (the probe's image set, #707) — `default-features = false`, so the heavy
+# `image` decode/resize crate is NOT pulled in (that stays behind shrike-image's
+# `preprocess` feature). A change needing more than shrike-error + futures +
+# serde (+ that encoder) belongs somewhere else.
 [package]
 name = "shrike-engine-api"
 version = "0.1.0"
@@ -12,7 +14,9 @@ license = "AGPL-3.0-or-later"
 [dependencies]
 shrike-error = { workspace = true }
 # The vision batch-safety probe synthesizes its BMP image set via shrike-image's
-# dependency-free encoder (#707) — format code lives there, not in this leaf.
+# dependency-free encoder (#707). The workspace dep is default-features = false,
+# so this LEAF gets ONLY the encoder — the `image` decode/resize crate stays
+# behind shrike-image's `preprocess` feature (which this crate does NOT request).
 shrike-image = { workspace = true }
 # Runtime-agnostic future types only — no tokio (or any executor) assumption,
 # the same rule as the kernel (#308/#310).
