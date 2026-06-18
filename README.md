@@ -337,12 +337,12 @@ If you configured embedding before this config shape existed: a legacy `embeddin
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e "shrike-py/[dev]"
 
-pytest tests/unit -v                         # unit tests (no server)
-pytest tests/integration -v -m integration   # integration tests (real server subprocess)
-ruff check src/shrike/
-mypy src/shrike/
+pytest shrike-py/tests/unit -v                         # unit tests (no server)
+pytest shrike-py/tests/integration -v -m integration   # integration tests (real server subprocess)
+ruff check shrike-py/src/shrike/
+mypy --config-file shrike-py/pyproject.toml shrike-py/src/shrike/
 ```
 
 ## Contributing

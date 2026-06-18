@@ -1,22 +1,22 @@
 load("@rules_python//python:defs.bzl", "py_binary")
 load("@shrike_pip//:requirements.bzl", "requirement")
 
-# Runnable entry points (thin launchers over //src/shrike:shrike). Kept in their
+# Runnable entry points (thin launchers over //shrike-py/src/shrike:shrike). Kept in their
 # own package so a binary's output path never collides with a package subdir.
-#   ./bazel run //bin:server -- --collection /path/to/collection.anki2
-#   ./bazel run //bin:shrike -- info
+#   ./bazel run //shrike-py/bin:server -- --collection /path/to/collection.anki2
+#   ./bazel run //shrike-py/bin:shrike -- info
 
 py_binary(
     name = "server",
     srcs = ["server.py"],
     main = "server.py",
     visibility = ["//visibility:public"],
-    deps = ["//src/shrike:shrike"],
+    deps = ["//shrike-py/src/shrike:shrike"],
 )
 
 # The same server with the in-process embedding backends (onnx/clip) bundled, for
 # the embedding tests whose server loads one (`--embedding-backend onnx`). The
-# default //bin:server keeps these lazy/optional; this test-only variant makes
+# default //shrike-py/bin:server keeps these lazy/optional; this test-only variant makes
 # them importable in the spawned server. The integration conftest prefers it when
 # a test data-deps it (see _server_launch_cmd).
 py_binary(
@@ -26,7 +26,7 @@ py_binary(
     testonly = True,
     visibility = ["//visibility:public"],
     deps = [
-        "//src/shrike:shrike",
+        "//shrike-py/src/shrike:shrike",
         # The onnxruntime wheel carries the shared runtime the native engine
         # dlopens; tokenization/image-prep run crate-side (#278 cutover).
         requirement("onnxruntime"),
@@ -38,5 +38,5 @@ py_binary(
     srcs = ["shrike.py"],
     main = "shrike.py",
     visibility = ["//visibility:public"],
-    deps = ["//src/shrike:shrike"],
+    deps = ["//shrike-py/src/shrike:shrike"],
 )

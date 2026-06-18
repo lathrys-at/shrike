@@ -23,7 +23,36 @@ from pathlib import Path
 
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+def _repo_root() -> Path:
+    """The repository root, where scripts/ lives.
+
+    The harness now lives in shrike-py/ (#731), so this file is at
+    shrike-py/tests/conftest.py — scripts/native-stale.sh is two levels up, NOT
+    one. Resolve via `git rev-parse --show-toplevel` (path-independent, exactly
+    how native-stale.sh itself finds the root) and fall back to walking up for
+    the rare source/sdist checkout that has no .git (where _STALE_SCRIPT won't
+    exist anyway, so the backstop no-ops).
+    """
+    here = Path(__file__).resolve()
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=here.parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(out.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # No git — walk up to the first ancestor carrying scripts/native-stale.sh.
+        for parent in here.parents:
+            if (parent / "scripts" / "native-stale.sh").exists():
+                return parent
+        return here.parent.parent
+
+
+_REPO_ROOT = _repo_root()
 _STALE_SCRIPT = _REPO_ROOT / "scripts" / "native-stale.sh"
 
 

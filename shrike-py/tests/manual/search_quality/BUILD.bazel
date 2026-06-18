@@ -28,7 +28,7 @@ py_library(
         "ASSETS.md",
     ]),
     imports = ["../../.."],  # repo root on sys.path so `tests.manual.search_quality.*` resolves
-    visibility = ["//tests:__subpackages__"],
+    visibility = ["//shrike-py/tests:__subpackages__"],
     deps = [requirement("httpx")],
 )
 
@@ -45,18 +45,18 @@ py_library(
         "runner.py",
     ],
     imports = ["../../.."],
-    visibility = ["//tests:__subpackages__"],
+    visibility = ["//shrike-py/tests:__subpackages__"],
     deps = [
         ":search_quality",
         "//shrike-core/shrike-pyo3:shrike_native",
-        "//src/shrike:derived",
-        "//src/shrike:embedding",
-        "//src/shrike:harness",
-        "//src/shrike:tools",
+        "//shrike-py/src/shrike:derived",
+        "//shrike-py/src/shrike:embedding",
+        "//shrike-py/src/shrike:harness",
+        "//shrike-py/src/shrike:tools",
     ],
 )
 
-# Source files for the //:sdist source distribution (#245).
+# Source files for the //shrike-py:sdist source distribution (#245).
 filegroup(
     name = "dist_files",
     testonly = False,

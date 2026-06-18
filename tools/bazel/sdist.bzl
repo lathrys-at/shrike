@@ -1,4 +1,4 @@
-"""//:sdist — a hermetic, stamped Python source distribution (#245).
+"""//shrike-py:sdist — a hermetic, stamped Python source distribution (#245).
 
 hatchling builds the sdist from the explicit [tool.hatch.build.targets.sdist] include
 (git-independent — see pyproject.toml), with the version stamped from STABLE_VERSION
@@ -13,6 +13,7 @@ def _py_sdist_impl(ctx):
     args = ctx.actions.args()
     args.add("--version-file", ctx.info_file)
     args.add("--out", out)
+    args.add("--project-subdir", ctx.attr.project_subdir)
     args.add_all(ctx.files.srcs)
     args.use_param_file("@%s", use_always = True)
     args.set_param_file_format("multiline")
@@ -36,6 +37,12 @@ py_sdist = rule(
             allow_files = True,
             mandatory = True,
             doc = "Files staged for the sdist build — must cover the pyproject include set.",
+        ),
+        "project_subdir": attr.string(
+            default = "",
+            doc = "Directory within the staged tree that holds pyproject.toml (the " +
+                  "project root). Empty = the stage root. Set to the unit dir " +
+                  "(e.g. \"shrike-py\") when pyproject lives in a subdir (#731).",
         ),
         "_builder": attr.label(
             default = "//tools/bazel:sdist_builder",

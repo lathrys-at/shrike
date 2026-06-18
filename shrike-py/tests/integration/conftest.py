@@ -428,7 +428,7 @@ def _server_launch_cmd() -> list[str]:
     """Base argv to launch a Shrike server, abstracted over the runtime.
 
     Under Bazel, `-m shrike.server` against the sandbox's import layout isn't
-    reliable, so resolve the //bin:server py_binary through runfiles and run it
+    reliable, so resolve the //shrike-py/bin:server py_binary through runfiles and run it
     directly (it's a data dep of this conftest's target). Under plain pytest, use
     the current interpreter's `-m shrike.server` — unchanged behaviour, so the
     pip path is untouched (coexistence).

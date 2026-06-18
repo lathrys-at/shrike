@@ -1386,3 +1386,71 @@ it); the two `__init__.py` files that carry code (`server/`, `recognition/`) rid
 their own targets with the right deps. Logger names (`getLogger("shrike.collection")`
 etc.) were deliberately left unchanged — they are an operational contract
 (`config logging.levels.*` keys on them), not import paths.
+
+## The Python harness relocated into a top-level `shrike-py/` unit (#731, June 2026)
+
+**`src/shrike/`, `tests/`, `bin/`, and `pyproject.toml` moved into a
+self-contained `shrike-py/` directory, mirroring `shrike-core/`.** The repository
+pairing becomes `shrike-core/` (the Rust workspace, made subtree-extractable in
+#696) ↔ `shrike-py/` (the Python harness), bridged by the `shrike_native`
+extension. This is the Python counterpart to the Rust crate-tree reorg (#703);
+the unit is now *subtree-extractable* (the next phase could `git subtree split`
+it into its own repo) — but no extraction is performed, only enabled. It is a
+**pure relocation + build-wiring repoint**: the package's internal structure
+(the #730 layering) and behaviour are untouched, and the public surface (import
+name `shrike`, the `shrike` CLI, `ShrikeClient`, `python -m shrike.server`) holds.
+
+**The unit owns its build artifacts: `//shrike-py:wheel` / `//shrike-py:sdist`,
+not `//:wheel` at the root.** Extractability is the reason — `shrike-core/` owns
+its build, so `shrike-py/` should too. The root `BUILD.bazel` keeps only
+`exports_files` (MODULE.bazel for the llama-lock tripwire; README/LICENSE/CHANGELOG
+for the sdist to stage). The clean dependency edge to the Rust side stays the
+**published extension only** (`//shrike-core/shrike-pyo3:wheel_files` and its
+platform `config_setting`s) — no reach into the workspace internals.
+
+**The requirements locks and the `@shrike_pip` hub stay at the repo root.**
+bzlmod is single-module: `MODULE.bazel` (root-only) declares the `@shrike_pip`
+hub that both the Rust crate-universe side and the Python side resolve against.
+Moving `requirements_lock.txt` under the unit buys no extractability (the hub
+declaration can't move with it) and would muddy the Rust side, so the locks +
+MODULE.bazel are unchanged. (A true extraction — #733 territory — would carry a
+copy.) `scripts/` and `tools/` likewise stay at the root: they are shared
+dev/build tooling (`scripts:serve_lib` reaches into `//shrike-py/src/shrike:cli`
+by label), not part of the shipped distribution.
+
+**Three pyproject knobs make the in-subdir build work without changing the
+public artifact.** (1) hatch-vcs `raw-options.root = ".."` points setuptools-scm
+at the repo-root `.git` from inside the unit — without it a lifted `python -m
+build` and the dev `pip install -e shrike-py/` both fail ("a repository was found
+in a parent directory"). (2) `readme = "../README.md"` keeps the PyPI long
+description identical to the pre-relocation wheel **and** in lockstep with the
+Bazel wheel's `description_file = //:README.md` (the parity gate compares it) —
+one project-wide README at the root, reached by a relative path hatchling accepts.
+(3) The Bazel sdist builder gained a `project_subdir` (set to `shrike-py`): it
+runs hatchling against that subdir, copies the repo-root staged files into it so
+the include glob packages them, and rewrites the staged `readme` to the local
+copy for that build (the repo pyproject is untouched). Both build paths are
+proven in CI-equivalent runs: the in-repo Bazel wheel/sdist AND a lifted `python
+-m build` from inside `shrike-py/`.
+
+**Repo-root resolution that crossed the unit boundary moved to `git
+rev-parse`.** Two consumers reach files that stayed at the root —
+`tests/conftest.py` (the native-stale backstop calls `scripts/native-stale.sh`)
+and `test_llama_lock_sync.py` (reads `tools/check_llama_lock.py` + `MODULE.bazel`).
+Their old `Path(__file__).parents[N]` arithmetic pointed at the repo root only
+because the package sat at the root; after the move it lands on `shrike-py/`.
+Both now resolve the root via `git rev-parse --show-toplevel` (path-independent,
+exactly how `native-stale.sh` itself finds the root), with a walk-up fallback.
+Within-tree path arithmetic (the search-quality fixtures, `build_collection`'s
+`src` pointer) is depth-preserved by the move and needed no change.
+
+**The CI path-filter and the lint config were the load-bearing repoints.**
+`test.yml`'s dorny `paths-filter` (`src/**`, `tests/**`, `pyproject.toml`) had to
+become `shrike-py/**` or the lint lane would silently mis-skip a harness change
+(the #418 `tests/**` gap footgun). mypy reads its config from cwd, not the
+checked tree, so the lint step names it explicitly (`mypy --config-file
+shrike-py/pyproject.toml shrike-py/src/shrike/`); ruff discovers config from the
+file tree, so it needed only the path update. The `.venv` stays at the repo root
+(install is `pip install -e shrike-py/[dev]`) so `native-stale.sh`, the `.envrc`
+auto-rebuild, and the pytest backstop — all keyed off `$VIRTUAL_ENV`/`sys.prefix`
+— keep working unchanged.

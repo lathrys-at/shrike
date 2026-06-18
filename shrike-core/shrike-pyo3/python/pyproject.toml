@@ -1,6 +1,6 @@
 # Dev-local packaging for the shrike_native extension package (#269).
 #
-# The CANONICAL release artifact is the Bazel py_wheel (//:wheel — the
+# The CANONICAL release artifact is the Bazel py_wheel (//shrike-py:wheel — the
 # platform-tagged shrike-mcp wheel ships shrike_native inside it since #497;
 # there is no published shrike-native dist). This file exists so `scripts/build-native.sh` can
 # `pip install -e` the package into a working venv after a cargo build drops
@@ -21,3 +21,16 @@ license = "AGPL-3.0-or-later"
 packages = ["shrike_native"]
 # The compiled extension is dropped in by scripts/build-native.sh, not tracked in git.
 artifacts = ["shrike_native/*.so"]
+
+# Ruff config for the extension's Python shim. This shim is lint-checked alongside
+# the harness (the lint lane names `shrike-core/shrike-pyo3/python/` explicitly,
+# #437), but it lives OUTSIDE shrike-py/, so ruff's config discovery can't reach
+# shrike-py/pyproject.toml's [tool.ruff] from here (#731). Mirror it so the shim is
+# held to the same line length / target / rule set rather than ruff's defaults
+# (line-length 88, py310), which would otherwise reflow the committed .pyi stubs.
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]

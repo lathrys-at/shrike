@@ -57,7 +57,7 @@ Enforced by `//shrike-core:layering_check`.
 ```bash
 # Bazel (CI runs one `./bazel test //...` over the whole graph; this is its native slice):
 ./bazel test //shrike-core/...                  # crates, layering check, smoke, stubtest
-./bazel build //:wheel --stamp             # the platform-tagged shrike-mcp wheel (manual tag)
+./bazel build //shrike-py:wheel --stamp             # the platform-tagged shrike-mcp wheel (manual tag)
 
 # Plain cargo (fast inner loop; .cargo/config.toml carries the macOS link flags):
 cd native && cargo build && cargo test
@@ -101,7 +101,7 @@ Bazel crate graph to it.
 
 ## Packaging
 
-The release artifact is `//:wheel`: an abi3 (cp312+) **platform-tagged
+The release artifact is `//shrike-py:wheel`: an abi3 (cp312+) **platform-tagged
 `shrike-mcp` wheel** that ships the Python package *and* the `shrike_native`
 package (`_native.so`, the stubs, `py.typed`) in one artifact — since the
 kernel inversion the server *requires* `shrike_native` (it is the kernel, not

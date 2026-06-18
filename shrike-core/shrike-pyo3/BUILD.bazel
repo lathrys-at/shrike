@@ -135,7 +135,7 @@ py_test(
     ],
 )
 
-# Platform config_settings for the //:wheel platform tag (#497 — the
+# Platform config_settings for the //shrike-py:wheel platform tag (#497 — the
 # platform-tagged shrike-mcp wheel selects over these).
 config_setting(
     name = "macos_arm64",
@@ -169,7 +169,7 @@ config_setting(
     ],
 )
 
-# The shrike_native package payload for the release wheel: //:wheel (the
+# The shrike_native package payload for the release wheel: //shrike-py:wheel (the
 # platform-tagged shrike-mcp wheel) names this filegroup in its deps, so the
 # extension ships INSIDE shrike-mcp (#497) — the standalone shrike-native
 # py_wheel that used to live here was retired with it (no separate dist, no

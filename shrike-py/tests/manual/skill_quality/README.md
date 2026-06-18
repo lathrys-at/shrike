@@ -28,7 +28,7 @@ and are ignored by the generator.
 - For semantic search and upsert neighbors (the interesting half), the
   `llama-server` binary and an embedding model. The pinned `llama-server` is a
   sha256-pinned Bazel external (`MODULE.bazel`); the Bazel embedding lane
-  (`./bazel test //tests/integration:embedding_core`) fetches it hermetically.
+  (`./bazel test //shrike-py/tests/integration:embedding_core`) fetches it hermetically.
   For a non-Bazel manual run, bring your own `llama-server` on `PATH` (or set
   `LLAMA_SERVER_PATH`) and point `SHRIKE_EMBEDDING_MODEL` at a GGUF.
 

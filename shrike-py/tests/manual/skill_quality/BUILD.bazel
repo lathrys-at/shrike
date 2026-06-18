@@ -11,5 +11,5 @@ py_library(
     data = ["collection.json"],
     imports = ["../../.."],
     visibility = ["//visibility:public"],
-    deps = ["//src/shrike:collection"],
+    deps = ["//shrike-py/src/shrike:collection"],
 )

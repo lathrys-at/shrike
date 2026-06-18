@@ -49,12 +49,12 @@ extension).
 ./bazel test //...                       # everything non-manual: all crate tests,
                                          #   unit/native/integration py suites,
                                          #   stubtest, layering_check
-./bazel test //tests/unit:unit           # one suite
+./bazel test //shrike-py/tests/unit:unit           # one suite
 ./bazel test -- //... \
-  //tests/integration:embedding_core \
-  //tests/integration:embedding_backends # what CI runs (adds the manual halves)
-./bazel build //:wheel --stamp           # the platform wheel (or tools/build-wheel.sh)
-./bazel build //:sdist --stamp           # the sdist (or tools/build-sdist.sh)
+  //shrike-py/tests/integration:embedding_core \
+  //shrike-py/tests/integration:embedding_backends # what CI runs (adds the manual halves)
+./bazel build //shrike-py:wheel --stamp           # the platform wheel (or tools/build-wheel.sh)
+./bazel build //shrike-py:sdist --stamp           # the sdist (or tools/build-sdist.sh)
 ./bazel build //shrike-skills:skill      # the create-cards.skill bundle (unversioned)
 ```
 
@@ -73,8 +73,8 @@ assembles the models into `$SHRIKE_TEST_MODEL_DIR`, so there is **no separate
 fetch step**:
 
 ```bash
-./bazel test //tests/integration:embedding_core      # llama-server + GGUF semantic/neighbor lane
-./bazel test //tests/integration:embedding_backends  # the onnx/clip/llama backend zoo
+./bazel test //shrike-py/tests/integration:embedding_core      # llama-server + GGUF semantic/neighbor lane
+./bazel test //shrike-py/tests/integration:embedding_backends  # the onnx/clip/llama backend zoo
 ```
 
 For a non-Bazel manual run (the QA harness, a `serve --profile` with a llama
@@ -102,7 +102,7 @@ clean release version. The pip lane reads the same tag through hatch-vcs.
 - **The PyO3 extension** (`//shrike-core/shrike-pyo3:shrike_pyo3_native`) builds as
   an abi3-py312 cdylib — no libpython at build time — and is wrapped into
   the importable `//shrike-core/shrike-pyo3:shrike_native` py_library that
-  `//src/shrike` depends on. `:mobile_skeleton` is a build-only proof that
+  `//shrike-py/src/shrike` depends on. `:mobile_skeleton` is a build-only proof that
   the mobile feature set keeps compiling; `:stubtest` pins the `.pyi` stubs
   against the real module; `//shrike-core:layering_check` enforces the crate
   layering rules (pyo3 only in binding crates, no kernel→engine deps).

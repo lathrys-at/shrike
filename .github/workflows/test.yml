@@ -61,9 +61,13 @@ jobs:
         with:
           filters: |
             code:
-              - 'src/**'
-              - 'tests/**'
-              - 'pyproject.toml'
+              # The Python harness moved into shrike-py/ (#731): src/, tests/ and
+              # pyproject.toml all live under it now. These globs MUST track the move
+              # or the lint lane silently mis-skips on a harness change (the #418
+              # tests/** gap footgun).
+              - 'shrike-py/src/**'
+              - 'shrike-py/tests/**'
+              - 'shrike-py/pyproject.toml'
               - '.github/workflows/test.yml'
             native:
               # Gates the lint job's cargo steps (fmt/clippy) only — the test
@@ -105,19 +109,22 @@ jobs:
       - uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
-          cache-dependency-glob: pyproject.toml
+          cache-dependency-glob: shrike-py/pyproject.toml
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
+        # pyproject.toml lives in the shrike-py/ unit (#731).
+        run: uv pip install --system -e "shrike-py/[dev]"
       # shrike-core/shrike-pyo3/python is the extension's Python shim package (#437):
       # outside src/, so it was in no ruff scope anywhere and lint debt
       # accumulated invisibly. (Its .pyi stubs are additionally
       # stubtest-validated under Bazel in the tests lane.)
       - name: Ruff check
-        run: ruff check src/shrike/ tests/ shrike-core/shrike-pyo3/python/
+        run: ruff check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/
       - name: Ruff format check
-        run: ruff format --check src/shrike/ tests/ shrike-core/shrike-pyo3/python/
+        run: ruff format --check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/
       - name: Mypy
-        run: mypy src/shrike/
+        # mypy discovers config from cwd, not the checked files' tree — name the
+        # harness pyproject explicitly so its [tool.mypy] overrides apply (#731).
+        run: mypy --config-file shrike-py/pyproject.toml shrike-py/src/shrike/
       # Rust lint (#304): the idiomatic gates for the native workspace —
       # rustfmt and clippy-as-errors. Gated on the native path filter so a
       # pure-Python PR doesn't pay for a Rust toolchain or a clippy build;
@@ -180,7 +187,7 @@ jobs:
       - name: Run the test graph
         run: |
           ./bazel test \
-            -- //... //tests/integration:embedding_core //tests/integration:embedding_backends
+            -- //... //shrike-py/tests/integration:embedding_core //shrike-py/tests/integration:embedding_backends
       # Save even when tests failed (#438): the compiled graph + passing test
       # results are valid regardless of which test flaked. `save: pr` (#645):
       # save ONLY the churning bazel-disk (compiled-crate + test-result) entry.
@@ -234,7 +241,7 @@ jobs:
       - name: Run the test graph
         run: |
           ./bazel test \
-            -- //... //tests/integration:embedding_core //tests/integration:embedding_backends
+            -- //... //shrike-py/tests/integration:embedding_core //shrike-py/tests/integration:embedding_backends
       # `save: all` (the default), NOT `pr` (#645): warm-cache.yml only warms the
       # linux x64 scope, so the arm64/macos scopes have NO main-warmed
       # bazel-repo/bazel-models entry to read — this rare label-gated lane is the

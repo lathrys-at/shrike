@@ -12,7 +12,7 @@ them is **who invokes it**:
 
 | Directory | Who invokes it | Holds |
 |-----------|----------------|-------|
-| [`bin/`](../bin/README.md) | the end user / a spawned server | Shipped/runnable product entry points (`py_binary` launchers over `//src/shrike:shrike`). **Load-bearing**, not cruft. |
+| [`shrike-py/bin/`](../shrike-py/bin/README.md) | the end user / a spawned server | Shipped/runnable product entry points (`py_binary` launchers over `//shrike-py/src/shrike:shrike`). **Load-bearing**, not cruft. |
 | `tools/` | **the build** (Bazel, CI) | Build-system internals: Bazel macros, version-pin locks + their writers/checkers, sdist/wheel/requirements builders, workspace-status, hermetic-toolchain CI smoke tests. |
 | [`scripts/`](../scripts/README.md) | **a human** at a dev shell | Dev/maintenance entry points: environment setup, the native build, coverage runners. |
 
@@ -28,7 +28,7 @@ fix up their environment lives in `scripts/`, even if its output feeds a build.
 - `bazel/` — shared Bazel macros + launchers (`pytest_test`, the sdist builder, `defs.bzl`/`sdist.bzl`).
 - `bazel.lock` — the pinned build-system bootstrap (bazelisk + Bazel + their shas), consumed by the committed `./bazel` wrapper.
 - `update-bazel-lock.sh` — regenerates `bazel.lock` + `.bazelversion`. Mirrors `update-llama-lock.sh`.
-- `workspace_status.sh` — the `--workspace_status_command` stamp (git version → `STABLE_VERSION`, consumed by `//:wheel`/`//:sdist`).
+- `workspace_status.sh` — the `--workspace_status_command` stamp (git version → `STABLE_VERSION`, consumed by `//shrike-py:wheel`/`//shrike-py:sdist`).
 
 ### Version-pin locks
 - `llama-server.lock` — the pinned llama.cpp release tag + per-platform SHA256s. Consumed by `MODULE.bazel`'s `llama_server_*` http_archives (duplicated there because Bazel can't read the lock at module-resolution time) and by the CI model-cache keys.
@@ -41,7 +41,7 @@ fix up their environment lives in `scripts/`, even if its output feeds a build.
 > regenerator (parallel to `update-bazel-lock.sh`).
 
 ### Packaging / requirements
-- `build-wheel.sh` / `build-sdist.sh` — build the release `//:wheel` / `//:sdist` Bazel targets.
+- `build-wheel.sh` / `build-sdist.sh` — build the release `//shrike-py:wheel` / `//shrike-py:sdist` Bazel targets.
 - `check-wheel-parity.sh` — asserts the Bazel wheel's metadata matches `pyproject.toml`.
 - `update-requirements.sh` — regenerates the pinned `requirements*.txt` from the lock inputs.
 - `sdist-requirements.in` — the sdist builder's build-tool deps (kept out of the runtime lock).

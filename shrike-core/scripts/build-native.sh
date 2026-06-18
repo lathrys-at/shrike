@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the Shrike native extension with cargo and install it (editable) into the
-# active venv (#269). The canonical release artifact is the Bazel wheel (//:wheel —
+# active venv (#269). The canonical release artifact is the Bazel wheel (//shrike-py:wheel —
 # the platform-tagged shrike-mcp wheel ships shrike_native inside it since #497);
 # this is the fast inner loop for the pip lane:
 #

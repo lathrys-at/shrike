@@ -15,8 +15,8 @@
 set -euo pipefail
 
 # Repo root from the script's own location, so the committed coverage hook
-# (tools/coverage_subprocess.pth) is found regardless of cwd. The rest of the
-# script still expects to run from the repo root (it uses $PWD/pyproject.toml).
+# (tools/coverage_subprocess.pth) and the harness pyproject (shrike-py/pyproject.toml,
+# which carries [tool.coverage.*]) are found regardless of cwd.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Since the native cutover the suite imports shrike_native, which pip alone
@@ -48,7 +48,8 @@ if [ ! -f "$HOOK" ]; then
   cp "$ROOT/tools/coverage_subprocess.pth" "$HOOK"
 fi
 
-export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
+# The [tool.coverage.*] config lives in the harness pyproject, now under shrike-py/ (#731).
+export COVERAGE_PROCESS_START="$ROOT/shrike-py/pyproject.toml"
 
 # Combined `-n auto` run over both suites, matching CI. `-m "not embedding and not
 # search_quality"` keeps the embedding-gated AND the manual search-quality tests out
@@ -58,7 +59,8 @@ export COVERAGE_PROCESS_START="$PWD/pyproject.toml"
 coverage erase
 # ${arr[@]+...} guard: bash 3.2 (macOS /bin/bash) treats an EMPTY array as
 # unbound under `set -u`, so a bare "${pytest_args[@]}" aborts a no-arg run.
-coverage run --parallel-mode -m pytest tests/unit tests/integration tests/native \
+coverage run --parallel-mode -m pytest \
+  shrike-py/tests/unit shrike-py/tests/integration shrike-py/tests/native \
   -q -m "not embedding and not search_quality" -n auto ${pytest_args[@]+"${pytest_args[@]}"}
 coverage combine
 

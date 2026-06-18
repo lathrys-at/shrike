@@ -9,9 +9,36 @@ against the real checked-in files and exercises the parsers on fixtures.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+def _repo_root() -> Path:
+    """The repository root, where tools/ + MODULE.bazel live.
+
+    The harness moved into shrike-py/ (#731), so parents[2] is now shrike-py/, not
+    the repo root — tools/check_llama_lock.py + MODULE.bazel + the lock stayed at the
+    root. Resolve via git (path-independent), falling back to walking up to the
+    ancestor that carries MODULE.bazel.
+    """
+    here = Path(__file__).resolve()
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=here.parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(out.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        for parent in here.parents:
+            if (parent / "MODULE.bazel").exists():
+                return parent
+        return here.parents[2]
+
+
+_REPO_ROOT = _repo_root()
 _CHECKER = _REPO_ROOT / "tools" / "check_llama_lock.py"
 
 _spec = importlib.util.spec_from_file_location("check_llama_lock", _CHECKER)

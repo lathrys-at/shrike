@@ -1,4 +1,4 @@
-"""Build the Python sdist for the //:sdist Bazel rule (#245).
+"""Build the Python sdist for the //shrike-py:sdist Bazel rule (#245).
 
 Invoked as a build action: stages the declared source files into a writable tree
 (Bazel inputs are read-only, and hatch-vcs's build hook writes _version.py into
@@ -9,10 +9,19 @@ install). The produced shrike_mcp-<version>.tar.gz is copied to the rule's outpu
 
 The explicit sdist file selection is injected into the *staged* pyproject.toml (not
 the repo's), so the repo's `python -m build` keeps its git-based sdist unchanged while
-//:sdist ships exactly the staged tree (everything the rule's srcs put here).
+//shrike-py:sdist ships exactly the staged tree (everything the rule's srcs put here).
+
+--project-subdir names the directory within the stage that holds pyproject.toml — the
+harness now lives in shrike-py/ (#731), so pyproject + the package sit under
+shrike-py/ while README/LICENSE/CHANGELOG stay at the repo root (one project-wide
+set). The repo-root files are staged outside the project subdir, so they're COPIED
+into it (and the staged pyproject's `readme = "../README.md"` is rewritten to the
+local copy) — otherwise hatchling's `include` glob, rooted at the project dir, would
+ship neither the metadata long-description source nor the licence in the tarball.
 
 Args (read from a Bazel param file via @file): --version-file <stable-status.txt>,
---out <output path>, then the source file paths (positional).
+--out <output path>, --project-subdir <dir within stage>, then the source file paths
+(positional).
 """
 
 from __future__ import annotations
@@ -37,6 +46,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(fromfile_prefix_chars="@")
     ap.add_argument("--version-file", required=True)
     ap.add_argument("--out", required=True)
+    # The dir within the stage that carries pyproject.toml (the project root for the
+    # build). Empty = the stage root (the pre-#731 layout).
+    ap.add_argument("--project-subdir", default="")
     ap.add_argument("srcs", nargs="*")
     args = ap.parse_args()
 
@@ -52,12 +64,35 @@ def main() -> None:
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copy2(src, dst)
 
-        # Inject an explicit, git-independent sdist file selection into the staged
-        # pyproject (not the repo's): ship everything staged here — the rule's srcs
-        # already exclude the BUILD files and bytecode. Keeps `python -m build` in the
-        # repo (git-based) unchanged.
-        with open(os.path.join(stage, "pyproject.toml"), "a") as f:
-            f.write('\n[tool.hatch.build.targets.sdist]\ninclude = ["**/*"]\n')
+        # The project root for the build (where pyproject.toml lives).
+        project_root = os.path.join(stage, args.project_subdir) if args.project_subdir else stage
+
+        # Repo-root files staged outside the project subdir (README/LICENSE/CHANGELOG)
+        # must live INSIDE the project root or hatchling's include glob (rooted there)
+        # won't package them. Copy each stage-root file that isn't already under the
+        # project subdir into the project root.
+        if args.project_subdir:
+            for name in os.listdir(stage):
+                p = os.path.join(stage, name)
+                if name == args.project_subdir:
+                    continue
+                if os.path.isfile(p):
+                    shutil.copy2(p, os.path.join(project_root, name))
+
+        # The shipped pyproject reads the README from the repo root (`../README.md`,
+        # #731); inside the staged project root the copy sits beside pyproject, so
+        # rewrite it to the local name for this build only (the repo's pyproject is
+        # untouched).
+        pyproject = os.path.join(project_root, "pyproject.toml")
+        with open(pyproject) as f:
+            text = f.read()
+        text = text.replace('readme = "../README.md"', 'readme = "README.md"')
+        # Inject an explicit, git-independent sdist file selection: ship everything
+        # staged here — the rule's srcs already exclude the BUILD files and bytecode.
+        # Keeps `python -m build` in the repo (git-based) unchanged.
+        text += '\n[tool.hatch.build.targets.sdist]\ninclude = ["**/*"]\n'
+        with open(pyproject, "w") as f:
+            f.write(text)
 
         outdir = os.path.join(tmp, "out")
         os.makedirs(outdir)
@@ -65,7 +100,7 @@ def main() -> None:
 
         from build import ProjectBuilder  # from this binary's runfiles
 
-        ProjectBuilder(stage).build("sdist", outdir)
+        ProjectBuilder(project_root).build("sdist", outdir)
 
         produced = glob.glob(os.path.join(outdir, "*.tar.gz"))
         if not produced:

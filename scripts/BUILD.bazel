@@ -29,11 +29,11 @@ py_library(
     imports = ["."],
     visibility = ["//visibility:public"],
     deps = [
-        "//src/shrike:cli",
+        "//shrike-py/src/shrike:cli",
         # The pinned-model fetch util (the off-Bazel script-fallback download
         # source) + its *_DIR_NAME constants; the QA fixture builder for --seed qa.
-        "//tests/integration:model_cache",
-        "//tests/manual/skill_quality:build_collection",
+        "//shrike-py/tests/integration:model_cache",
+        "//shrike-py/tests/manual/skill_quality:build_collection",
         # Runfiles resolver: locate the assembled per-model dirs under `bazel run`.
         "@rules_python//python/runfiles",
         requirement("pyyaml"),

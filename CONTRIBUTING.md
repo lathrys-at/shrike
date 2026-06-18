@@ -56,7 +56,7 @@ backward compatibility; don't rush it.
   testers.
 - The package version is **derived from the git tag** by hatch-vcs (config in
   `pyproject.toml`), not hand-maintained — so it can't drift from the tag. There's
-  no `__version__` constant to bump: the build writes `src/shrike/_version.py`
+  no `__version__` constant to bump: the build writes `shrike-py/src/shrike/_version.py`
   (gitignored) from `git describe`, and `shrike/__init__.py` re-exports it. Between
   releases the version is a dev version like `0.3.2.dev7+g1a2b3c4`; on a tagged
   commit it's the clean `0.3.2`. (CI checks out with `fetch-depth: 0` so the tag is
@@ -148,8 +148,9 @@ Three top-level directories hold non-package code. The line between them is **wh
 invokes it** — each carries a `README.md` with its full inventory:
 
 - **`bin/`** — shipped/runnable product entry points: the Bazel `py_binary`
-  launchers over `//src/shrike:shrike` (`//bin:shrike`, `//bin:server`,
-  `//bin:server_embedding`). Load-bearing, kept outside the `shrike` package so a
+  launchers over `//shrike-py/src/shrike:shrike` (`//shrike-py/bin:shrike`,
+  `//shrike-py/bin:server`, `//shrike-py/bin:server_embedding`). Load-bearing, kept
+  outside the `shrike` package so a
   binary's output path never collides with a package subdir. Not cruft.
 - **`tools/`** — invoked by the build: Bazel macros (`//tools/bazel`), the
   version-pin locks + their writers/checkers, the sdist/wheel/requirements
@@ -168,11 +169,11 @@ build (e.g. `build-native.sh`).
 ## Local checks before a PR
 
 ```bash
-ruff check src/shrike/ tests/ shrike-core/shrike-pyo3/python/
-ruff format --check src/shrike/ tests/ shrike-core/shrike-pyo3/python/
-mypy src/shrike/
-pytest tests/unit -q
-pytest tests/integration -q -m "integration and not embedding"
+ruff check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/
+ruff format --check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/
+mypy --config-file shrike-py/pyproject.toml shrike-py/src/shrike/
+pytest shrike-py/tests/unit -q
+pytest shrike-py/tests/integration -q -m "integration and not embedding"
 ```
 
 For a change touching the Rust workspace, also run the native gate:
@@ -180,7 +181,7 @@ For a change touching the Rust workspace, also run the native gate:
 ```bash
 (cd shrike-core && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings)
 (cd shrike-core && cargo test --workspace)
-scripts/build-native.sh && pytest tests/unit tests/native -q
+scripts/build-native.sh && pytest shrike-py/tests/unit shrike-py/tests/native -q
 ./bazel test //...     # the authoritative CI lane
 ```
 
@@ -225,7 +226,7 @@ in-process tracking can't see. So always do a full `pytest` run before you push.
 ## Skill changes (QA eval)
 
 The `create-cards` skill (`shrike-skills/create-cards/**`) is **not covered by `pytest`/CI** —
-only the pure grader (`tests/manual/skill_quality/test_grade.py`) runs there. A change to the
+only the pure grader (`shrike-py/tests/manual/skill_quality/test_grade.py`) runs there. A change to the
 skill's guidance or references can pass every CI check while silently regressing
 card quality, so the regression guard is the manual eval harness, not the test
 suite. (For scale: rewording one rule from an abstraction into a surface check
@@ -237,10 +238,10 @@ and costs real tokens, so it can't be a CI gate — it's expected practice, not 
 hard merge blocker.
 
 ```bash
-tests/manual/skill_quality/run.py   # see tests/manual/skill_quality/EVAL.md for flags
+shrike-py/tests/manual/skill_quality/run.py   # see shrike-py/tests/manual/skill_quality/EVAL.md for flags
 ```
 
 Scope is your judgment: run the scenarios the change plausibly affects (a targeted
 `--scenarios …` sweep is fine for a narrow edit; a fuller matrix before a release).
 The harness, scenarios, and grading are documented in
-[`tests/manual/skill_quality/EVAL.md`](tests/manual/skill_quality/EVAL.md).
+[`shrike-py/tests/manual/skill_quality/EVAL.md`](shrike-py/tests/manual/skill_quality/EVAL.md).
