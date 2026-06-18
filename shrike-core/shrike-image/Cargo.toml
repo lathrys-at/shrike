@@ -16,14 +16,9 @@ license = "AGPL-3.0-or-later"
 # `accel` (default): the autovectorizable contiguous-plane normalize/CHW path.
 # It is the *same* affine math as the scalar reference (per-channel FMA), so it
 # matches within the golden image-prep tolerance — no IMAGE_PREP_VERSION_RS bump.
+# Off => a plain scalar normalize loop (minimal-core, no autovectorization hint).
 default = ["accel"]
 accel = []
-# `backend-fir` (opt-in): swap the shortest-edge resize onto `fast_image_resize`
-# (SSE4.1/AVX2/NEON). Its bicubic uses the *same* Catmull-Rom coefficient as the
-# `image` crate's, so it matches the scalar reference within the golden tolerance
-# (pinned by `fir_matches_image_resize_within_tolerance`). Off => the pure-`image`
-# scalar resize (minimal-core, no SIMD intrinsics crate).
-backend-fir = ["dep:fast_image_resize"]
 
 [dependencies]
 shrike-error = { workspace = true }
@@ -37,4 +32,3 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
     "bmp",
 ] }
-fast_image_resize = { version = "5", optional = true, features = ["image"] }

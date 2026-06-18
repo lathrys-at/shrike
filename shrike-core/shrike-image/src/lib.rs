@@ -12,34 +12,23 @@
 //!
 //! # Acceleration
 //!
-//! - **`accel`** (default): the normalize/CHW transform runs as contiguous
-//!   per-channel plane passes with the per-channel affine math hoisted to a
-//!   fused multiply-add (`p·(1/(255·std)) + (−mean/std)`), which the compiler
-//!   autovectorizes — the old strided HWC→CHW scatter did ~`3·crop²` scalar
-//!   divides per image (~150k at 224²). It is the *same* affine math as the
-//!   scalar reference, so it matches within the golden image-prep tolerance.
-//! - **`backend-fir`** (opt-in): the shortest-edge *resize* runs on
-//!   `fast_image_resize` (SSE4.1/AVX2/NEON) instead of `image`'s scalar
-//!   Catmull-Rom. The two resamplers are genuinely different on a real
-//!   downscale (measured max-abs ≈ 0.078 vs `image`, far above the golden
-//!   1e-3 tolerance), so swapping the backend **changes the pixel space**.
-//!   This is deliberately NOT folded into [`IMAGE_PREP_VERSION_RS`] (which would
-//!   invalidate *everyone's* vectors). Instead the active backend is reported by
-//!   [`resize_backend`]; a consumer that enables `backend-fir` MUST fold that
-//!   name into ITS own fingerprint (the way pooling/model changes already are),
-//!   so switching backends rebuilds only that operator's index and never touches
-//!   `accel`-built vectors. The default server build uses the scalar `image`
-//!   resize, so its fingerprint is unaffected.
+//! **`accel`** (default): the normalize/CHW transform runs as contiguous
+//! per-channel plane passes with the per-channel affine math hoisted to a fused
+//! multiply-add (`p·(1/(255·std)) + (−mean/std)`), which the compiler
+//! autovectorizes — the old strided HWC→CHW scatter did ~`3·crop²` scalar
+//! divides per image (~150k at 224²). It is the *same* affine math as the scalar
+//! reference, so it matches within the golden image-prep tolerance; off, the
+//! transform degrades to a plain scalar loop (minimal-core). The resize stays
+//! `image`'s scalar Catmull-Rom throughout.
 //!
-//! The `accel` normalize path degrades to a plain scalar loop when off
-//! (minimal-core); `backend-fir` off uses `image`'s scalar resize. **A change
-//! to the `accel`/scalar normalize math that cannot match the scalar reference
+//! **A change to the normalize math that cannot match the scalar reference
 //! within the golden tolerance must bump [`IMAGE_PREP_VERSION_RS`]** — which
-//! invalidates every stored image vector, so it is never a free perf win. (The
-//! resize *backend* is the one pixel-affecting axis kept OUT of that version and
-//! pushed to the consumer fingerprint, since it is a per-operator build choice.)
+//! invalidates every stored image vector, so it is never a free perf win. (A
+//! SIMD resize backend was prototyped but deferred: `fast_image_resize`'s
+//! Catmull-Rom differs from `image`'s by ~0.078 on a real downscale, far past
+//! the tolerance, so it is genuinely vector-affecting and belongs behind a
+//! consumer-fingerprint mechanism, not this PR — see #707's follow-up.)
 
-#[cfg(not(feature = "backend-fir"))]
 use image::imageops::FilterType;
 use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 
@@ -119,8 +108,7 @@ fn resize_dims(w: u32, h: u32, resize: u32) -> (u32, u32) {
 }
 
 /// Decode → resize shortest edge → center-crop, returning the cropped RGB image.
-/// The pixel stage shared by every normalize path (so the resize backend is the
-/// only thing the `backend-fir` feature swaps).
+/// The pixel stage shared by every normalize path.
 fn decode_resize_crop(bytes: &[u8], cfg: &PreprocessConfig) -> NativeResult<image::RgbImage> {
     let img = image::load_from_memory(bytes)
         .context(ErrorKind::InvalidInput, "image decode failed")?
@@ -137,45 +125,11 @@ fn decode_resize_crop(bytes: &[u8], cfg: &PreprocessConfig) -> NativeResult<imag
     Ok(image::imageops::crop_imm(&resized, left, top, c, c).to_image())
 }
 
-/// The active resize backend's name — the consuming engine folds this into its
-/// own fingerprint (the resize backend is pixel-affecting but a per-operator
-/// build choice, so it is NOT in [`IMAGE_PREP_VERSION_RS`]; see the crate docs).
-/// `"image"` for the scalar Catmull-Rom, `"fir"` for `fast_image_resize`.
-pub const fn resize_backend() -> &'static str {
-    if cfg!(feature = "backend-fir") {
-        "fir"
-    } else {
-        "image"
-    }
-}
-
-/// Catmull-Rom resize to `(nw, nh)`. The scalar path is `image`'s bicubic; the
-/// `backend-fir` path is `fast_image_resize`'s Catmull-Rom — a genuinely
-/// different resampler on a real downscale (see [`resize_backend`] and the crate
-/// docs), reported so the consumer can fingerprint the choice.
-#[cfg(not(feature = "backend-fir"))]
+/// Catmull-Rom resize to `(nw, nh)` via `image`'s bicubic — the scalar
+/// resampler the golden tests pin (a SIMD backend that would change these
+/// pixels is deferred to a consumer-fingerprinted follow-up; see the crate docs).
 fn resize_shortest_edge(img: &image::RgbImage, nw: u32, nh: u32) -> NativeResult<image::RgbImage> {
     Ok(image::imageops::resize(img, nw, nh, FilterType::CatmullRom))
-}
-
-#[cfg(feature = "backend-fir")]
-fn resize_shortest_edge(img: &image::RgbImage, nw: u32, nh: u32) -> NativeResult<image::RgbImage> {
-    use fast_image_resize::images::Image;
-    use fast_image_resize::{
-        FilterType as FirFilter, PixelType, ResizeAlg, ResizeOptions, Resizer,
-    };
-
-    let (w, h) = img.dimensions();
-    let src = Image::from_vec_u8(w, h, img.as_raw().clone(), PixelType::U8x3)
-        .context(ErrorKind::Internal, "fir source image")?;
-    let mut dst = Image::new(nw, nh, PixelType::U8x3);
-    let mut resizer = Resizer::new();
-    let opts = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FirFilter::CatmullRom));
-    resizer
-        .resize(&src, &mut dst, &opts)
-        .context(ErrorKind::Internal, "fir resize")?;
-    image::RgbImage::from_raw(nw, nh, dst.into_vec())
-        .ok_or_else(|| NativeError::internal("fir output buffer size mismatch"))
 }
 
 /// Preprocess one image and **append** its CHW plane (length `3·crop²`) to
@@ -213,6 +167,7 @@ fn normalize_into_chw(
     let base = out.len();
     out.resize(base + 3 * plane, 0.0);
 
+    #[cfg(feature = "accel")]
     for ch in 0..3usize {
         // Loop-invariant per-channel affine constants, hoisted out of the plane
         // pass: value = p·scale + bias, equal to (p/255 − mean)/std.
@@ -222,9 +177,20 @@ fn normalize_into_chw(
         // Contiguous channel plane: gather this channel's byte from the strided
         // source, apply the affine, write sequentially. The destination write is
         // contiguous and the affine is branch-free FMA-shaped, so the compiler
-        // vectorizes it (scalar fallback is the identical math, just not hinted).
+        // autovectorizes it.
         for (i, slot) in dst.iter_mut().enumerate() {
             *slot = pixels[i * 3 + ch] as f32 * scale + bias;
+        }
+    }
+
+    // The literal scalar reference for minimal-core (no autovectorization hint):
+    // the exact `(p/255 − mean)/std`, strided HWC→CHW scatter. The `accel` path
+    // above must match this within the golden tolerance (pinned by
+    // `accel_matches_scalar_reference_within_tolerance`).
+    #[cfg(not(feature = "accel"))]
+    for ch in 0..3usize {
+        for i in 0..plane {
+            out[base + ch * plane + i] = (pixels[i * 3 + ch] as f32 / 255.0 - mean[ch]) / std[ch];
         }
     }
 }
@@ -403,16 +369,6 @@ mod tests {
             max_abs < TOL,
             "accel vs scalar-reference max abs drift {max_abs} exceeds golden tolerance {TOL}"
         );
-    }
-
-    #[test]
-    fn resize_backend_reflects_the_active_feature() {
-        // The default build is the scalar `image` resize; the consumer keys its
-        // fingerprint off this, so the default name must stay stable.
-        #[cfg(not(feature = "backend-fir"))]
-        assert_eq!(resize_backend(), "image");
-        #[cfg(feature = "backend-fir")]
-        assert_eq!(resize_backend(), "fir");
     }
 
     #[test]

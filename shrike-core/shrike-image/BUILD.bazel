@@ -8,8 +8,7 @@ exports_files(["Cargo.toml"])
 # resize-shortest-edge → center-crop → rescale/normalize → CHW f32, plus the
 # dependency-free 24-bit BMP encoder. A layer-FLOOR crate (enforced by
 # //shrike-core:layering_check) — image/shrike-error only, NO kernel or engine
-# coupling. The accelerated normalize/CHW path is the default; `backend-fir`
-# (fast_image_resize) stays opt-in so it isn't pulled into the server build.
+# coupling. The accelerated normalize/CHW path is the default (`accel`).
 rust_library(
     name = "shrike_image",
     srcs = glob(["src/**/*.rs"]),
