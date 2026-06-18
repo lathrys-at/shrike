@@ -344,6 +344,7 @@ mod tests {
     use super::*;
     use crate::index_orchestrator::EmbedInput;
     use crate::Embedder;
+    use futures::executor::block_on;
     use futures::future::BoxFuture;
     use shrike_index::MultiModalIndex;
 
@@ -485,7 +486,7 @@ mod tests {
         // on the identical end state a full rebuild would — exactly the property
         // index_orchestrator.rs pins on the primary type, here proven on a space
         // the coordinator materialized.
-        crate::runtime::block_on(async {
+        block_on(async {
             let dir = temp_dir();
             let set = open_set(&dir);
             set.bind_space("space:a", &["text".into()]).unwrap(); // claim primary
@@ -530,7 +531,7 @@ mod tests {
         // The fan-out the kernel's delete + watermark-advance ride: each
         // touches EVERY space. set_col_mod_all advances both watermarks; a
         // remove_all on a note present in both leaves both.
-        crate::runtime::block_on(async {
+        block_on(async {
             let dir = temp_dir();
             let set = open_set(&dir);
             let primary = set.bind_space("space:a", &["text".into()]).unwrap();

@@ -931,7 +931,10 @@ mod tests {
     fn saver_debounces_and_bursts() {
         // The threshold (burst) path is synchronous and deterministic; the
         // re-arm path is observable through pending_changes staying put while
-        // the (long) idle timer never fires.
+        // the (long) idle timer never fires. The saver spawns its timer + the
+        // background flush onto the kernel runtime, so the driven fixture must be
+        // up (no collection here, so the no-sync fixture suffices).
+        crate::runtime::testing::run(async {});
         let orch = temp_orchestrator();
         let saver = DebouncedSaver::new(orch, 60.0, 3);
         saver.request_save();
@@ -949,7 +952,9 @@ mod tests {
     #[test]
     fn saver_idle_timer_actually_fires() {
         // The real-clock half (bounded, generous): a short delay flushes
-        // without reaching the threshold.
+        // without reaching the threshold. The idle timer rides drive_io and the
+        // flush rides drive_compute, so the driven fixture must be up.
+        crate::runtime::testing::run(async {});
         let orch = temp_orchestrator();
         let saver = DebouncedSaver::new(orch, 0.05, 100);
         saver.request_save();
