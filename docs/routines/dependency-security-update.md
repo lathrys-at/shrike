@@ -182,7 +182,7 @@ wired into the repo gate above.
 
 **Python change:**
 ```bash
-ruff check src/shrike/ tests/ shrike-core/shrike-pyo3/python/
+ruff check src/shrike/ tests/ shrike-core/bindings/shrike-pyo3/python/
 mypy src/shrike/
 pytest tests/unit -q
 ```

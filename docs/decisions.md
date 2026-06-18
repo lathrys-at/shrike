@@ -1089,7 +1089,7 @@ discipline below.
    upstream.
 
 2. **The panic hazard is kernel-side and runtime-agnostic.**
-   [`SerializedCollection`](../shrike-core/shrike-kernel/src/lib.rs) runs every
+   [`SerializedCollection`](../shrike-core/runtime/shrike-kernel/src/lib.rs) runs every
    collection job inline as a sync closure on whichever runtime worker polls
    the actor. anki's sync paths call `block_on`, and
    `tokio::runtime::Handle::block_on` panics whenever it is invoked from inside
@@ -1406,7 +1406,7 @@ not `//:wheel` at the root.** Extractability is the reason — `shrike-core/` ow
 its build, so `shrike-py/` should too. The root `BUILD.bazel` keeps only
 `exports_files` (MODULE.bazel for the llama-lock tripwire; README/LICENSE/CHANGELOG
 for the sdist to stage). The clean dependency edge to the Rust side stays the
-**published extension only** (`//shrike-core/shrike-pyo3:wheel_files` and its
+**published extension only** (`//shrike-core/bindings/shrike-pyo3:wheel_files` and its
 platform `config_setting`s) — no reach into the workspace internals.
 
 **The requirements locks and the `@shrike_pip` hub stay at the repo root.**

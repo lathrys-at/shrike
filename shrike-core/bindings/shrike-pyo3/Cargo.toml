@@ -1,0 +1,98 @@
+[package]
+name = "shrike-pyo3"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The Shrike PyO3 binding crate — the ONLY crate that sees pyo3 (#269)."
+
+[lib]
+# A Python extension module is a cdylib. Imported as `shrike_native._native`
+# (the .so is renamed by the BUILD rule / build script), so the lib name here is
+# free — kept descriptive.
+name = "shrike_pyo3"
+crate-type = ["cdylib"]
+
+[features]
+# default = the SERVER set (#499; docs/distribution.md's build matrix):
+# everything the daemon profile compiles. Platform engines (engine-apple) are
+# NOT in it, on any OS — the matrix's hard boundary, enforced 2026-06-12. The
+# matrix's lean (mobile) set is anki-core + engine-remote + engine-apple,
+# proven by //shrike-core/bindings/shrike-pyo3:mobile_skeleton.
+default = [
+    "bundled-sqlite",
+    "anki-core",
+    "engine-ort",
+    "engine-remote",
+    "manage-llama",
+]
+# Forwarded to shrike-derived (#300): default = bundled SQLite (FTS5 + trigram
+# guaranteed; the Bazel build and scripts/build-native.sh always bundle). To link
+# the platform SQLite instead, do a non-hermetic cargo build that drops only this:
+# `cargo build -p shrike-pyo3 --no-default-features --features
+# "anki-core,engine-ort,engine-remote,manage-llama"` (a bare --no-default-features
+# would also drop anki-core and every engine).
+bundled-sqlite = ["shrike-derived/bundled"]
+# The anki collection core binding (#278). DEFAULT ON since the cutover:
+# CollectionWrapper runs on the native core, so every shrike_native build
+# carries it (protoc required at build time; Bazel provides a hermetic one).
+# Still a named feature so a compute-only embed/index build remains possible.
+anki-core = ["dep:shrike-collection", "dep:shrike-kernel", "dep:shrike-media"]
+# ── The engine/manager matrix (#499) ─────────────────────────────────────────
+# In-process ONNX engines (text + CLIP) via ort load-dynamic.
+engine-ort = ["dep:shrike-engine", "shrike-engine/onnx", "shrike-engine/cuda", "shrike-engine/tensorrt", "shrike-engine/directml"]
+# Embeddings AND VLM describe over any OpenAI-compatible endpoint (the managed
+# llama-server, an attached server, cloud/tailnet). shrike-describe-remote
+# joins the feature now that its kernel integration is attachable (#485).
+engine-remote = ["dep:shrike-engine", "shrike-engine/remote"]
+# Platform recognition engines (Apple Vision OCR; off-macOS it's the
+# unavailable stub). MOBILE-ONLY: never in the server build, on any OS
+# (docs/distribution.md's hard boundary — the server gets OCR via the remote
+# recognizer rows, #502). Binding-path test coverage while #504 is pending is
+# tracked in #514.
+engine-apple = ["dep:shrike-engine", "shrike-engine/engine-apple"]
+# llama-server lifecycle manager (manage-class, not an engine).
+manage-llama = ["dep:shrike-llama-server"]
+
+[dependencies]
+pyo3 = { workspace = true }
+# Per-collection cache layout (#712): binds index_namespace/derived_db_path for
+# the host (the Python-parity mirror). A pure-Rust floor crate — non-optional
+# (the parity pyfunctions are themselves gated on `anki-core`).
+shrike-cache = { workspace = true }
+shrike-collection = { path = "../../runtime/shrike-collection", optional = true }
+shrike-kernel = { path = "../../runtime/shrike-kernel", optional = true }
+shrike-media = { workspace = true, optional = true }
+serde = "1"
+serde_json = "1"
+# Runtime-agnostic future building blocks for the worker executor (no runtime).
+futures = "0.3"
+# Blocking Python backend calls ride the kernel runtime's blocking pool (#374 C).
+tokio = { version = "1", features = ["rt"] }
+shrike-derived = { path = "../../runtime/shrike-derived", default-features = false }
+# Every engine-contract impl, feature-gated by family (#708): onnx (ort text +
+# CLIP) under engine-ort, the remote HTTP engines (embed + describe) under
+# engine-remote. The kernel never names it — the binding composes its engines
+# into the kernel's Arc<dyn Embedder>/Arc<dyn Recognizer> slots.
+shrike-engine = { path = "../../engines/shrike-engine", default-features = false, optional = true }
+shrike-llama-server = { path = "../../managed/shrike-llama-server", optional = true }
+# The engine contract (#342): the binding composes engines (WithPolicy +
+# OnExecutor over the asyncio lane) into the kernel's Arc<dyn Embedder> slot.
+shrike-engine-api = { path = "../../contracts/shrike-engine-api" }
+shrike-error = { workspace = true }
+shrike-store = { path = "../../contracts/shrike-store" }
+shrike-index = { path = "../../runtime/shrike-index" }
+shrike-schemas = { path = "../../contracts/shrike-schemas" }
+# First-class observability bridges (#310): pyo3-log forwards `log` records to
+# Python's stdlib `logging`; tracing's `log-always` compat feature makes every
+# native tracing event emit such a record even with a tracing subscriber set
+# (the ErrorLayer registry stays installed for NativeError span traces).
+# Feature unification applies `log-always` to every tracing emitter in this
+# build graph, so no compute crate needs its own bridge code.
+pyo3-log = "0.13"
+# Direct dep for the gate-aware Log wrapper around pyo3_log::Logger (#450):
+# install (set_boxed_logger/set_max_level) + the Log trait it implements.
+log = "0.4"
+tracing = { version = "0.1", features = ["log-always"] }
+tracing-error = "0.2"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }

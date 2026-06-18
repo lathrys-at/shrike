@@ -112,7 +112,7 @@ py_library(
     imports = [".."],
     deps = [
         ":pkg",
-        "//shrike-core/shrike-pyo3:shrike_native",  # defers to the kernel; pure-Python fallback
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",  # defers to the kernel; pure-Python fallback
     ],
 )
 
@@ -153,7 +153,7 @@ py_library(
     imports = [".."],
     deps = [
         ":pkg",
-        "//shrike-core/shrike-pyo3:shrike_native",
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
     ],
 )
 
@@ -169,7 +169,7 @@ py_library(
     imports = [".."],
     deps = [
         ":pkg",
-        "//shrike-core/shrike-pyo3:shrike_native",
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
     ],
 )
 
@@ -218,7 +218,7 @@ py_library(
     imports = [".."],
     deps = [
         ":pkg",
-        "//shrike-core/shrike-pyo3:shrike_native",
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
         requirement("numpy"),
     ],
 )
@@ -231,7 +231,7 @@ py_library(
         ":embedding_base",
         ":pkg",
         ":schemas",
-        "//shrike-core/shrike-pyo3:shrike_native",
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
     ],
 )
 
@@ -242,7 +242,7 @@ py_library(
     deps = [
         ":index",
         ":pkg",
-        "//shrike-core/shrike-pyo3:shrike_native",
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
     ],
 )
 
@@ -263,7 +263,7 @@ py_library(
         ":embed_text",
         ":embedding_base",
         ":pkg",
-        "//shrike-core/shrike-pyo3:shrike_native",
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
     ],
 )
 
@@ -286,7 +286,7 @@ py_library(
         ":profiles",
         ":recognition",
         ":registry",  # #68 routing: the live registry view
-        "//shrike-core/shrike-pyo3:shrike_native",
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
     ],
 )
 
@@ -301,7 +301,7 @@ py_library(
         ":pathsafety",  # export_package's server-local output gate (#71)
         ":pkg",
         ":schemas",
-        "//shrike-core/shrike-pyo3:shrike_native",
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
         requirement("pydantic"),
     ],
 )
@@ -318,7 +318,7 @@ py_library(
         ":collection",
         ":derived",
         ":pkg",
-        "//shrike-core/shrike-pyo3:shrike_native",
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
         requirement("mcp"),
     ],
 )
@@ -345,7 +345,7 @@ py_library(
         ":profiles",
         ":registry",  # config.py lazily writes the profiles: section via the registry model
         ":schemas",
-        "//shrike-core/shrike-pyo3:shrike_native",
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
         requirement("click"),
         requirement("pydantic"),
         requirement("pyyaml"),
@@ -378,7 +378,7 @@ py_library(
         ":profiles",
         ":schemas",
         ":tools",
-        "//shrike-core/shrike-pyo3:shrike_native",
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
         requirement("mcp"),
     ],
 )

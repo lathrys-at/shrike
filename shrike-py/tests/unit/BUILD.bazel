@@ -28,7 +28,7 @@ py_library(
         "conftest.py",
     ],
     deps = [
-        "//shrike-core/shrike-pyo3:shrike_native",  # _native_shims re-exports its errors
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",  # _native_shims re-exports its errors
         "//shrike-py/src/shrike:collection",
         "//shrike-py/tests/oracles",
         requirement("anki"),  # the pip TEST ORACLE (subprocess fixtures)

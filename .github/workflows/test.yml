@@ -113,14 +113,14 @@ jobs:
       - name: Install dependencies
         # pyproject.toml lives in the shrike-py/ unit (#731).
         run: uv pip install --system -e "shrike-py/[dev]"
-      # shrike-core/shrike-pyo3/python is the extension's Python shim package (#437):
+      # shrike-core/bindings/shrike-pyo3/python is the extension's Python shim package (#437):
       # outside src/, so it was in no ruff scope anywhere and lint debt
       # accumulated invisibly. (Its .pyi stubs are additionally
       # stubtest-validated under Bazel in the tests lane.)
       - name: Ruff check
-        run: ruff check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/
+        run: ruff check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/bindings/shrike-pyo3/python/
       - name: Ruff format check
-        run: ruff format --check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/shrike-pyo3/python/
+        run: ruff format --check shrike-py/src/shrike/ shrike-py/tests/ shrike-core/bindings/shrike-pyo3/python/
       - name: Mypy
         # mypy discovers config from cwd, not the checked files' tree — name the
         # harness pyproject explicitly so its [tool.mypy] overrides apply (#731).

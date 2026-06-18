@@ -1,0 +1,60 @@
+[package]
+name = "shrike-kernel"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The pure-Rust kernel: collection + index + derived store + fusion, no CPython (#279, slice 2)."
+
+[lib]
+name = "shrike_kernel"
+
+# Pure Rust — NO pyo3 anywhere in this dep tree (epic #265 convention 5; the
+# layering check + the no-CPython smoke test below are the proof). This crate
+# IS the embedded host #224 specs. Since #374 it owns its runtime: tokio in
+# the kernel, every op an idiomatic async fn, hosts adapt the action exchange.
+# Since #342 the kernel names NO engine and has NO features: the engine
+# contract lives in shrike-engine-api, and hosts attach whatever engines the
+# deployment composes (the layering check pins this structurally).
+[dependencies]
+# Per-collection cache layout (#712): the index/derived subdir scheme +
+# path-derived namespacing the kernel's stores key against (cracked out of the
+# kernel as a layer-floor crate — no kernel/engine coupling).
+shrike-cache = { workspace = true }
+shrike-collection = { path = "../../runtime/shrike-collection" }
+shrike-derived = { path = "../../runtime/shrike-derived" }
+shrike-engine-api = { path = "../../contracts/shrike-engine-api" }
+shrike-error = { workspace = true }
+# The inbound/untrusted-media crate (#711): the SSRF-guarded URL fetch + base64
+# decode + per-item prepare cracked out of the kernel. A layer-FLOOR utility
+# crate (no kernel/engine coupling, delegates the SSRF primitives to
+# shrike-network) — `store_media` fans `prepare_media_item` onto the blocking
+# pool. The kernel keeps no media externals (ureq/base64/url left with it).
+shrike-media = { workspace = true }
+shrike-store = { path = "../../contracts/shrike-store" }
+shrike-index = { path = "../../runtime/shrike-index" }
+shrike-schemas = { path = "../../contracts/shrike-schemas" }
+serde = "1"
+serde_json = "1"
+# Per-note change fingerprints — must hash byte-identically to Python's
+# hashlib.blake2b(digest_size=8) so the on-disk sidecar survives the swap.
+blake2 = "0.10"
+tracing = "0.1"
+# futures stays for the channel/future utility types shared with the engine
+# contract (BoxFuture at the dyn seams); the runtime itself is tokio (#374).
+futures = { version = "0.3", features = ["executor"] }
+# The owned runtime (#374): the kernel is idiomatic async Rust on its own
+# tokio — already transitive via anki, so zero new tree weight. `time` feeds
+# the debounced saver; `sync` the actor channels.
+tokio = { version = "1", features = ["rt-multi-thread", "rt", "sync", "time"] }
+
+# Integration tests (tests/*.rs) link the library crate, so they need the
+# crate's own deps re-declared as dev-deps to `use` them directly: the #590
+# committed-but-errored repro (tests/s6_repro.rs) builds a FailingEmbedder
+# (futures::BoxFuture + shrike_error error types) and asserts on the schema/store
+# wire types.
+[dev-dependencies]
+futures = { version = "0.3", features = ["executor"] }
+shrike-collection = { path = "../../runtime/shrike-collection" }
+shrike-error = { workspace = true }
+shrike-schemas = { path = "../../contracts/shrike-schemas" }
