@@ -13,6 +13,7 @@ members = [
     "shrike-cache",
     "shrike-collection",
     "shrike-derived",
+    "shrike-engine",
     "shrike-embed",
     "shrike-embed-remote",
     "shrike-describe-remote",

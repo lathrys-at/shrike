@@ -1,0 +1,70 @@
+[package]
+name = "shrike-engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Every engine-contract implementation, feature-gated by family (#708): onnx (ort) + remote (HTTP) + apple (platform recognizers)."
+
+[lib]
+name = "shrike_engine"
+
+# Engine families behind features (#708): a build pulls only the engines it
+# composes. The GPU execution providers are additive sub-features of `onnx`
+# (#384), each implying `onnx` — the server profile keeps the full onnx set; a
+# slim build drops the GPU EP glue via `default-features = false`. CoreML stays
+# in the base onnx set: it's the macOS path, wanted on exactly the slim targets.
+[features]
+default = ["onnx", "remote", "cuda", "tensorrt", "directml"]
+# ── onnx (the in-process ort engines: text + CLIP) ───────────────────────────
+onnx = ["dep:ort", "dep:tokenizers", "dep:ndarray", "dep:shrike-image"]
+cuda = ["onnx", "ort/cuda"]
+tensorrt = ["onnx", "ort/tensorrt"]
+directml = ["onnx", "ort/directml"]
+# ── remote (OpenAI-compatible HTTP: embeddings + VLM describe) ────────────────
+remote = ["dep:shrike-network", "dep:ureq", "dep:url", "dep:base64"]
+# NOTE: the `apple` family (engine-apple, over shrike-platform) lands in #709
+# (slice 2, stacked on this) — it adds the feature + the shrike-platform dep here.
+
+# Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-pyo3.
+[dependencies]
+shrike-error = { workspace = true }
+# The engine contract (#342): this crate implements the sync compute traits
+# (EmbedText/EmbedImages/RecognizeMedia) in-crate; hosts wrap them in an adapter
+# at attach. The kernel↔ort firewall stays a separate thin crate — NOT folded.
+shrike-engine-api = { path = "../shrike-engine-api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+# ── onnx deps (optional; pulled by feature `onnx`) ────────────────────────────
+# load-dynamic (no download-binaries): the onnxruntime shared library is dlopened
+# at runtime from the *pinned onnxruntime Python wheel* the Python backend already
+# installs (decision recorded in README.md + #269) — no duplicated runtime,
+# guaranteed version match for the Phase-1 parity bake.
+# Exact rc pin (like usearch's =2.25.3): rc-to-rc churn in ort's EP API is real
+# (the ep::CoreML builder shape has changed across rcs).
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24", "coreml"], optional = true }
+# The same Rust crate the Python `tokenizers` package wraps — tokenization parity
+# is structural. onig matches the python wheel's regex engine.
+tokenizers = { version = "0.23", default-features = false, features = ["onig"], optional = true }
+ndarray = { version = "0.17", optional = true }
+# The CLIP byte->pixels->CHW pipeline (#707) — decode/resize/crop + the
+# accelerated normalize (the default `accel` feature) behind a clean API.
+shrike-image = { workspace = true, optional = true }
+
+# ── remote deps (optional; pulled by feature `remote`) ────────────────────────
+# Shared SSRF-safety primitives (#592): pin the configured endpoint's IP and
+# refuse cross-host redirects, using the SAME control as the kernel's media
+# fetch. A LOW utility crate (no engine/kernel dep), so this stays pure.
+shrike-network = { workspace = true, optional = true }
+# SYNCHRONOUS client — no tokio, no runtime (the workspace's runtime-less HTTP
+# precedent, same as the kernel's media fetch). The async-first port (reqwest
+# over an async IP-pinned connector) is #721's job, gated on shrike-network
+# gaining an async variant.
+ureq = { version = "2", features = ["json"], optional = true }
+# Parse the configured base_url to pin its host + compare redirect targets.
+url = { version = "2", optional = true }
+# Media payloads for llama.cpp's native multimodal /embeddings dialect (#501)
+# and chat-completions images ride as base64 strings.
+base64 = { version = "0.22", optional = true }
