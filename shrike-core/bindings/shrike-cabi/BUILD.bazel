@@ -37,20 +37,18 @@ CABI_DEPS = [
     "@crates//:tracing",
 ]
 
-# The MOBILE kernel build (#504) — the second of the two builds in
-# docs/distribution.md's matrix, and the real target the `mobile_skeleton`
-# proof grew into. A C-ABI cdylib (the xcframework/AAR artifact) that embeds
-# the kernel and exposes the action exchange over completion callbacks.
-# **ZERO pyo3**: no CPython links in (the layering check forbids this crate
-# from naming pyo3; the in-crate `no_libpython` test is the artifact-level
+# The MOBILE kernel build — the second of the two builds in
+# docs/distribution.md's matrix. A C-ABI cdylib (the xcframework/AAR artifact)
+# that embeds the kernel and exposes the action exchange over completion
+# callbacks. **ZERO pyo3**: no CPython links in (the layering check forbids this
+# crate from naming pyo3; the in-crate `no_libpython` test is the artifact-level
 # belt). Feature set = the matrix's mobile column's CI-buildable core:
 # anki-core + engine-remote + bundled SQLite, NO engine-ort and NO managers.
 # The platform engines (engine-apple/-android) are declared+gated in the
 # crate but their Bazel wiring (the Swift genrule, the AAR) is a later slice
-# (which also re-homes #514's binding coverage) — keeping this target on the
-# Linux-x64 per-PR lane, where a feature-gating regression fails `//...`
-# immediately. crate_features are pinned here because Bazel doesn't inherit
-# cargo's default-features.
+# — keeping this target on the Linux-x64 per-PR lane, where a feature-gating
+# regression fails `//...` immediately. crate_features are pinned here because
+# Bazel doesn't inherit cargo's default-features.
 rust_shared_library(
     name = "shrike_cabi",
     srcs = CABI_SRCS,
@@ -59,7 +57,7 @@ rust_shared_library(
     deps = CABI_DEPS,
 )
 
-# The slice-1 in-crate verification (#504): the open -> upsert -> search ->
+# The in-crate verification: the open -> upsert -> search ->
 # delete -> close flow driven through the C ABI from a Rust C-caller (the
 # HashEmbedder shape, mirroring the kernel's no_cpython_smoke), the FFI
 # panic-safety guard, and the `no_libpython` link-property assertion. Runs on
@@ -91,7 +89,7 @@ rust_library(
     deps = CABI_DEPS,
 )
 
-# The #504 current_thread-mode gate (the joint-review fix): a SEPARATE test
+# The current_thread-mode gate: a SEPARATE test
 # binary (the runtime seam is process-global, so it must not share a process
 # with the multi-thread suite above) that calls `shrike_runtime_init` FIRST,
 # then drives the full open -> upsert -> search -> delete -> close flow under
@@ -110,7 +108,7 @@ rust_test(
     ],
 )
 
-# The #597 (S14b-1) post-shutdown gate: ANOTHER separate test binary — after
+# The post-shutdown gate: ANOTHER separate test binary — after
 # `shrike_runtime_shutdown` the process-global runtime is terminally undriven,
 # so this proof must run in its own process (never sharing with the driver-alive
 # flow above). It asserts a post-shutdown `shrike_op`/`shrike_close` fast-fail
@@ -127,7 +125,7 @@ rust_test(
     ],
 )
 
-# The #597 re-init-after-shutdown regression guard: YET another separate test
+# The re-init-after-shutdown regression guard: YET another separate test
 # binary (own process — the runtime seam is process-global + terminally undriven
 # after shutdown). Pins the actual OnceLock behaviour: a re-init after shutdown
 # is a no-op false, the flag stays set, and a subsequent op STILL fast-fails
@@ -144,9 +142,9 @@ rust_test(
     ],
 )
 
-# The #637 concurrent-op race gate: own process. An op issued concurrently with
+# The concurrent-op race gate: own process. An op issued concurrently with
 # shrike_runtime_shutdown always fires its callback (completes or fast-fails),
-# never orphans — closing the notify->store window #597 left open.
+# never orphans — closing the notify->store window.
 rust_test(
     name = "op_racing_shutdown_test",
     size = "small",
@@ -159,7 +157,7 @@ rust_test(
     ],
 )
 
-# The #637 drain gate (the "careful part"): own process. An op already in flight
+# The drain gate (the "careful part"): own process. An op already in flight
 # when shutdown begins is DRAINED to a successful completion, not abandoned.
 rust_test(
     name = "inflight_op_drains_test",

@@ -1,11 +1,11 @@
-"""Export to an Anki package — the kernel export op (#71, S1).
+"""Export to an Anki package — the kernel export op.
 
 Drives ``AsyncKernel.export_package`` against a real collection: a whole-
 collection ``.apkg`` round-trips (the package is a valid zip carrying the
 collection db), a deck-scoped export limits the notes, ``.colpkg`` is whole-
 collection-only (a scope is rejected), and a bad format/scope is a clean input
 error. The path-safety GATE is host-side (tested in tests/unit/test_pathsafety
-+ the action tests in S2); here the kernel trusts a caller-gated out_path.
+and the action tests); here the kernel trusts a caller-gated out_path.
 """
 
 from __future__ import annotations

@@ -1,10 +1,10 @@
 //! The shared, SSRF-pinned HTTP client both remote engines (`embed`, `describe`)
-//! ride (#708 dedup): ONE copy of the trust-boundary code the two engines used
+//! ride: ONE copy of the trust-boundary code the two engines used
 //! to carry verbatim — the API-key/header-injection validator, the IP-pin, the
-//! same-host redirect re-vet (#592), and the bounded transient retry
+//! same-host redirect re-vet, and the bounded transient retry
 //! (backoff + `Retry-After`).
 //!
-//! **Async `reqwest`** (#721 S2 — route 2): the engines implement engine-api's
+//! **Async `reqwest`** (route 2): the engines implement engine-api's
 //! async traits directly and the kernel awaits them on its runtime, so the
 //! transport here is async and the backoff is `tokio::time::sleep` (no parked
 //! thread). The SSRF pinning + the per-hop same-host redirect loop live in
@@ -13,7 +13,7 @@
 //! redirects re-vetting each hop as same-host); the engine policy below owns the
 //! send + retry + status handling.
 //!
-//! SSRF posture (#592): `base_url` is operator-configured and trusted (a loopback
+//! SSRF posture: `base_url` is operator-configured and trusted (a loopback
 //! llama-server, a tailnet host, a cloud API the operator chose), so it is NOT
 //! `is_global`-gated. But the client is built with auto-redirects OFF and **pinned
 //! to `base_url`'s resolved IP** (closing the DNS-rebinding TOCTOU), and a
@@ -150,7 +150,7 @@ impl RemoteHttpClient {
             }
         }
         let base_url = base_url.trim_end_matches('/').to_string();
-        // SSRF posture (#592): pin the connection to base_url's resolved IP with
+        // SSRF posture: pin the connection to base_url's resolved IP with
         // auto-redirects OFF. The client-level timeout is a backstop; each request
         // sets its own via `.timeout()`.
         let (client, base) =

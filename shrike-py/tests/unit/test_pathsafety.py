@@ -1,10 +1,10 @@
-"""The shared server-local path-safety mechanism (#71 S1).
+"""The shared server-local path-safety mechanism.
 
-These helpers gate every server-local filesystem capability (store_media #164,
-export #71, import #72). The read gate (``path_within_any_root``) and the
+These helpers gate every server-local filesystem capability (store_media,
+export, import). The read gate (``path_within_any_root``) and the
 purely-local / validate-root helpers are exercised through server.py's aliases
 in test_server_security.py; this pins the mechanism directly, with focus on the
-NEW write gate (``output_path_within_any_root``) — the export #71 case where the
+write gate (``output_path_within_any_root``) — the export case where the
 target file does not exist yet.
 """
 
@@ -111,7 +111,7 @@ class TestReadGate:
 
 class TestWriteGate:
     """``output_path_within_any_root`` — a to-be-created file inside a root
-    (the export #71 case; the target does not exist yet)."""
+    (the export case; the target does not exist yet)."""
 
     def test_nonexistent_target_in_existing_root_is_allowed(self, tmp_path) -> None:
         root = tmp_path / "exports"

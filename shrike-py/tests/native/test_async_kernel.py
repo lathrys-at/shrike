@@ -1,4 +1,4 @@
-"""The full kernel binding (#332, S3d-1b).
+"""The full kernel binding.
 
 ``AsyncKernel`` is the assembled kernel driven from asyncio: one open
 collection + kernel-internal index orchestration + the derived store, every
@@ -55,8 +55,8 @@ async def _open(tmp_path, backend):
 
 
 class TestRebuildDerived:
-    """#445 checkpoint 3: the FTS5 rebuild runs kernel-side — rows never
-    cross the FFI; the op returns (row_count, the build's col_mod snapshot)."""
+    """The FTS5 rebuild runs kernel-side — rows never cross the FFI; the op
+    returns (row_count, the build's col_mod snapshot)."""
 
     def test_rebuild_derived_builds_and_returns_snapshot(self, tmp_path) -> None:
         from shrike.harness import cache_layout
@@ -79,7 +79,7 @@ class TestRebuildDerived:
             await kernel.close()
             # The build landed in the sidecar: a fresh engine on the same
             # shrike.db sees the rows (and the stamped watermark). The store is
-            # namespaced per collection (#547), so resolve the path the kernel
+            # namespaced per collection, so resolve the path the kernel
             # wrote, not the flat cache root.
             db_path = cache_layout.derived_db_path(str(tmp_path / "cache"), collection_path)
             engine = shrike_native.DerivedTextEngine(db_path, 2)
@@ -94,7 +94,7 @@ class TestRebuildDerived:
 
 
 class TestSaverTuning:
-    """#355 item 2: the --index-save-* tuning reaches the kernel's saver."""
+    """The --index-save-* tuning reaches the kernel's saver."""
 
     def test_save_threshold_flushes_immediately(self, tmp_path) -> None:
         # threshold=1: the first indexed change forces a flush, so the index
@@ -114,7 +114,7 @@ class TestSaverTuning:
             core = kernel.core_handle()
             basic = core.notetype_id("Basic")
             await kernel.upsert_notes([(basic, 1, ["flush me", "now"], [])], "allow")
-            # The index lands in the per-collection namespace (#67), not the
+            # The index lands in the per-collection namespace, not the
             # flat cache root — resolve the same dir the kernel writes.
             index_dir = cache_layout.collection_index_dir(str(tmp_path / "cache"), collection_path)
             index_file = Path(index_dir) / "index.usearch"
@@ -167,7 +167,7 @@ class TestAsyncKernel:
             # Watermarks advanced: no drift after the kernel's own writes.
             assert not await kernel.reindex_if_needed()
 
-            # Delete propagates to vectors too. The maintained op (#604) returns
+            # Delete propagates to vectors too. The maintained op returns
             # {deleted, not_found} JSON in its single write job.
             deleted = json.loads(await kernel.delete_notes([results[0][1]]))
             assert deleted == {"deleted": [results[0][1]], "not_found": []}
@@ -239,12 +239,12 @@ class TestAsyncKernel:
 
 
 class TestCrossSpaceWiring:
-    """#234: the PRODUCTION search path (`action_search_notes` + the host
+    """The PRODUCTION search path (`action_search_notes` + the host
     `cross_space=` param) threads injected secondary-space results into the
     fusion + runs the relative gate — proving the host plumbing at the binding
-    level, WITHOUT depending on the secondary-space WRITE fan-out (the
-    immediately-following #232 write PR). The cross_space JSON here is exactly
-    the shape `build_cross_space_json` produces."""
+    level, WITHOUT depending on the secondary-space WRITE fan-out. The
+    cross_space JSON here is exactly the shape `build_cross_space_json`
+    produces."""
 
     class _Planted:
         """Plants EXACT vectors per text keyword so cosines are controlled: the
@@ -291,7 +291,7 @@ class TestCrossSpaceWiring:
             )
             image_note = results[1][1]
 
-            # The host embeds the PRIMARY query (#331) — one vector per source.
+            # The host embeds the PRIMARY query — one vector per source.
             query = "qqquery photosynthesis overview"
             vectors = backend.embed_texts([query])
 
@@ -434,11 +434,10 @@ class TestAsyncKernelImages:
 
 
 class TestLiveTwoSpaceEndToEnd:
-    """#232: the full live multi-space loop a dedicated text + separate CLIP
+    """The full live multi-space loop a dedicated text + separate CLIP
     config enables. Upsert a note with an image → its image lands in the CLIP
     space's ImageOnly index → the PRODUCTION search (build_cross_space_json +
-    action_search_notes + the PR-C gate) surfaces the image-bearing note. This
-    is the e2e PR-C couldn't write (no write path then)."""
+    action_search_notes + the relative gate) surfaces the image-bearing note."""
 
     class _TextPrimary:
         """A dedicated text embedder (3-dim planted): the query and a distractor
@@ -749,9 +748,8 @@ class TestWrapperOverKernel:
 
 class TestCooperativeReopen:
     def test_kernel_writes_self_heal_after_release(self, tmp_path) -> None:
-        # The review-found regression: an idle release closed the collection
-        # and kernel write ops errored CollectionNotOpen (the reopen-on-demand
-        # lived only in the Python wrapper). Kernel-side ensure_open fixes it.
+        # An idle release closes the collection; kernel write ops must not
+        # error CollectionNotOpen — kernel-side ensure_open reopens on demand.
         async def flow():
             kernel = await _open(tmp_path, _Backend())
             await kernel.reindex_if_needed()
@@ -810,8 +808,8 @@ class _StubRecognizer:
 
 
 class TestRecognition:
-    """The #228 pipeline through the binding: the asyncio dispatch (loop →
-    thread pool → oneshot), the bounded sweep, and both consumers."""
+    """The recognition pipeline through the binding: the asyncio dispatch (loop
+    → thread pool → oneshot), the bounded sweep, and both consumers."""
 
     def test_sweep_feeds_lexical_and_vector_consumers(self, tmp_path) -> None:
         async def flow():
@@ -851,7 +849,7 @@ class TestRecognition:
         asyncio.run(flow())
 
     def test_raising_resolver_degrades_gracefully(self, tmp_path) -> None:
-        # #386: a buggy/misconfigured Python resolver raises — the binding
+        # A buggy/misconfigured Python resolver raises — the binding
         # logs and degrades (read → None, exists → False) instead of
         # crashing the sweep or recognizing empty bytes.
         async def flow():
@@ -938,10 +936,10 @@ class TestRecognition:
 
 
 class TestCloseDrainsTheActor:
-    """#374 design 7 (the review-HIGH regression guard): AsyncKernel.close
-    routes through Kernel::close, which drains the collection actor — after
-    it resolves, nothing is in flight and the actor is GONE (a subsequent
-    collection op fails actor-gone rather than queueing into a leaked task).
+    """AsyncKernel.close routes through Kernel::close, which drains the
+    collection actor — after it resolves, nothing is in flight and the actor
+    is GONE (a subsequent collection op fails actor-gone rather than queueing
+    into a leaked task).
     """
 
     def test_ops_after_close_hit_a_drained_actor(self, tmp_path) -> None:

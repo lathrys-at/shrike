@@ -1,4 +1,4 @@
-"""Per-call collection routing through the action layer (#68, slice 2).
+"""Per-call collection routing through the action layer.
 
 The selector resolves to a per-call CollectionBundle via the ActionContext
 resolver; a single-collection server (no resolver) rejects a selector; an
@@ -107,8 +107,7 @@ class TestSingleCollectionRejectsSelector:
         assert "routing is not enabled" in str(ei.value)
 
     def test_no_selector_without_resolver_works(self, kharness):
-        # The default path is unchanged: no resolver + no selector → the fixed
-        # bundle, exactly as before #68.
+        # The default path: no resolver + no selector → the fixed bundle.
         mcp = FastMCP("test")
         from shrike.api.tools import register_tools
 

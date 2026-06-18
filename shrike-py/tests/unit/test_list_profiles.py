@@ -1,4 +1,4 @@
-"""The list_profiles enumeration action (#66, slice 3).
+"""The list_profiles enumeration action.
 
 Read-only, host-side: it reflects the registry snapshot in the ActionContext,
 opens no collection. Invoked via the action impl directly (no MCP/HTTP needed

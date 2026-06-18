@@ -1,6 +1,6 @@
-"""Busy/cooperative surface (#278 step 6): release/reopen + the BUSY tier.
+"""Busy/cooperative surface: release/reopen + the BUSY tier.
 
-The cross-process case is the real #64/#65 story: a pip-core CollectionWrapper
+The cross-process case: a pip-core CollectionWrapper
 in a SUBPROCESS holds the collection while the native core (this process)
 tries to re-acquire — NativeBusyError, retryable; once the holder exits, the
 reopen succeeds. (The two cores never co-manage: the holder exists to hold.)

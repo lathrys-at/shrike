@@ -1,4 +1,4 @@
-"""CLI handling for `shrike search query` (#97; rehomed from `collection query` in #683)."""
+"""CLI handling for `shrike search query`."""
 
 from __future__ import annotations
 

@@ -1,13 +1,13 @@
-//! The generic remote-embeddings engine (#342 P4): an OpenAI-compatible
+//! The generic remote-embeddings engine: an OpenAI-compatible
 //! embeddings endpoint — llama-server locally, a cloud embedding API with a
-//! key, a service across a tailnet — as a **route-2 async-direct engine** (#721
-//! S2): it implements engine-api's async [`Embedder`]/[`ImageEmbedder`] traits
+//! key, a service across a tailnet — as a **route-2 async-direct engine**: it
+//! implements engine-api's async [`Embedder`]/[`ImageEmbedder`] traits
 //! directly over the async `reqwest` client, so the kernel awaits it on its
 //! runtime (no `Blocking` adapter, no parked blocking-pool thread). The shared
-//! SSRF/retry/api-key machinery lives in [`super::http`] (#708 dedup); this
+//! SSRF/retry/api-key machinery lives in [`super::http`]; this
 //! module holds only the embeddings-specific dialects.
 //!
-//! Since #501 it also speaks llama.cpp's NATIVE multimodal dialect for
+//! It also speaks llama.cpp's NATIVE multimodal dialect for
 //! [`ImageEmbedder`]: `GET /props` advertises the loaded model's modalities
 //! and the per-process `media_marker` (randomized each server start — it
 //! must be read, never assumed), and media embeds ride
@@ -67,14 +67,14 @@ pub struct RemoteEmbedderConfig {
 
 /// The engine: a thin, stateless HTTP client wrapper.
 ///
-/// SSRF posture lives in [`RemoteHttpClient`] (#592): the client is pinned to
+/// SSRF posture lives in [`RemoteHttpClient`]: the client is pinned to
 /// `base_url`'s resolved IP with auto-redirects OFF, and a redirect is followed
 /// only when it stays on the SAME host.
 pub struct RemoteEmbedder {
     http: RemoteHttpClient,
     model: Option<String>,
     /// The endpoint's resolved multimodal capabilities, cached after the first
-    /// successful `GET /props` (#708): the marker + vision flag are per-process
+    /// successful `GET /props`: the marker + vision flag are per-process
     /// invariants of the endpoint, so the image path reads them ONCE rather than
     /// re-probing per chunk (the documented per-chunk round-trip fix). Only a
     /// SUCCESSFUL probe is cached — a text-only/absent `/props` falls through to
@@ -94,7 +94,7 @@ struct EmbeddingsResponse {
     data: Vec<EmbeddingItem>,
 }
 
-/// llama.cpp server capabilities from `GET /props` (#501): which modalities
+/// llama.cpp server capabilities from `GET /props`: which modalities
 /// the loaded model serves (an mmproj per modality), and the per-process
 /// `media_marker` a multimodal prompt references. The marker is randomized
 /// at every server start, so it is read here, never assumed.
@@ -152,7 +152,7 @@ impl RemoteEmbedder {
         })
     }
 
-    /// `/props`, read once and cached (#708): the marker + capabilities are
+    /// `/props`, read once and cached: the marker + capabilities are
     /// per-process invariants of the endpoint, so the image path probes the
     /// first time and reuses thereafter instead of paying a round-trip per
     /// chunk. Only a SUCCESSFUL probe is cached — `None` (no `/props`) falls
@@ -234,7 +234,7 @@ impl Embedder for RemoteEmbedder {
     /// Embed the given texts as ONE `POST /v1/embeddings` request. The host's
     /// proven-safe batch chunking lives in the [`shrike_engine_api::AsyncWithPolicy`]
     /// wrapper (the async sibling of `WithPolicy` + `Blocking`'s chunk loop), so
-    /// this engine just serves whatever slice it is handed (#721 S2).
+    /// this engine just serves whatever slice it is handed.
     fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
         Box::pin(
             async move {
@@ -257,7 +257,7 @@ struct NativeEmbeddingItem {
 }
 
 impl ImageEmbedder for RemoteEmbedder {
-    /// One native `/embeddings` request **per item** (#501): media payloads
+    /// One native `/embeddings` request **per item**: media payloads
     /// are orders of magnitude heavier than text, so per-item requests keep
     /// the retry/backoff semantics simple and attribute a failure to the
     /// exact image. Capability-gated up front — a model without the vision
@@ -269,7 +269,7 @@ impl ImageEmbedder for RemoteEmbedder {
                 if images.is_empty() {
                     return Ok(Vec::new());
                 }
-                // `/props` is read ONCE at the first image chunk and cached (#708)
+                // `/props` is read ONCE at the first image chunk and cached
                 // — the marker + capabilities are per-process invariants of the
                 // endpoint, so a full reindex no longer re-probes per chunk.
                 let props = self.resolved_props().await.ok_or_else(|| {
@@ -602,7 +602,7 @@ mod tests {
         );
     }
 
-    // ── SSRF redirect re-vet (#592) ─────────────────────────────────────────
+    // ── SSRF redirect re-vet ─────────────────────────────────────────
 
     #[tokio::test]
     async fn cross_host_redirect_is_refused() {
@@ -646,7 +646,7 @@ mod tests {
         assert!(rx.recv().unwrap().starts_with("POST /v2/embeddings"));
     }
 
-    // ── The llama.cpp native multimodal dialect (#501) ──────────────────────
+    // ── The llama.cpp native multimodal dialect ──────────────────────
 
     const PROPS_MM: &str =
         r#"{"modalities":{"vision":true,"audio":false},"media_marker":"<__media_X__>"}"#;

@@ -1,10 +1,10 @@
-"""`shrike server start` config persistence (#56).
+"""`shrike server start` config persistence.
 
-The old behaviour wrote ``config.yml`` only on the very first run (when no file
-existed) and silently ignored later flags — so starting with a different
-``--collection`` changed the running daemon but left the on-disk config stale,
-and a subsequent no-flag start read the *old* collection. The fix makes start a
-no-write operation by default and adds an explicit ``--save-config`` opt-in.
+``server start`` is a no-write operation by default, with an explicit
+``--save-config`` opt-in. Writing ``config.yml`` on first run but silently
+ignoring later flags would leave the on-disk config stale — a different
+``--collection`` changes the running daemon while a subsequent no-flag start
+reads the *old* collection — so start never writes unless asked.
 
 These tests drive the real ``server start`` command with the daemon spawn mocked
 out, so only the config-writing decision is exercised.
@@ -81,8 +81,8 @@ def test_save_config_flag_persists_collection(mocked_daemon, tmp_path):
 
 
 def test_no_save_config_flag_preserves_existing_config(mocked_daemon, tmp_path):
-    """The #56 repro: starting on a new collection without `--save-config` must
-    not rewrite an existing config that points at the old one."""
+    """Starting on a new collection without `--save-config` must not rewrite an
+    existing config that points at the old one."""
     config_path = tmp_path / "config.yml"
     config_path.write_text(yaml.safe_dump({"collection": "/old/A.anki2"}))
 

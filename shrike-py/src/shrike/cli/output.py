@@ -105,7 +105,7 @@ _MUTEX_MSG = "--pretty and --json are mutually exclusive."
 # Tracks an *explicit* leaf `--pretty` (value True) so the conflict is caught
 # regardless of flag order. We can't key off ctx.obj["pretty"] is True: the root
 # group's --pretty defaults to True and seeds ctx.obj before the eager leaf
-# callbacks run, so that would false-positive on a bare `info --json` (#607).
+# callbacks run, so that would false-positive on a bare `info --json`.
 _PRETTY_EXPLICIT = "_pretty_explicit"
 
 

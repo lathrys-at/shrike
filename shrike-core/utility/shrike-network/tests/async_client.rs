@@ -1,10 +1,10 @@
 //! Live-socket integration tests for the async IP-pinned client + the
-//! centralized per-hop re-vet loops (#721 S1 + S2).
+//! centralized per-hop re-vet loops.
 //!
 //! These are the SSRF controls the user-triggered security review scrutinizes:
 //! the connection is pinned to the vetted IP while `Host`/SNI carry the NAME;
-//! auto-redirects are OFF and the consumer loops re-vet every hop (the #592
-//! vector); the body is size-capped WHILE streaming. The no-network construction
+//! auto-redirects are OFF and the consumer loops re-vet every hop (the redirect
+//! SSRF vector); the body is size-capped WHILE streaming. The no-network construction
 //! gates (scheme/host/resolution, the is_global gate) live in the crate's unit
 //! tests; these need a tokio runtime + a local server, so they live out here.
 //!
@@ -93,7 +93,7 @@ fn redirect_response(location: &str) -> String {
     )
 }
 
-// ── the low-level client builders (#721 S1) ──────────────────────────────────
+// ── the low-level client builders ──────────────────────────────────
 
 #[tokio::test]
 async fn pin_connects_to_vetted_ip_while_host_carries_the_name() {
@@ -158,7 +158,7 @@ async fn endpoint_client_pins_loopback_and_round_trips() {
 
 #[tokio::test]
 async fn auto_redirects_are_off_so_a_3xx_surfaces_to_the_caller() {
-    // The whole #592 control depends on the client NOT auto-following: a 302
+    // The whole SSRF control depends on the client NOT auto-following: a 302
     // must surface as a 302 the caller inspects + re-vets, never a transparent
     // jump to the Location.
     let (port, _rx) = canned_server(vec![redirect_response("http://evil.test/x")]);
@@ -177,7 +177,7 @@ async fn auto_redirects_are_off_so_a_3xx_surfaces_to_the_caller() {
     );
 }
 
-// ── post_pinned_with_revet: the operator-endpoint POST loop (#721 S2) ─────────
+// ── post_pinned_with_revet: the operator-endpoint POST loop ─────────
 
 /// Drive `post_pinned_with_revet` with a `reqwest` client doing the per-URL send
 /// (the consumer's job): return `Redirect(location)` on a 3xx, `Done(status)`
@@ -241,7 +241,7 @@ async fn endpoint_loop_caps_at_max_redirects() {
     assert!(err.message.contains("too many redirects"), "{err:?}");
 }
 
-// ── fetch_pinned_get: the untrusted-media GET loop (#721 S2) ──────────────────
+// ── fetch_pinned_get: the untrusted-media GET loop ──────────────────
 
 #[tokio::test]
 async fn media_get_round_trips_and_reports_content_type() {

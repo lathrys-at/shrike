@@ -1,11 +1,9 @@
-//! SSRF classifier parity regression (#591, from team-review-fa54f8c S2-1).
+//! SSRF classifier parity regression.
 //! The Rust SSRF classifier diverged from Python's `ipaddress.is_global` on
 //! 6to4 (2002::/16) and 3fff::/20 — Python refuses (non-global); the Rust
 //! allowlist permitted. A 6to4 address embeds an IPv4 in bytes 2..6, so
 //! `2002:7f00:0001::` is the 6to4 encoding of 127.0.0.1, fail-open to an
 //! internal IPv4 on the attacker-supplied `store_media` url path.
-//!
-//! Observed at fa54f8c: RED (allowlist permitted 2002::1 etc.).
 
 use std::net::IpAddr;
 

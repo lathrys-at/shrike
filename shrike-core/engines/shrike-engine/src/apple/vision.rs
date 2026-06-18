@@ -1,5 +1,5 @@
-//! Apple Vision OCR as a native engine (#342 P3; Swift glue since #398, in
-//! `shrike-platform` since #709): Apple's `RecognizeTextRequest` (macOS 15+,
+//! Apple Vision OCR as a native engine (Swift glue in
+//! `shrike-platform`): Apple's `RecognizeTextRequest` (macOS 15+,
 //! Swift-only) at accurate level with language correction, per-line text +
 //! confidence + normalized top-left boxes — the one-pass text+positions
 //! contract. This layer parses `shrike-platform`'s raw JSON into the engine-api
@@ -33,7 +33,7 @@ impl AppleVisionRecognizer {
     /// The platform identity: `apple-vision-swift:{revision}:macos{X.Y.Z}`
     /// — model revision + OS version (an OS upgrade re-derives, exactly
     /// like a model change rebuilds vectors). A deliberate hard cut from
-    /// the objc2 engine's `apple-vision:rev{N}` lineage (#398): the new
+    /// the objc2 engine's `apple-vision:rev{N}` lineage: the new
     /// API rides a newer text model, so all OCR rows re-derive once.
     pub fn fingerprint_str(&self) -> &str {
         &self.fingerprint
@@ -90,7 +90,7 @@ mod tests {
         fn fingerprint_format() {
             let fp = engine().fingerprint_str().to_string();
             // apple-vision-swift:{revision}:macos{X.Y.Z} — stable across
-            // calls; a hard cut from the objc2 lineage (#398).
+            // calls; a hard cut from the objc2 lineage.
             assert!(fp.starts_with("apple-vision-swift:revision"), "{fp}");
             let macos = fp.split(":macos").nth(1).expect("macos segment");
             let parts: Vec<&str> = macos.split('.').collect();

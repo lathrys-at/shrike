@@ -1,6 +1,6 @@
 """The JSON Schema validation shim (shrike._mcp_perf).
 
-Since #445 the proxy's ``validate`` is a deliberate NO-OP: both ends of every
+The proxy's ``validate`` is a deliberate NO-OP: both ends of every
 tool call are already Pydantic-validated, and the SDK's data-proportional
 jsonschema walk measured ~9 ms on large calls. These tests pin that contract:
 validate never raises (Pydantic is the enforcement layer), other module
@@ -27,7 +27,7 @@ class TestNoOpProxy:
         _CachingJsonschema(jsonschema).validate({"x": 1}, _SCHEMA)
 
     def test_does_not_raise_on_invalid_instance(self) -> None:
-        # The walk is skipped by design (#445): Pydantic rejects malformed
+        # The walk is skipped by design: Pydantic rejects malformed
         # input/output with better errors before/after the SDK would.
         _CachingJsonschema(jsonschema).validate({"x": "nope"}, _SCHEMA)
 

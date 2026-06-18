@@ -1,4 +1,4 @@
-"""Unit coverage for CLI type/info output branches (#107)."""
+"""Unit coverage for CLI type/info output branches."""
 
 from __future__ import annotations
 

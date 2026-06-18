@@ -109,7 +109,7 @@ class TestStoreMediaServerPath:
             StoreMediaItem(**kwargs)
 
     async def test_path_refused_when_no_roots_even_if_otherwise_local(self, wrapper, tmp_path):
-        # Off by default (#170): empty server_path_roots → `path` refused outright.
+        # Off by default: empty server_path_roots → `path` refused outright.
         src = tmp_path / "local.png"
         src.write_bytes(b"x")
         results = await wrapper.store_media([{"path": str(src)}], allow_private_fetch=False)

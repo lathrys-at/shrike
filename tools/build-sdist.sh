@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the release sdist via Bazel and give it its real filename (#245).
+# Build the release sdist via Bazel and give it its real filename.
 #
 # The //shrike-py:sdist rule stamps the tag-derived version (STABLE_VERSION) into the sdist,
 # but Bazel computes the output *filename* at analysis time — before stamping — so it

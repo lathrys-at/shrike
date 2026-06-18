@@ -4,7 +4,7 @@ package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
-# The shared error taxonomy crate (#705): the NativeError type every native
+# The shared error taxonomy crate: the NativeError type every native
 # crate returns across the FFI seam. NO pyo3 here (enforced by
 # //shrike-core:layering_check) — the Python exception mapping lives in shrike-pyo3.
 rust_library(

@@ -1,19 +1,18 @@
-//! The action core (#331, kernel inversion S2) — slice 1: the read surface.
+//! The action core — slice 1: the read surface.
 //!
 //! Each action is the *whole* tool body: parameter normalization, the
-//! collection-core call, and the Rust-canonical response type (#330) — typed
-//! end-to-end since #391 phase 2 (the read surface returns `shrike-schemas`
+//! collection-core call, and the Rust-canonical response type — typed
+//! end-to-end (the read surface returns `shrike-schemas`
 //! types straight from the core; serialization happens once, at the host
 //! edge). Python's `actions.py` shrinks to a binding per re-homed action:
 //! typed signature (FastMCP's inputSchema source) + context assembly + the
 //! completion-log fragment.
 //!
-//! Actions are synchronous over `&dyn Collection` (#389): the transitional harness
+//! Actions are synchronous over `&dyn Collection`: the transitional harness
 //! invokes them on its collection worker thread through the shrike-pyo3
 //! per-action bindings (the same serialization every collection op rides);
-//! the kernel's async layer (S3, #332) will drive the same bodies through
-//! [`crate::SerializedCollection`]. No threading, no runtime assumption here
-//! (#308/#310).
+//! the kernel's async layer will drive the same bodies through
+//! [`crate::SerializedCollection`]. No threading, no runtime assumption here.
 
 use serde::de::DeserializeOwned;
 
@@ -36,7 +35,7 @@ pub const REHOMED_ACTIONS: &[&str] = &[
 /// A parse failure here is a *bug* (the core and the schema disagree), not
 /// caller input — surfaced as an internal error with the type named.
 ///
-/// The read surface no longer needs this (#391 phase 2: the core returns the
+/// The read surface no longer needs this (the core returns the
 /// typed values directly); it stays for the unconverted modules — the
 /// media/write/note-type re-homes still ride core-emitted JSON.
 #[allow(dead_code)]
@@ -52,7 +51,7 @@ fn validate<T: DeserializeOwned>(name: &str, json: &str) -> NativeResult<T> {
 ///
 /// `include` mirrors the tool param (empty = summary, `"all"` expands);
 /// `note_type_details` selects which note types carry their full definition.
-/// Typed end-to-end (#391 phase 2): the core builds the canonical type, the
+/// Typed end-to-end: the core builds the canonical type, the
 /// action forwards it, and serialization happens once, at the host edge.
 ///
 /// # Errors
@@ -111,7 +110,7 @@ pub fn list_notes(
 }
 
 /// `collection_query` — a raw Anki search expression (the read-only escape
-/// hatch, #97). A malformed expression is invalid input (isolation marks
+/// hatch). A malformed expression is invalid input (isolation marks
 /// already stripped by the core's error decoding).
 ///
 /// # Errors
@@ -240,15 +239,15 @@ mod tests {
     }
 }
 
-// ── search_notes (#331, S2: the assembly re-home) ────────────────────────────
+// ── search_notes: the assembly re-home ───────────────────────────────────────
 // The whole fused-search body: per-modality semantic ranking over query
 // vectors (embedded host-side — a handful of query vectors crossing the FFI is
-// the recorded design point on #331), substring + fuzzy lexical candidates
+// the recorded design point), substring + fuzzy lexical candidates
 // from the derived store (with the find_notes fallback), RRF fusion with the
 // exact-match priority tier, and annotation/provenance assembly — validated
 // into the canonical SearchResultGroup. Orchestrator state (semantic
-// availability, the #201b image activation floor, the index size for the
-// over-fetch clamp) is injected per call until S3 internalizes it.
+// availability, the image activation floor, the index size for the
+// over-fetch clamp) is injected per call until the kernel internalizes it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -266,7 +265,7 @@ type NoteContent = BTreeMap<String, String>;
 type ModalityHits = std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>;
 
 /// One SECONDARY embedding space's already-embedded + already-searched semantic
-/// results, fed into cross-space fusion (#234). The PRIMARY text space's hits
+/// results, fed into cross-space fusion. The PRIMARY text space's hits
 /// ride the existing `vectors`/`index` path (unchanged, host-supplied); each
 /// secondary text-capable space embeds the query with ITS OWN model and
 /// searches ITS OWN engine at the kernel level, then hands the per-source rows
@@ -279,14 +278,14 @@ type ModalityHits = std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpaceSemantic {
     /// The space's CONTENT fingerprint — surfaced in per-space provenance
-    /// (#182) only when N≥2 (vacuous/absent at N=1).
+    /// only when N≥2 (vacuous/absent at N=1).
     pub space_key: String,
     /// One entry per search source, in `sources` order.
     pub per_source: Vec<SpaceSourceHits>,
-    /// This space's OWN #201b intra-modal image activation floor
+    /// This space's OWN intra-modal image activation floor
     /// (`mean + margin·std` of its image modality's typical best match),
     /// calibrated on its OWN index stats — NOT the primary's `image_floor`,
-    /// which is calibrated on a different index (#576). `None` when the space
+    /// which is calibrated on a different index. `None` when the space
     /// is uncalibrated (text-only collection, too few samples), in which case
     /// the intra-modal floor is a no-op and only the relative gate applies.
     /// The kernel fills this from the space's orchestrator at fan-out time.
@@ -295,12 +294,12 @@ pub struct SpaceSemantic {
 }
 
 /// The cross-space fusion variant. `FloorAdmit` is the SHIPPED PRODUCTION
-/// default since #580: the relative winner-take-all gate (#234) is RETIRED from
+/// default: the relative winner-take-all gate is RETIRED from
 /// the production path — a secondary image space is admitted on its OWN
 /// calibrated intra-modal floor (`image_best > z_floor`), independent of how the
 /// text space did, so a strong on-topic CLIP hit reaches RRF and corroborates a
 /// card even when the text space "won" on a spurious filename/lexical match (the
-/// #580 corroboration win, measured on the real MiniLM+CLIP corpus:
+/// corroboration win, measured on the real MiniLM+CLIP corpus:
 /// `eval/search_quality/RESULTS_580.md`). The floor margin is the precision/
 /// recall dial (`search.cross_space_fusion.margin`, threaded into calibration).
 ///
@@ -312,15 +311,15 @@ pub struct SpaceSemantic {
 /// impossible-by-construction behaviour at the kernel level).
 ///
 /// The other modes are EVAL-ONLY (`SHRIKE_CROSS_SPACE_FUSION_MODE`), kept to
-/// reproduce the historical #576/#580 decision tables — they NEVER select in
+/// reproduce the historical decision tables — they NEVER select in
 /// production: the relative family (`Relative`, `RelativeFloor`, `SoftRelative`,
-/// `SoftCalibrated`) reproduces the pre-#580 gate; `SoftFloorAdmit*` reproduces
-/// the dominated soft variant (#580 §5: zero recall upside, re-opens the
+/// `SoftCalibrated`) reproduces the older gate; `SoftFloorAdmit*` reproduces
+/// the dominated soft variant (zero recall upside, re-opens the
 /// over-return leak with τ); the `*Budget` modes reproduce the N≥2 multiplicity
 /// measurement that justifies the single-image-space invariant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CrossSpaceFusionMode {
-    /// PRODUCTION (#580) — FLOOR-ADMIT (binary): the relative gate is gone; admit
+    /// PRODUCTION — FLOOR-ADMIT (binary): the relative gate is gone; admit
     /// a vision space iff its best surviving image cosine clears its OWN
     /// calibrated floor (`image_best > z_floor`), at full weight 1.0. An
     /// uncalibrated space (no floor) is admitted (the floor is a no-op). The
@@ -328,11 +327,11 @@ pub enum CrossSpaceFusionMode {
     /// flood the relative gate used to guard cannot occur.
     #[default]
     FloorAdmit,
-    /// V0+floor (eval) — the pre-#580 production default: relative gate AND a
-    /// per-space calibrated intra-modal floor. Kept to reproduce the #576 table.
+    /// V0+floor (eval) — the older production default: relative gate AND a
+    /// per-space calibrated intra-modal floor. Kept to reproduce the table.
     RelativeFloor,
     /// V0 (eval) — binary relative gate only (`clip_best >= text_best`). The
-    /// pre-#576 behaviour; leaks weak image cards when the primary's best cosine
+    /// older behaviour; leaks weak image cards when the primary's best cosine
     /// → 0. Kept to measure the leak the floor closes.
     Relative,
     /// V1 (eval) — soft-relative: weight `w = σ((clip_best − text_best)/τ)`
@@ -342,7 +341,7 @@ pub enum CrossSpaceFusionMode {
     /// V2 (eval) — soft-calibrated: weight `w = σ((z_s − z0)/τ)`, composed with
     /// the relative gate. The soft alternative to the hard floor.
     SoftCalibrated,
-    /// #580 (eval) — FLOOR-ADMIT + WEIGHT BUDGET (binary): admit on the absolute
+    /// (eval) — FLOOR-ADMIT + WEIGHT BUDGET (binary): admit on the absolute
     /// floor, but bound the TOTAL vision RRF weight when N≥2 spaces fire by
     /// splitting a budget `B` (default 1.0, `cross_space_budget`) equally across
     /// the admitted spaces (each gets `B/N`). N=1 keeps full weight `B`. The
@@ -350,18 +349,18 @@ pub enum CrossSpaceFusionMode {
     /// MEASURED RATIONALE for the single-image-space invariant (moot in
     /// production, where N≥2 is a config error).
     FloorAdmitBudget,
-    /// #580 (eval) — SOFT floor-admit (NO budget): drop the relative gate; weight
-    /// each admitted space `w = σ((image_best − z_floor)/τ)`. DOMINATED (#580
-    /// §5): no recall upside over binary, and re-opens the over-return leak as τ
+    /// (eval) — SOFT floor-admit (NO budget): drop the relative gate; weight
+    /// each admitted space `w = σ((image_best − z_floor)/τ)`. DOMINATED:
+    /// no recall upside over binary, and re-opens the over-return leak as τ
     /// grows. Kept only to reproduce that finding.
     SoftFloorAdmit,
-    /// #580 (eval) — SOFT floor-admit + WEIGHT BUDGET: the soft variant with the
+    /// (eval) — SOFT floor-admit + WEIGHT BUDGET: the soft variant with the
     /// N≥2 budget (sum-scaled to `B`). Also dominated; kept for completeness.
     SoftFloorAdmitBudget,
 }
 
 /// One secondary space's per-source search result: its per-modality hits plus
-/// the raw best query→match cosine the RELATIVE activation gate (#234) reads
+/// the raw best query→match cosine the RELATIVE activation gate reads
 /// BEFORE RRF strips magnitude.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SpaceSourceHits {
@@ -394,7 +393,7 @@ fn escape_anki_text(text: &str) -> String {
 /// snippet slices the original by those indices).
 ///
 /// `None` content (a meta-mode note dict carries no fields) yields `None`, the
-/// "no literal match" answer — exactly the pre-#391 `Value::Null` behaviour,
+/// "no literal match" answer — exactly the older `Value::Null` behaviour,
 /// now expressed in the type.
 pub fn substring_info(content: Option<&NoteContent>, text: &str) -> Option<SubstringInfo> {
     let needle: Vec<char> = text.to_lowercase().chars().collect();
@@ -432,7 +431,7 @@ pub fn substring_info(content: Option<&NoteContent>, text: &str) -> Option<Subst
             matched_fields: matched,
             snippet,
             // A field hit's source/ref are the schema defaults (`source:
-            // "field"`, `ref: None`), matching the pre-#391 dict that carried
+            // "field"`, `ref: None`), matching the older dict that carried
             // neither key and so deserialized them from those serde defaults.
             source: crate::FIELD_SOURCE.to_owned(),
             r#ref: None,
@@ -483,7 +482,7 @@ pub struct SearchArgs {
     pub tags: Vec<String>,
     /// Note IDs to exclude from results (e.g. the anchor note itself).
     pub exclude: Vec<i64>,
-    /// The #201b activation floor for the image modality (None = no gating).
+    /// The activation floor for the image modality (None = no gating).
     pub image_floor: Option<f64>,
     /// Per-signal RRF weights. EMPTY means the canonical set
     /// (`fusion::search_weights`) — the sentinel a future `--search-*`
@@ -495,32 +494,32 @@ pub struct SearchArgs {
     /// The index's current vector count, for the over-fetch clamp.
     pub index_size: usize,
     /// Derived `source` strings hidden from the lexical (substring/fuzzy)
-    /// surfaces (#485): a VectorOnly recognition source (VLM describe) is
+    /// surfaces: a VectorOnly recognition source (VLM describe) is
     /// stored for provenance + reconcile but never surfaced on a lexical
-    /// query. EMPTY (the default) = nothing hidden, the pre-#485 behaviour.
+    /// query. EMPTY (the default) = nothing hidden, the older behaviour.
     pub hidden_lexical_sources: Vec<String>,
-    /// SECONDARY embedding spaces' semantic results for cross-space fusion
-    /// (#234), one per space, each already embedded + searched at the kernel
+    /// SECONDARY embedding spaces' semantic results for cross-space fusion,
+    /// one per space, each already embedded + searched at the kernel
     /// level. EMPTY (the default) is the N=1 / single-space case — the rankings
     /// fed to `rrf_fuse` are then EXACTLY today's per-modality set, so the fused
     /// output is byte-identical. Non-empty appends each space's gated `image`
     /// ranking (the relative activation gate, below).
     pub cross_space: Vec<SpaceSemantic>,
-    /// Disable the cross-space relative activation gate (#234) — the NEGATIVE
+    /// Disable the cross-space relative activation gate — the NEGATIVE
     /// CONTROL only. `false` (the default) keeps the mandatory gate on; `true`
     /// fires every secondary space's image ranking ungated, which the eval
     /// showed floods text queries and regresses text recall (the load-bearing
     /// 0.08-vs-1.00 separation a test pins). Never set in production.
     pub disable_cross_space_gate: bool,
-    /// The cross-space fusion variant (#576). `Relative` (the default) is
+    /// The cross-space fusion variant. `Relative` (the default) is
     /// today's binary relative gate — production behaviour is unchanged until
     /// the experiment's data selects a winner. The floor/soft modes are
     /// eval-selectable measurement variants.
     pub cross_space_fusion_mode: CrossSpaceFusionMode,
-    /// The temperature τ for the soft variants (#576): smaller τ → a sharper
+    /// The temperature τ for the soft variants: smaller τ → a sharper
     /// taper (τ→0 is the binary floor limit). Ignored by the binary modes.
     pub cross_space_tau: f64,
-    /// The total vision-WEIGHT BUDGET `B` for the #580 `*Budget` floor-admission
+    /// The total vision-WEIGHT BUDGET `B` for the `*Budget` floor-admission
     /// modes: when N≥2 vision spaces clear their floor, their combined RRF weight
     /// is bounded to `B` (split equally in the binary mode, sum-scaled in the
     /// soft mode). N=1 keeps full weight `B`. `<= 0.0` (the `Default`) is read as
@@ -603,7 +602,7 @@ fn in_scope(note: &Note, deck: Option<&str>, tags: &[String]) -> bool {
     true
 }
 
-/// Batch-hydrate candidates (#445): ONE `note_dicts` call per ranking replaces
+/// Batch-hydrate candidates: ONE `note_dicts` call per ranking replaces
 /// the old one-call-per-candidate shape (each singleton paid two DB-proxy
 /// queries plus a full `deck_names` RPC plus a full notetype proto — per
 /// candidate, hundreds of times per search). Each wire dict is parsed into the
@@ -645,7 +644,7 @@ fn read_notes_batch(
     }
 }
 
-/// The fusion signal name for a SECONDARY vision space's image ranking (#234):
+/// The fusion signal name for a SECONDARY vision space's image ranking:
 /// `image#<space-key>`. Distinct per space so provenance identifies which
 /// vision space surfaced a note and each space fuses as its own RRF signal
 /// (the canonical `search_weights` has no entry → `rrf_fuse` defaults its weight
@@ -656,7 +655,7 @@ pub fn cross_space_signal(space_key: &str) -> String {
 }
 
 /// The best (highest) query→match cosine across a space's NOTE-item modalities
-/// for one source — `1 - rank-1 distance`, maxed over `text`/`image` (#234). The
+/// for one source — `1 - rank-1 distance`, maxed over `text`/`image`. The
 /// relative cross-space activation gate compares a vision space's value to the
 /// dedicated text space's value for the same query. `None` when the space
 /// returned no note-item hits. The rank-1 distance is the smallest (the engine
@@ -674,28 +673,28 @@ pub fn best_query_cosine_of(
         .fold(None, |acc, c| Some(acc.map_or(c, |a: f64| a.max(c))))
 }
 
-/// The #201b intra-modal activation floor from `(mean, std)` of a modality's
+/// The intra-modal activation floor from `(mean, std)` of a modality's
 /// typical best match (`mean + margin·std`), the kernel mirror of
 /// `shrike.index.activation_floor`. The single source of the floor formula —
-/// the harness-side secondary calibration (#576) routes through it. `None`
+/// the harness-side secondary calibration routes through it. `None`
 /// (uncalibrated — too few samples) → no floor, the gate disabled there.
 pub fn activation_floor(stats: Option<(f64, f64)>, margin: f64) -> Option<f64> {
     stats.map(|(mean, std)| mean + margin * std)
 }
 
-/// The host-side `ACTIVATION_MARGIN` (#201b) mirrored for the kernel-computed
+/// The host-side `ACTIVATION_MARGIN` mirrored for the kernel-computed
 /// cross-space floor — kept in lockstep with `shrike.actions.ACTIVATION_MARGIN`.
 pub const ACTIVATION_MARGIN: f64 = 1.0;
 
-/// Logistic squash `σ(x) = 1/(1+e^-x)` for the #576 soft-weight variants.
+/// Logistic squash `σ(x) = 1/(1+e^-x)` for the soft-weight variants.
 fn sigmoid(x: f64) -> f64 {
     1.0 / (1.0 + (-x).exp())
 }
 
-/// The PER-NOTE image activation floor (#582): retain in `ranking` only the
+/// The PER-NOTE image activation floor: retain in `ranking` only the
 /// notes whose OWN image cosine (`score[id]`) clears `floor`, and prune the
 /// dropped notes from `score` so the displayed-`score` fold and the `image_best`
-/// read stay consistent. The pre-#582 behaviour was a per-SPACE gate (admit the
+/// read stay consistent. The older behaviour was a per-SPACE gate (admit the
 /// WHOLE ranking iff the rank-1 cosine cleared the floor); this is the correct
 /// per-note granularity — a below-floor tail card no longer rides in on a
 /// strong rank-1's coat-tails, so it carries no spurious image signal/provenance.
@@ -820,7 +819,7 @@ fn collect_substring_candidates(
         exclude,
         args,
     } = ctx;
-    // The store serves scoped queries too (#177 retirement of the wildcard
+    // The store serves scoped queries too (retirement of the wildcard
     // scan): the scope id set — from anki's INDEXED deck:/tag: search — is
     // pushed into the FTS5 query, so a scoped literal search reads no note
     // text outside the store. The wildcard `*text*` fallback (a full field
@@ -834,8 +833,8 @@ fn collect_substring_candidates(
     // `Ok(None)` = the store can't serve this query (a sub-trigram query, or no
     // store at all) → the `find_notes` field-text fallback below is correct.
     // `Err` = a REAL derived-read failure (e.g. a transient SQLITE_BUSY that
-    // outlived the busy-retry). It must NOT silently fall back to `find_notes`
-    // (#644): OCR/ASR text lives ONLY in the derived store, never in an anki
+    // outlived the busy-retry). It must NOT silently fall back to `find_notes`:
+    // OCR/ASR text lives ONLY in the derived store, never in an anki
     // field, so the field-text fallback structurally cannot serve it — a silent
     // fallback would drop the OCR/ASR `exact`/substring signal with no error.
     // Surface it instead (the store's own contract: "a MATCH error is a real
@@ -906,7 +905,7 @@ fn collect_substring_candidates(
         if !in_scope(&candidate.note, args.deck.as_deref(), &args.tags) {
             continue;
         }
-        // A derived-source row is its own authority (#199/#388): FTS5
+        // A derived-source row is its own authority: FTS5
         // matched the stored text's literal trigrams, and the field-content
         // re-check below would wrongly reject a literal living only in an
         // OCR/ASR row. Provenance carries the source + ref so the result can
@@ -967,7 +966,7 @@ fn collect_fuzzy(
         .iter()
         .map(String::as_str)
         .collect();
-    // A real derived-read failure surfaces (#644): the fuzzy signal has no
+    // A real derived-read failure surfaces: the fuzzy signal has no
     // anki-field fallback at all (no `find_notes` path here), so silently
     // returning empty would drop OCR/ASR fuzzy matches with no error. Propagate.
     let hits = d.search_fuzzy(text, args.top_k as i64, scope, &hidden)?;
@@ -1035,23 +1034,23 @@ struct AdmittedSpace {
     weight: f64,
 }
 
-/// Cross-space fusion (#234 / #576 / #580) for one source. Each SECONDARY image
+/// Cross-space fusion for one source. Each SECONDARY image
 /// space contributes its own `image#<key>` ranking, folding its per-note image
 /// cosines into `sem_score` (the displayed-score max-over-items) and hydrating
 /// its candidates into `note_data`. EMPTY `cross_space` (N=1 — the
 /// production-common case) returns an empty contribution, so the caller's
 /// rankings/weights are byte-identical to the no-cross-space path.
 ///
-/// PRODUCTION (#580): FLOOR-ADMIT. The relative winner-take-all gate is RETIRED
+/// PRODUCTION: FLOOR-ADMIT. The relative winner-take-all gate is RETIRED
 /// — a secondary image space is admitted on its OWN calibrated intra-modal
 /// floor (`image_best > z_floor`), independent of how the text space did, so a
 /// strong on-topic CLIP hit corroborates the card even when text "won" on a
-/// spurious filename lexical match (the #580 win). Sound because >1 image space
+/// spurious filename lexical match (the win). Sound because >1 image space
 /// is a config error (`profiles`): with at most one image space there is no
 /// multiplicity, which was the relative gate's only job.
 ///
 /// EVAL-ONLY (`SHRIKE_CROSS_SPACE_FUSION_MODE`): the relative family
-/// (`Relative*`/`*Floor` non-admit) reproduces the pre-#580 gate; the
+/// (`Relative*`/`*Floor` non-admit) reproduces the older gate; the
 /// `Soft*`/`*Budget` modes reproduce the dominated soft variant + the N≥2
 /// multiplicity measurement. `uses_relative_gate` keeps the gate for the
 /// relative family ONLY; the floor-admit family skips it.
@@ -1099,7 +1098,7 @@ fn fuse_cross_spaces(
         let Some(shits) = space.per_source.get(i) else {
             continue;
         };
-        // The relative gate (#234) — applied ONLY for the relative family.
+        // The relative gate — applied ONLY for the relative family.
         // With the gate disabled (the negative control), every space fires.
         // The floor-admit family skips it entirely (the floor below is the sole
         // admission test).
@@ -1126,7 +1125,7 @@ fn fuse_cross_spaces(
         if ranking_space_image.is_empty() {
             continue;
         }
-        // #582 (PRODUCTION FloorAdmit only): a PER-NOTE floor — keep only the
+        // PRODUCTION FloorAdmit only: a PER-NOTE floor — keep only the
         // cards whose own image cosine clears this space's floor, so a
         // below-floor tail card carries no `image#clip`. The eval modes keep
         // the historical per-SPACE rule below (on `image_best`) so they
@@ -1185,14 +1184,14 @@ fn fuse_cross_spaces(
                     _ => Some(1.0),
                 }
             }
-            // #580/#582 FloorAdmit / FloorAdmitBudget — admit on the absolute
+            // FloorAdmit / FloorAdmitBudget — admit on the absolute
             // floor alone (relative gate already skipped). The PER-NOTE floor
             // filter above already dropped sub-floor cards and `continue`d if
             // none survived, so any surviving ranking has cleared the floor →
             // raw weight 1.0 (the budget pass divides it down for the budget
             // mode).
             CrossSpaceFusionMode::FloorAdmit | CrossSpaceFusionMode::FloorAdmitBudget => Some(1.0),
-            // #580 SoftFloorAdmit / SoftFloorAdmitBudget — soft admission
+            // SoftFloorAdmit / SoftFloorAdmitBudget — soft admission
             // `w = σ((image_best − z_floor)/τ)`, no relative composition. An
             // uncalibrated space / τ≤0 falls back to weight 1.0. There is no
             // hard drop: a sub-floor hit gets a near-zero weight (negligible RRF
@@ -1215,7 +1214,7 @@ fn fuse_cross_spaces(
         });
     }
 
-    // Pass 2: the #580 vision-weight BUDGET. When N≥2 admitted spaces share a
+    // Pass 2: the vision-weight BUDGET. When N≥2 admitted spaces share a
     // bounded total weight `B`, no flood of always-confident off-topic spaces
     // can out-fuse the text answer (the negative control the relative gate used
     // to guard). N=1 keeps full weight (the production-common case is
@@ -1246,7 +1245,7 @@ fn fuse_cross_spaces(
                 *entry = *isim;
             }
         }
-        // A DISTINCT signal name per space so provenance (#182) identifies which
+        // A DISTINCT signal name per space so provenance identifies which
         // vision space surfaced the note, and each space fuses as its own RRF
         // signal (weight defaults to 1.0 — the eval's equal weighting; the
         // soft/budget modes override it). `image#<key>` reads as "the image
@@ -1297,7 +1296,7 @@ pub fn search_notes(
                 fetch_k = fetch_k.min(args.index_size);
             }
         }
-        // Scoped to the NOTE-item spaces: tag-centroid spaces (#178) share
+        // Scoped to the NOTE-item spaces: tag-centroid spaces share
         // the engine but must never surface a tag key from a note search.
         let note_spaces: Vec<String> = crate::NOTE_MODALITIES
             .iter()
@@ -1306,7 +1305,7 @@ pub fn search_notes(
         sem_by_source = index.search_by_modality(vectors, fetch_k, Some(&note_spaces))?;
     }
 
-    // The lexical scope set (#177): one INDEXED anki query (deck:/tag: —
+    // The lexical scope set: one INDEXED anki query (deck:/tag: —
     // never a field-text scan) shared by both lexical collectors, pushed
     // into the FTS5 queries so scoped literal/fuzzy search keeps exact
     // recall without over-fetch. None = unscoped.
@@ -1348,7 +1347,7 @@ pub fn search_notes(
 
         // Per-modality semantic rankings. Text is thresholded; image is not
         // (the gap makes the text-calibrated cosine threshold meaningless —
-        // flooring image hits is the #201b activation gate's job below).
+        // flooring image hits is the activation gate's job below).
         let empty = ModalityHits::new();
         let modality_hits = sem_by_source.get(i).unwrap_or(&empty);
         let mut sem_score: HashMap<i64, f64> = HashMap::new();
@@ -1369,13 +1368,13 @@ pub fn search_notes(
             &mut image_score,
             false,
         );
-        // #582: per-NOTE image floor — keep only the cards whose own image
+        // Per-NOTE image floor — keep only the cards whose own image
         // cosine clears the floor (was a per-space all-or-nothing gate on the
         // rank-1). A below-floor tail card no longer rides in on the rank-1's
         // coat-tails. When the rank-1 itself is sub-floor the whole ranking
         // empties (the old behaviour falls out as the rank-1 case).
         apply_image_floor(&mut ranking_image, &mut image_score, args.image_floor);
-        // Tag-centroid signal (#179): conditionally present — activated tags
+        // Tag-centroid signal: conditionally present — activated tags
         // expand to member notes through the SAME scope/exclusion machinery
         // (synthetic order-preserving distances into a scratch score map, so
         // tag evidence never masquerades as a semantic `score`).
@@ -1458,7 +1457,7 @@ pub fn search_notes(
             ("fuzzy".into(), fuzzy.ranking),
         ];
 
-        // Cross-space fusion (#234 / #576 / #580) — each SECONDARY image space
+        // Cross-space fusion — each SECONDARY image space
         // contributes its own `image#<key>` ranking + (eval) weight; empty for
         // the N=1 production-common case, so the inputs stay byte-identical.
         let cross = fuse_cross_spaces(
@@ -1473,20 +1472,20 @@ pub fn search_notes(
         rankings.extend(cross.rankings);
 
         // Host-supplied weights override; empty means the kernel's canonical
-        // set (#388 — the one source of truth in `fusion`).
+        // set (the one source of truth in `fusion`).
         let mut weights = if args.weights.is_empty() {
             crate::fusion::search_weights()
         } else {
             args.weights.clone()
         };
-        // #576 soft variants: the per-space `image#<key>` weight (a per-query
+        // Soft variants: the per-space `image#<key>` weight (a per-query
         // taper) overrides the canonical default of 1.0 for that signal.
         weights.extend(cross.weights);
         let priority: HashSet<String> =
             std::iter::once(crate::fusion::PRIORITY_SIGNAL.to_owned()).collect();
         let fused = crate::fusion::rrf_fuse(&rankings, &weights, crate::fusion::RRF_K, &priority);
 
-        // Provenance (#182): best (lowest) rank first, ties by signal name.
+        // Provenance: best (lowest) rank first, ties by signal name.
         // Assemble the typed wire match from the candidate + the per-note score,
         // provenance, and fuzzy evidence (serialization happens once, at the
         // host edge).
@@ -1570,7 +1569,7 @@ mod search_tests {
 
     #[test]
     fn scoped_lexical_search_serves_from_the_store() {
-        // #177 (scan retirement): a deck-scoped literal/fuzzy search rides
+        // Scan retirement: a deck-scoped literal/fuzzy search rides
         // the FTS5 store with the scope id set pushed into the query — exact
         // recall inside the scope, zero leakage outside it, and the wildcard
         // `*text*` field scan is never consulted (the store served Some).
@@ -1664,7 +1663,7 @@ mod search_tests {
 
     /// A `DerivedStore` that delegates to a real engine but forces the two
     /// lexical reads (`search_substring`/`search_fuzzy`) to return `Err` — the
-    /// shape of a derived-read failure that survives the busy-retry (#644). All
+    /// shape of a derived-read failure that survives the busy-retry. All
     /// other methods delegate so build/ingest still work.
     struct FlakyDerived {
         inner: DerivedEngine,
@@ -1769,12 +1768,12 @@ mod search_tests {
 
     #[test]
     fn derived_read_error_surfaces_never_silently_field_falls_back() {
-        // #644 (the correctness fix): a REAL derived-read failure (a busy that
+        // The correctness fix: a REAL derived-read failure (a busy that
         // outlived the retry) must SURFACE from search_notes, not silently fall
         // back to the `find_notes("*text*")` field scan. The field scan can't
         // serve OCR/ASR text (it lives only in the derived store, never in an
         // anki field), so a silent fallback would drop the OCR `exact`/`fuzzy`
-        // signal with NO error — exactly the silent degradation #644 is about.
+        // signal with NO error — exactly the silent degradation in question.
         let (dir, core) = temp_collection();
         // Ingest an OCR row whose text is NOT in any anki field (the note's
         // field text is unrelated), so only the derived store can serve it.
@@ -1830,7 +1829,7 @@ mod search_tests {
 
     #[test]
     fn derived_unavailable_none_still_field_falls_back() {
-        // The other side of #644: `Ok(None)` (a sub-trigram query, or no store)
+        // The other side of the contract: `Ok(None)` (a sub-trigram query, or no store)
         // is NOT an error — the `find_notes` field-text fallback is correct for
         // FIELD text and must still run. A 2-char query (< MIN_TRIGRAM) makes
         // the store return None; the literal must still hit via the field scan.
@@ -2006,9 +2005,9 @@ mod search_tests {
         assert!(substring_info(None, "x").is_none());
     }
 
-    // ── Cross-space fusion + the relative activation gate (#234) ─────────────
+    // ── Cross-space fusion + the relative activation gate ────────────────────
     //
-    // These productionize the #231 eval's load-bearing findings against
+    // These productionize the eval's load-bearing findings against
     // `search_notes` DIRECTLY (no host wiring needed): the gate PRESERVES
     // text-target ranking, the negative control (gate OFF) REGRESSES it, and a
     // gated vision space DELIVERS image recall. The two spaces are a primary
@@ -2022,7 +2021,7 @@ mod search_tests {
         vision_space_floored(key, image_keys, image_dists, None)
     }
 
-    /// `vision_space` with an explicit per-space intra-modal image floor (#576).
+    /// `vision_space` with an explicit per-space intra-modal image floor.
     fn vision_space_floored(
         key: &str,
         image_keys: &[i64],
@@ -2067,8 +2066,8 @@ mod search_tests {
 
     #[test]
     fn cross_space_gated_preserves_text_target() {
-        // (a) Documents the now-EVAL-ONLY relative gate (retired from production
-        // by #580): under `Relative`, an OFF-TOPIC vision space (its best image
+        // (a) Documents the now-EVAL-ONLY relative gate (retired from
+        // production): under `Relative`, an OFF-TOPIC vision space (its best image
         // cosine BELOW the primary text space's best) does NOT fire — the
         // text-target note stays rank-1. Kept as a kernel-level record of the
         // gate's behaviour now that floor-admission is the default. (Under the
@@ -2131,8 +2130,8 @@ mod search_tests {
     fn cross_space_ungated_regresses_text_negative_control() {
         // (b) THE NEGATIVE CONTROL — the eval's load-bearing finding (text R@1
         // collapse, the 0.08-vs-1.00 separation). It documents WHY the relative
-        // gate existed: N=2 off-topic vision spaces flood a text query. #580
-        // RETIRED the gate because >1 image space is a config error
+        // gate existed: N=2 off-topic vision spaces flood a text query. The gate
+        // was RETIRED because >1 image space is a config error
         // (`profiles.resolve_profile`), so this N=2 shape is IMPOSSIBLE in
         // production — this test is a kernel-level record of the now-eval-only
         // relative gate (selected explicitly via `Relative`), not a production
@@ -2279,7 +2278,7 @@ mod search_tests {
             .iter()
             .find(|m| m.note.id == image_note)
             .expect("the image-bearing note is delivered via the gated vision space");
-        // Per-space provenance (#182): the surfacing signal is `image#clip`.
+        // Per-space provenance: the surfacing signal is `image#clip`.
         assert!(
             img.provenance.iter().any(|p| p.signal == "image#clip"),
             "the match carries its vision space's per-space provenance"
@@ -2288,7 +2287,7 @@ mod search_tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    // ── The #576 cross-space intra-modal floor (the over-return leak) ────────
+    // ── The cross-space intra-modal floor (the over-return leak) ─────────────
     //
     // These pin the variant mechanics against `search_notes` DIRECTLY. The
     // failure they guard: when the PRIMARY text space's best cosine → 0 (an
@@ -2326,7 +2325,7 @@ mod search_tests {
     fn over_return_v0_leaks_weak_image_on_empty_primary() {
         // V0 (today): the primary's best cosine ≈ 0, so the relative gate
         // `v(0.2) >= p(0.0)` is trivially OPEN and the weak off-topic image
-        // leaks into the results. This is the leak #576 closes — pinned here so
+        // leaks into the results. This is the leak the floor closes — pinned here so
         // the floor variants below have a positive baseline to beat.
         let (dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
         let mut a = cross_args(10);
@@ -2549,7 +2548,7 @@ mod search_tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    // ── #580 floor-based admission (drop the relative gate) ──────────────────
+    // ── Floor-based admission (drop the relative gate) ───────────────────────
     //
     // These pin the floor-admission mechanics against `search_notes` DIRECTLY.
     // The win they prove: a strong on-topic CLIP hit reaches RRF even when the
@@ -2561,7 +2560,7 @@ mod search_tests {
 
     #[test]
     fn floor_admit_corroborates_when_text_wins() {
-        // THE #580 WIN — the filename-collision case at the unit level. A text
+        // THE WIN — the filename-collision case at the unit level. A text
         // query whose answer is in a card's image, where the card's FILENAME
         // also lexically wins the primary text space (so the relative gate would
         // shut CLIP out). Here the primary text matches the image card STRONGLY
@@ -2637,7 +2636,7 @@ mod search_tests {
 
     #[test]
     fn floor_admit_rejects_spurious_filename_image() {
-        // THE #580 PRECISION GUARD — the homonym/lying-filename case at the unit
+        // THE PRECISION GUARD — the homonym/lying-filename case at the unit
         // level. A card's filename lexically wins the text space, but its IMAGE
         // is OFF-TOPIC for the query, so the vision space's image best (0.30)
         // falls BELOW the floor (0.50). Floor-admission must REJECT the CLIP hit:
@@ -2686,7 +2685,7 @@ mod search_tests {
 
     #[test]
     fn floor_admit_keeps_the_over_return_leak_closed() {
-        // The #576 over-return leak must STAY closed under floor-admission: an
+        // The over-return leak must STAY closed under floor-admission: an
         // ∅-gold query, empty primary, one weak off-topic image (cos 0.20 < floor
         // 0.50). With no relative gate the floor is the only guard — and it holds
         // (0.20 ≤ 0.50 → dropped). Same outcome as RelativeFloor, different path.
@@ -2719,8 +2718,8 @@ mod search_tests {
 
     #[test]
     fn floor_admit_alone_floods_n2_but_budget_holds_it() {
-        // THE MEASURED RATIONALE for the "no two image spaces" config assertion
-        // (#580). The N=2 negative control's protection came ENTIRELY from the
+        // THE MEASURED RATIONALE for the "no two image spaces" config
+        // assertion. The N=2 negative control's protection came ENTIRELY from the
         // relative gate (see `floor_holds_the_negative_control_at_n2`): both
         // off-topic spaces clear their floor, so dropping the relative gate lets
         // them flood. FloorAdmit (no budget) REGRESSES text R@1; FloorAdmitBudget
@@ -2880,16 +2879,16 @@ mod search_tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
-    // ── #582 per-note image floor (drop the below-floor tail) ────────────────
+    // ── Per-note image floor (drop the below-floor tail) ─────────────────────
 
     #[test]
     fn floor_admit_secondary_drops_below_floor_tail() {
-        // #582: the per-NOTE floor on the SECONDARY cross-space image ranking. A
+        // The per-NOTE floor on the SECONDARY cross-space image ranking. A
         // vision space surfaces TWO image cards: one ABOVE the floor (cos 0.92)
         // and one BELOW it (cos 0.20, floor 0.50). Floor-admission's per-note
         // filter keeps the above-floor card's `image#clip` and DROPS the
         // below-floor one — the latter no longer rides in on the rank-1's
-        // coat-tails (the pre-#582 per-space gate admitted the whole ranking).
+        // coat-tails (the older per-space gate admitted the whole ranking).
         let (dir, core) = temp_collection();
         let weak_text = add_note(&core, "a loosely related text card", "text");
         let above = add_note(&core, "card whose image strongly matches", "img");
@@ -2936,7 +2935,7 @@ mod search_tests {
 
     #[test]
     fn primary_image_floor_is_per_note() {
-        // #582: the per-NOTE floor on the PRIMARY image ranking (the #201b core,
+        // The per-NOTE floor on the PRIMARY image ranking (the core,
         // used by omni/single-space deployments). The primary image modality
         // returns two cards: one above the floor (cos 0.90) and one below (cos
         // 0.20, floor 0.50). The above-floor card surfaces via `image`; the

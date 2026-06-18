@@ -1,4 +1,4 @@
-"""The NativeIndexEngine *binding* surface (#355 port from test_index_engine.py).
+"""The NativeIndexEngine *binding* surface.
 
 The engine behaviours (dedup, phantom-hit filter, persistence, calibration)
 are pinned crate-side in shrike-index; what only a Python test can pin is the
@@ -86,13 +86,13 @@ class TestBindingPersistence:
 
         fresh = _engine()
         # The native restore reconstructs key maps from candidate_keys (the
-        # fingerprint-sidecar note ids) — the documented #273 divergence.
+        # fingerprint-sidecar note ids) — the documented restore divergence.
         assert fresh.restore(str(tmp_path), [1, 2]) is True
         assert fresh.size() == 3
         assert fresh.ndim() == NDIM
         assert fresh.contains(1) and fresh.contains(2)
         assert dict(fresh.modality_sizes()) == {"text": 2, "image": 1}
-        # modality_stats (#684): per-sub-index (size, ndim); both sub-indexes
+        # modality_stats: per-sub-index (size, ndim); both sub-indexes
         # restored at NDIM here, so each reports its own width.
         stats = {m: (size, ndim) for m, size, ndim in fresh.modality_stats()}
         assert stats == {"text": (2, NDIM), "image": (1, NDIM)}

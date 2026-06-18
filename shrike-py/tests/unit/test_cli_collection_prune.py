@@ -1,6 +1,6 @@
-"""CLI handling for `shrike collection prune` (#89), with the client stubbed.
+"""CLI handling for `shrike collection prune`, with the client stubbed.
 
-Prune unified to apply-by-default + `--dry-run` (#686): by default it previews,
+Prune is apply-by-default with `--dry-run`: by default it previews,
 confirms, then applies; `--dry-run` only previews; `--yes` skips the prompt.
 """
 

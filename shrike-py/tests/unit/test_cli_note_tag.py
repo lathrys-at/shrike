@@ -1,4 +1,4 @@
-"""CLI argument handling for `shrike note tag` (#73).
+"""CLI argument handling for `shrike note tag`.
 
 Exercises the set-XOR-add/remove rule and the `--set ""` clear path without a
 live server, by stubbing ShrikeClient.update_note_tags.

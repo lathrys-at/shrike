@@ -1,4 +1,4 @@
-"""Collection-layer tests for migrate_note_type (#75): Anki's models.change.
+"""Collection-layer tests for migrate_note_type: Anki's models.change.
 
 Exercises CollectionWrapper._migrate_note_type directly (no server): field/
 template remap, reported drops, validation, and id/card preservation.

@@ -1,9 +1,8 @@
 """Tests for search_notes, upsert neighbor attachment, and delete index updates.
 
-Since #355 these run against a REAL AsyncKernel (the unit harness in
-conftest.py): writes route through the kernel's maintained ops, the index is
-the kernel's own engine, and assertions read observable state instead of
-facade mocks.
+These run against a REAL AsyncKernel (the unit harness in conftest.py): writes
+route through the kernel's maintained ops, the index is the kernel's own engine,
+and assertions read observable state instead of facade mocks.
 
 The vector-planting scheme: the backend attached to the KERNEL embeds every
 note as [0, 1] — orthogonal to the [1, 0] every query embeds to (the view's
@@ -61,7 +60,7 @@ class _AlignedBackend(_NoteBackend):
 
 class _StatsView(KernelIndexView):
     """KernelIndexView with an injectable activation-stats override: the
-    kernel calibrates stats from real data; the #201b gate tests script them."""
+    kernel calibrates stats from real data; the gate tests script them."""
 
     stats_override: dict[str, dict[str, float]] | None = None
 
@@ -266,7 +265,7 @@ class TestUnifiedSearch:
         assert ids[0] == exact_nid  # literal hit ranks first despite no score
 
     def test_literal_hit_missed_by_prefilter_still_floats(self, kharness, mcp_sem):
-        # #236 review F1: the exact tier follows the `substring` annotation, not pre-filter
+        # The exact tier follows the `substring` annotation, not pre-filter
         # membership — a literal hit that reaches note_data only through the SEMANTIC ranking
         # (no derived store here, and a deck scope below would be the other route) still gets
         # the annotation recompute and floats. The query contains a '*' so Anki's wildcard
@@ -303,7 +302,7 @@ class TestUnifiedSearch:
             kharness.call_tool(mcp_no_index, "search_notes", {"queries": ["test"], "limit": 51})
 
     def test_limit_zero_accepted(self, kharness, mcp_no_index):
-        """limit=0 means "return all" (#685) — it is a valid value, not rejected."""
+        """limit=0 means "return all" — it is a valid value, not rejected."""
         # No index attached, so this returns no semantic results but must not raise
         # on the bound (it would have under the old ge=1).
         res = kharness.call_tool(mcp_no_index, "search_notes", {"queries": ["test"], "limit": 0})
@@ -325,13 +324,12 @@ class TestUnifiedSearch:
         with pytest.raises(ToolError):
             kharness.call_tool(mcp_no_index, "search_notes", {"ids": list(range(51))})
 
-    # (The over-fetch window internals live in the kernel since the #331
-    # re-home; the outcome they exist for is pinned by
-    # test_deck_filter_returns_deep_in_scope_match below.)
+    # (The over-fetch window internals live in the kernel; the outcome they
+    # exist for is pinned by test_deck_filter_returns_deep_in_scope_match below.)
 
     def test_deck_filter_returns_deep_in_scope_match(self, kharness, mcp_sem, kbasic_note):
         """An in-deck note ranked behind out-of-deck neighbors is still returned
-        — the widened window must not silently under-return (audit 2.3).
+        — the widened window must not silently under-return.
 
         ``kbasic_note`` is in deck "Test"; the nearest neighbor here is in another
         deck and ranks ahead of it. A deck-scoped search must skip past the
@@ -352,7 +350,7 @@ class TestUnifiedSearch:
     def test_image_modality_hit_surfaces_unthresholded(self, kharness, mcp_sem):
         # An image-modality match with no text match still surfaces the note: the image ranking is
         # its own RRF signal and is NOT thresholded (the text-calibrated threshold is meaningless
-        # across the CLIP gap; flooring image hits is the #201b activation gate's job). The surfaced
+        # across the CLIP gap; flooring image hits is the activation gate's job). The surfaced
         # score is the (gap-depressed but real) image cosine.
         nid = kharness.seed_note("diagram of the krebs cycle")
         _plant(kharness, [(nid, 0.7)], modality="image")  # 0.30 sim — below threshold, kept
@@ -380,7 +378,7 @@ class TestUnifiedSearch:
         assert m["score"] == 0.9  # max(0.90 text, 0.30 image)
 
     def test_image_gate_passes_strong_match(self, kharness, mcp_sem, sem_view):
-        # #201b: calibrated floor = mean + ACTIVATION_MARGIN·std = 0.20 + 1.0·0.05 = 0.25. A best
+        # Calibrated floor = mean + ACTIVATION_MARGIN·std = 0.20 + 1.0·0.05 = 0.25. A best
         # image sim of 0.30 clears it → the (image-only) note surfaces, scored by the image sim.
         nid = kharness.seed_note("krebs cycle diagram")
         sem_view.stats_override = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
@@ -412,7 +410,7 @@ class TestUnifiedSearch:
         assert m["score"] == 0.8  # text sim only; the gated image sim is not the max
 
     def test_image_gate_judges_surviving_hit(self, kharness, mcp_sem, sem_view):
-        # #201b review F1: the gate must judge the best image hit that *survives* exclusion/scope,
+        # The gate must judge the best image hit that *survives* exclusion/scope,
         # not the raw rank-1. Here the strong rank-1 image hit is the excluded anchor; the only
         # surviving image hit is weak (below the 0.25 floor) → the modality must be gated out.
         anchor = kharness.seed_note("anchor card")
@@ -437,8 +435,8 @@ class TestUnifiedSearch:
         assert [x["id"] for x in result["results"][0]["matches"]] == [strong]
 
     def test_limit_zero_returns_all_across_two_spaces(self, kharness, mcp_sem, sem_view):
-        # `limit=0` == "return all" (#685) on a TWO-SPACE (text+image) index — the
-        # #685 x #684 seam. #684 split the index into per-modality sub-indexes;
+        # `limit=0` == "return all" on a TWO-SPACE (text+image) index. The index
+        # is split into per-modality sub-indexes;
         # the limit=0 clamp reads `index.size`, which is the AGGREGATE across all
         # sub-indexes (text count + image count). If it ever read only one
         # sub-index's size, limit=0 would under-fetch and silently drop results.
@@ -457,7 +455,7 @@ class TestUnifiedSearch:
 
 
 class TestProvenance:
-    """Per-result provenance (#182): which signals surfaced each match, at what rank."""
+    """Per-result provenance: which signals surfaced each match, at what rank."""
 
     @staticmethod
     def _matches(kharness, mcp_app, query: str) -> list[dict]:
@@ -523,7 +521,7 @@ def _build_derived(kharness, derived) -> None:
 
 
 class TestDerivedSearch:
-    """search_notes wired to the derived store: substring-via-store + the fuzzy signal (#98)."""
+    """search_notes wired to the derived store: substring-via-store + the fuzzy signal."""
 
     @pytest.fixture()
     def derived(self, tmp_path):
@@ -552,7 +550,7 @@ class TestDerivedSearch:
         assert m[0]["substring"]["matched_fields"] == ["Front"]
         assert m[0]["substring"]["source"] == "field"
         # A literal hit shares every trigram so it's *trivially* also a fuzzy match, but `fuzzy` is
-        # suppressed on exact hits (review F4) — `exact` is the distinguishing lexical signal.
+        # suppressed on exact hits — `exact` is the distinguishing lexical signal.
         assert [p["signal"] for p in m[0]["provenance"]] == ["exact"]
         assert m[0].get("fuzzy") is None
 
@@ -586,13 +584,13 @@ class TestDerivedSearch:
 
     def test_no_fuzzy_signal_when_store_unavailable(self, kharness, mcp_sem):
         # Fallback safety: with no derived store, a typo query emits no fuzzy match —
-        # substring still works via find_notes, exactly as before #98.
+        # substring still works via find_notes.
         kharness.seed_note("Mitochondria are the powerhouse")
         res = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["mitochndria"]})
         assert res["results"][0]["matches"] == []
 
     def test_exact_hit_carries_no_fuzzy(self, kharness, mcp_derived, derived):
-        # Review F4: a clean exact (literal) match must not also be badged `fuzzy`, even though it
+        # A clean exact (literal) match must not also be badged `fuzzy`, even though it
         # shares every trigram — `fuzzy` is reserved for the distinguishing near-miss signal.
         nid = kharness.seed_note("powerhouse of the cell")
         _build_derived(kharness, derived)
@@ -603,7 +601,7 @@ class TestDerivedSearch:
         assert hit.get("fuzzy") is None
 
     def test_result_capped_at_limit(self, kharness, mcp_derived, derived):
-        # Review F5: the fused union (text/image/exact/fuzzy, each up to limit) is capped to limit,
+        # The fused union (text/image/exact/fuzzy, each up to limit) is capped to limit,
         # so a broad fuzzy signal can't inflate a query's result count past the documented cap.
         for i in range(8):
             kharness.seed_note(f"mitochondrion variant {i}")  # all fuzzy-match the typo
@@ -614,7 +612,7 @@ class TestDerivedSearch:
         assert len(res["results"][0]["matches"]) == 3
 
     def test_limit_zero_returns_all(self, kharness, mcp_derived, derived):
-        # limit=0 means "return all" (#685): the same broad fuzzy match that the
+        # limit=0 means "return all": the same broad fuzzy match that the
         # cap-to-3 test truncates must come back in full when the cap is lifted.
         for i in range(8):
             kharness.seed_note(f"mitochondrion variant {i}")
@@ -645,9 +643,9 @@ class TestUpsertNeighbors:
         assert set(neighbors[0]["tags"]) == {"science", "physics"}
 
     def test_below_semantic_floor_is_not_a_neighbor(self, kharness, mcp_sem):
-        # #531: a candidate below the search semantic floor (0.5) and with no
+        # A candidate below the search semantic floor (0.5) and with no
         # exact/fuzzy overlap is not similarity-backed → not a neighbor. There
-        # is no neighbor_threshold any more; the search floor + similarity gate
+        # is no neighbor_threshold; the search floor + similarity gate
         # decide. (distance 0.7 → cosine 0.3 < 0.5.)
         existing = kharness.seed_note("Q", back="A")
         _plant(kharness, [(existing, 0.7)])
@@ -657,8 +655,7 @@ class TestUpsertNeighbors:
     def test_above_semantic_floor_is_a_neighbor(self, kharness, mcp_sem):
         # The companion: a candidate above the 0.5 floor IS similarity-backed
         # (semantic) → kept, with its cosine reported. (distance 0.15 → cosine
-        # 0.85.) This is exactly the ~0.59-on-aarch64 case #531 fixes: it clears
-        # the 0.5 floor with margin, no brittle 0.6 cliff to flip.
+        # 0.85.) It clears the 0.5 floor with margin, no brittle 0.6 cliff to flip.
         existing = kharness.seed_note("Q", back="A")
         _plant(kharness, [(existing, 0.15)])
         result = _upsert(kharness, mcp_sem, [BASIC_NOTE])
@@ -712,7 +709,7 @@ class TestUpsertNeighbors:
 
     def test_note_texts_failure_doesnt_fail_upsert(self, kharness, mcp_sem):
         """If note_embed_inputs raises, the already-committed notes must
-        still report created — not a NameError-driven false failure (audit 3.3)."""
+        still report created — not a NameError-driven false failure."""
 
         async def boom(_ids):
             raise RuntimeError("embedding text build failed")
@@ -827,7 +824,7 @@ class TestUpsertPolicyTool:
 
 
 class TestTwoTierSearch:
-    """The live-search tier contract (#181): tier='live' runs only the
+    """The live-search tier contract: tier='live' runs only the
     no-embedding signals and reports partial; the min-query gate keeps typing
     fragments from burning embedding calls; `version` echoes verbatim."""
 
@@ -871,9 +868,9 @@ class TestTwoTierSearch:
 
 
 class TestDedupNeighbors:
-    """The generation-dedup hardening (#204): the lexical-overlap signal
-    (#206), the precision-oriented threshold (#207), and per-signal
-    provenance (#208) on upsert neighbors."""
+    """The generation-dedup hardening: the lexical-overlap signal, the
+    precision-oriented threshold, and per-signal provenance on upsert
+    neighbors."""
 
     @pytest.fixture()
     def derived(self, tmp_path):
@@ -895,7 +892,7 @@ class TestDedupNeighbors:
         return result["results"][0].get("neighbors", [])
 
     def test_fuzzy_only_hit_is_not_a_neighbor(self, kharness, mcp_dedup, derived):
-        # #531 similarity gate: an existing near-verbatim card planted
+        # Similarity gate: an existing near-verbatim card planted
         # semantically FAR (cosine 0) so ONLY the trigram overlap can catch it.
         # A fuzzy-trigram-only hit is a lexical coincidence, NOT real
         # content-similarity, so it does NOT qualify as a neighbor — neighbors
@@ -944,7 +941,7 @@ class TestDedupNeighbors:
     def test_both_signals_merge_on_one_candidate(self, kharness, mcp_dedup, derived):
         # A semantic-backed candidate (cosine 0.9) that ALSO has trigram
         # overlap: it qualifies (semantic), and its provenance carries both
-        # signals — the widened provenance (#531: any search signal).
+        # signals — the widened provenance (any search signal).
         existing = kharness.seed_note("glycolysis happens in the cytoplasm")
         _build_derived(kharness, derived)
         _plant(kharness, [(existing, 0.1)])
@@ -965,9 +962,9 @@ class TestDedupNeighbors:
         assert {p["signal"] for p in hit["provenance"]} == {"text", "fuzzy"}
 
     def test_below_floor_unrelated_is_not_a_neighbor(self, kharness, mcp_dedup, derived):
-        # #531: cosine 0.45 < the 0.5 search semantic floor, and lexically
+        # Cosine 0.45 < the 0.5 search semantic floor, and lexically
         # unrelated — no similarity signal backs it, so it is not a neighbor.
-        # (There is no neighbor_threshold knob any more; the search floor +
+        # (There is no neighbor_threshold knob; the search floor +
         # similarity gate decide.)
         existing = kharness.seed_note("qq unrelated wording qq")
         _build_derived(kharness, derived)
@@ -988,8 +985,8 @@ class TestDedupNeighbors:
 
 
 class TestDedupStats:
-    """The #207 calibration feedstock: one best-semantic-match sample per
-    upsert draft, recorded from dedup's OWN traffic (never the #201 gate)."""
+    """The calibration feedstock: one best-semantic-match sample per
+    upsert draft, recorded from dedup's OWN traffic (never the activation gate)."""
 
     def test_recorder_buckets_and_no_match(self):
         from shrike.harness.harness import DedupStatsRecorder

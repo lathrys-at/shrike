@@ -1,10 +1,10 @@
-//! The N-space index coordinator (#232, the multi-space substrate's data
-//! layer — #229). One [`IndexOrchestrator`] + [`DebouncedSaver`] per embedding
+//! The N-space index coordinator (the multi-space substrate's data
+//! layer). One [`IndexOrchestrator`] + [`DebouncedSaver`] per embedding
 //! space, keyed by the space's CONTENT fingerprint (the same key
 //! [`EmbedSpaces`](crate::EmbedSpaces) uses), so the index set stays in lockstep
 //! with the embed set.
 //!
-//! ## The N=1 migration rule (load-bearing, the resolved #229 decision)
+//! ## The N=1 migration rule (load-bearing)
 //!
 //! The PRIMARY text space keeps using `cache_dir`/the per-collection index dir
 //! **DIRECTLY** (no subdir) — so an existing single-space user's on-disk index
@@ -19,13 +19,13 @@
 //!
 //! The kernel opens with NO embedder, so the primary orchestrator is created
 //! eagerly at [`IndexSet::open`] over the base dir (byte-identical to the
-//! pre-#232 single orchestrator) but **un-keyed**. The FIRST embedder attach
+//! older single orchestrator) but **un-keyed**. The FIRST embedder attach
 //! ([`IndexSet::bind_space`]) claims the primary slot for that embedder's key;
 //! a SECOND distinct key creates a secondary orchestrator in a subdir. This
 //! keeps the embed-space → index-space mapping exact without the index path
-//! ever consuming more than the primary this PR (the fan-out is PR-C).
+//! ever consuming more than the primary here (the fan-out is a later stage).
 //!
-//! ## What is fanned out this PR
+//! ## What is fanned out here
 //!
 //! - **Removal by note id** fans out to EVERY space (a deleted note leaves all
 //!   indexes).
@@ -35,7 +35,7 @@
 //!   model swap on one space drifts only that space (per-space `model_id`).
 //!
 //! The index/search path still reads [`IndexSet::primary`] — the one engine
-//! the orchestrator/search consume until PR-C wires cross-space fusion.
+//! the orchestrator/search consume until cross-space fusion is wired.
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -80,7 +80,7 @@ struct SetConfig {
     engine_factory: EngineFactory,
 }
 
-/// The ordered set of index spaces (#232). The first element is the PRIMARY
+/// The ordered set of index spaces. The first element is the PRIMARY
 /// space (base dir, no subdir); the rest are secondaries (subdirs). Insertion-
 /// ordered, keyed by content fingerprint with replace semantics (re-binding the
 /// same key is a no-op; a new key appends a secondary).
@@ -91,7 +91,7 @@ pub struct IndexSet {
 
 impl IndexSet {
     /// Open the set with its PRIMARY space materialized eagerly at the base dir
-    /// (byte-identical to the pre-#232 single orchestrator): the primary
+    /// (byte-identical to the older single orchestrator): the primary
     /// orchestrator loads any existing on-disk index in place, un-keyed until an
     /// embedder attaches. `primary_modalities` is what the primary engine spans
     /// (the kernel passes the note modalities + the `tag.text` space, exactly as
@@ -136,8 +136,8 @@ impl IndexSet {
     }
 
     /// The PRIMARY orchestrator — the one engine the index/search paths consume
-    /// this PR. With one declared embedder it is the sole space at the base dir,
-    /// so every drift/reconcile/save/wire path is byte-identical to pre-#232.
+    /// here. With one declared embedder it is the sole space at the base dir,
+    /// so every drift/reconcile/save/wire path is byte-identical to the older one.
     ///
     /// # Panics
     ///
@@ -147,7 +147,7 @@ impl IndexSet {
     }
 
     /// The PRIMARY space's debounced saver — the index-maintenance tail's saver
-    /// (the index path is primary-only this PR).
+    /// (the index path is primary-only here).
     ///
     /// # Panics
     ///
@@ -156,7 +156,7 @@ impl IndexSet {
         Arc::clone(&self.spaces.read().expect("index set poisoned")[0].saver)
     }
 
-    /// The engine the `tag.text` centroids bind to (#178/#232): the PRIMARY /
+    /// The engine the `tag.text` centroids bind to: the PRIMARY /
     /// dedicated text space's engine. Tag centroids are a pure function of THAT
     /// space's text vectors — never fanned out across spaces with different
     /// geometries.
@@ -193,7 +193,7 @@ impl IndexSet {
     }
 
     /// Bind an embedding space's key (its CONTENT fingerprint) to an index
-    /// space (#232) — the lockstep entry the kernel's `attach_embedder_space`
+    /// space — the lockstep entry the kernel's `attach_embedder_space`
     /// drives. The FIRST bind claims the un-keyed PRIMARY space (no new dir);
     /// a key matching an already-bound space is a no-op (a model re-attach that
     /// keeps its fingerprint); a NEW key materializes a secondary orchestrator
@@ -254,7 +254,7 @@ impl IndexSet {
         Ok(orchestrator)
     }
 
-    /// The orchestrator bound to `key`, if any (#232) — the kernel routes a
+    /// The orchestrator bound to `key`, if any — the kernel routes a
     /// space's index op to its own orchestrator through this.
     ///
     /// # Panics
@@ -299,7 +299,7 @@ impl IndexSet {
             .collect()
     }
 
-    /// Remove a set of notes from EVERY space's index (#232): a deleted note
+    /// Remove a set of notes from EVERY space's index: a deleted note
     /// leaves all indexes. Returns the primary's removal count (the one the
     /// single-space path returned, byte-identical for N=1).
     ///
@@ -318,7 +318,7 @@ impl IndexSet {
         Ok(primary_removed)
     }
 
-    /// Advance every space's stored `col_mod` watermark (#232) — a maintained
+    /// Advance every space's stored `col_mod` watermark — a maintained
     /// write touched all of them. With one space this is the single
     /// `set_col_mod`, byte-identical.
     pub fn set_col_mod_all(&self, value: i64) {
@@ -327,7 +327,7 @@ impl IndexSet {
         }
     }
 
-    /// Request a debounced save on every space's saver (#232).
+    /// Request a debounced save on every space's saver.
     pub fn request_save_all(&self) {
         for saver in self.all_savers() {
             saver.request_save();
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn reconcile_equals_rebuild_on_a_secondary_space() {
-        // The pinned reconcile==rebuild property, run PER SPACE (#232): a
+        // The pinned reconcile==rebuild property, run PER SPACE: a
         // SECONDARY space's orchestrator is a fully-independent IndexOrchestrator
         // with its own dir/drift/hashes, so an incremental reconcile on it lands
         // on the identical end state a full rebuild would — exactly the property
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn remove_all_and_set_col_mod_all_fan_out_to_every_space() {
-        // The fan-out the kernel's delete + watermark-advance ride (#232): each
+        // The fan-out the kernel's delete + watermark-advance ride: each
         // touches EVERY space. set_col_mod_all advances both watermarks; a
         // remove_all on a note present in both leaves both.
         crate::runtime::block_on(async {

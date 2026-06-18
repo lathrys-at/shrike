@@ -1,5 +1,5 @@
-//! The write surface (#278 series, step 3): the named-fields upsert batch
-//! (create/update with the #77 policy + dry_run), tags, decks,
+//! The write surface: the named-fields upsert batch
+//! (create/update with the duplicate policy + dry_run), tags, decks,
 //! find_replace_notes, delete_note_types — ports of the CollectionWrapper
 //! methods of the same names, result-shape-identical JSON where the Python
 //! side returns dicts (the tests/native parity harness compares them).
@@ -61,7 +61,7 @@ fn ids_csv(ids: &[i64]) -> String {
         .join(",")
 }
 
-/// Per-batch lookup memo (#445): one upsert batch repeatedly resolved the
+/// Per-batch lookup memo: without it one upsert batch repeatedly resolves the
 /// same notetype inventory per item — a full notetype-names list per created
 /// note, field-name + type-name lookups per updated note. Scoped to one
 /// `upsert_notes` call (this op never edits notetypes, so it can't go stale
@@ -73,7 +73,7 @@ struct UpsertMemo {
 }
 
 impl CollectionCore {
-    /// Import an `.apkg`/`.colpkg` package into the collection (#72).
+    /// Import an `.apkg`/`.colpkg` package into the collection.
     ///
     /// Delegates to anki's modern Rust importer via the service layer. MUTATES
     /// the collection — `col.mod` bumps — so the kernel op that calls this MUST
@@ -323,14 +323,14 @@ impl CollectionCore {
             note.tags = tags.clone();
         }
 
-        // Resolve the deck reference BEFORE any write (#589): a bad ref — a
+        // Resolve the deck reference BEFORE any write: a bad ref — a
         // numeric/#id that resolves to no deck — must fail the item WITHOUT
-        // having mutated the note. (The old order wrote the fields/tags first
-        // and resolved the deck after, so a bad ref half-wrote the note and
-        // bumped col.mod; create_note_named resolves the deck before its write,
-        // and this mirrors that.) `resolve_deck_ref` is read-only — a
-        // not-yet-existing plain name passes through and is auto-created on the
-        // write path below, so a dry run still creates nothing.
+        // having mutated the note (resolving after the write would half-write
+        // the note and bump col.mod on a bad ref; create_note_named resolves
+        // before its write, and this mirrors that). `resolve_deck_ref` is
+        // read-only — a not-yet-existing plain name passes through and is
+        // auto-created on the write path below, so a dry run still creates
+        // nothing.
         let deck_target = match note_input.deck.as_deref() {
             Some(deck_ref) => {
                 let Some(deck_name) = self.resolve_deck_ref(deck_ref)? else {
@@ -400,8 +400,8 @@ impl CollectionCore {
 
         if !targets.is_empty() {
             if let Some(set_tags) = set_tags {
-                // One UpdateNotes call for the whole set (#445): the
-                // per-note get+update loop paid 3 RPCs and a journal
+                // One UpdateNotes call for the whole set — a per-note
+                // get+update loop would pay 3 RPCs and a journal
                 // commit per note at the 1000-note cap.
                 self.adapter.set_note_tags_bulk(&targets, set_tags)?;
             } else {
@@ -451,7 +451,7 @@ impl CollectionCore {
     }
 
     /// Create or rename decks in bulk (id present = rename; never merges).
-    /// Typed both directions (#391): per-item errors never sink the batch.
+    /// Typed both directions: per-item errors never sink the batch.
     ///
     /// # Errors
     ///

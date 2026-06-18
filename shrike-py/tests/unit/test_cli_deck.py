@@ -1,4 +1,4 @@
-"""CLI argument handling for `shrike deck` (#74), with the client stubbed."""
+"""CLI argument handling for `shrike deck`, with the client stubbed."""
 
 from __future__ import annotations
 

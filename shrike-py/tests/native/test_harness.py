@@ -1,4 +1,4 @@
-"""The kernel-mode server core (#332 S3d-2d): Harness over a real AsyncKernel.
+"""The kernel-mode server core: Harness over a real AsyncKernel.
 
 Embedding-free assembly: the kernel opens on the loop with the harness
 thread driving its executor, the wrapper rides run_job, the derived store
@@ -39,25 +39,24 @@ async def _assemble(tmp_path, *, cooperative: bool = False) -> Harness:
 
 
 class TestDerivedNamespaceParity:
-    """#562: the host DerivedTextStore (the /status read surface) and the
+    """The host DerivedTextStore (the /status read surface) and the
     kernel's DerivedEngine must open the SAME per-collection derived namespace.
 
     The namespace canonicalizes the collection path, and that canonicalization
     differs by whether the file EXISTS at computation time (existing → realpath,
     which folds a symlinked prefix; absent → a lexical abspath that does NOT).
-    The old caller order built the host store BEFORE the kernel created a fresh
-    collection's file, so the host hashed under the abspath namespace while the
-    kernel used the realpath one — host /status read an EMPTY store while the
-    kernel's search store held the rows. Harness.assemble now builds the host
-    store AFTER open, so the file exists for both and they realpath identically.
+    Building the host store BEFORE the kernel creates a fresh collection's file
+    would hash it under the abspath namespace while the kernel uses the realpath
+    one — host /status reads an EMPTY store while the kernel's search store holds
+    the rows. Harness.assemble builds the host store AFTER open, so the file
+    exists for both and they realpath identically.
     """
 
     def test_host_store_and_kernel_resolve_same_path_for_fresh_collection(self, tmp_path) -> None:
-        # The repro condition: a FRESH collection (file absent at assemble time)
-        # reached via a SYMLINKED prefix (so abspath != realpath, like macOS
-        # /var/folders -> /private/var/...). With the pre-open build, the host
-        # store landed in the abspath namespace; post-open it realpaths to the
-        # kernel's namespace.
+        # A FRESH collection (file absent at assemble time) reached via a
+        # SYMLINKED prefix (so abspath != realpath, like macOS
+        # /var/folders -> /private/var/...): post-open, the host store realpaths
+        # to the kernel's namespace.
         from shrike.harness import cache_layout
 
         real = tmp_path / "real"
@@ -70,7 +69,7 @@ class TestDerivedNamespaceParity:
 
         async def flow():
             runtime = EmbeddingRuntime(model=None)
-            # No `derived` injected: assemble resolves it post-open (the fix).
+            # No `derived` injected: assemble resolves it post-open.
             harness = await Harness.assemble(
                 collection_path=collection,
                 cache_dir=cache_dir,
@@ -96,9 +95,8 @@ class TestDerivedNamespaceParity:
         # upsert a note, boot (which builds the derived store kernel-side and
         # settles the host read surface), and assert the host /status store —
         # built by assemble at the kernel's namespace — reports ready AND a
-        # substring query finds the row. Under the old caller order this host
-        # store sat in a stale abspath namespace and read empty (#562). The
-        # symlinked prefix + fresh collection is the exact bug condition.
+        # substring query finds the row. The symlinked prefix + fresh collection
+        # is the condition under which a stale abspath namespace would read empty.
         real = tmp_path / "real"
         real.mkdir()
         link = tmp_path / "link"
@@ -163,10 +161,10 @@ class TestHarness:
             assert status["embedding"]["state"] == "not_configured"
             assert status["index"]["state"] == "unavailable"
             assert status["locking"] == "permanent"
-            # Recognition is off until a backend is configured (#228/#485): the
+            # Recognition is off until a backend is configured: the
             # keyed-by-source map is empty (distinct from attached-but-errored).
             assert status["recognition"] == {}
-            # The cross-modal coverage matrix (#498/#235): shape-stable, every
+            # The cross-modal coverage matrix: shape-stable, every
             # (query, target) cell `unavailable` with embedding down — nothing
             # is reachable natively or via derived text.
             assert status["coverage"] == {
@@ -217,7 +215,7 @@ class TestHarness:
 class _FakeRouterManager:
     """A stand-in for shrike_native.LlamaServerManager.router(...) — records
     start/stop calls and reports running across them, so the harness's
-    spawn-once / owner-only-stop lifecycle (#567) is provable without a real
+    spawn-once / owner-only-stop lifecycle is provable without a real
     llama-server."""
 
     def __init__(self) -> None:
@@ -238,7 +236,7 @@ class _FakeRouterManager:
 
 
 class TestSharedRouterLifecycle:
-    """#567: the shared llama.cpp router manager is spawned ONCE and stopped
+    """The shared llama.cpp router manager is spawned ONCE and stopped
     only by the OWNER — never N spawns, never killed out from under a routed
     (non-owning) harness."""
 
@@ -283,7 +281,7 @@ class TestSharedRouterLifecycle:
             harness = await self._assemble_with_router(tmp_path, mgr, owns_runtime=False)
             await harness._ensure_shared_router()
             assert mgr.starts == 1
-            # A routed (#68) harness does not own the runtime, so its close must
+            # A routed harness does not own the runtime, so its close must
             # leave the shared router running for the owner + siblings.
             await harness.close()
             assert mgr.stops == 0
@@ -359,7 +357,7 @@ class _StubOcr:
 
 
 class _StubAsr:
-    """A captured ASR recognizer (#485): transcribes the audio bytes and
+    """A captured ASR recognizer: transcribes the audio bytes and
     carries a single time-`Span` segment (the audio locator, vs OCR's bbox).
     The RecognizerBackend wire contract — captured behind PyRecognizer, like a
     custom OCR backend — proving the audio path end-to-end without the
@@ -401,7 +399,7 @@ class TestRecognition:
                 media_exists=lambda name: name in media,
             )
             await harness.boot(start_embedding=False)
-            # Deterministic (#471): the boot-drift derived rebuild commits
+            # Deterministic: the boot-drift derived rebuild commits
             # off the actor; settle it before racing ingests against it.
             await harness.settle_background()
             await harness.wrapper.upsert_notes(
@@ -428,7 +426,7 @@ class TestRecognition:
         asyncio.run(flow())
 
     def test_asr_sweep_over_sound_media_through_the_binding(self, tmp_path) -> None:
-        # #485 PR2: the AUDIO path through the harness/binding. A note with a
+        # The AUDIO path through the harness/binding. A note with a
         # [sound:] ref is enumerated (note_sound_refs), a captured ASR stub for
         # the `asr` purpose transcribes it (LexicalAndVector), and the
         # transcript is both lexically searchable AND vector-minting through the
@@ -510,7 +508,7 @@ class TestRecognition:
         asyncio.run(flow())
 
     def test_sweep_stops_on_unreadable_prefix_instead_of_spinning(self, tmp_path) -> None:
-        # #386 livelock: with more pending than one batch and a permanently
+        # The livelock case: with more pending than one batch and a permanently
         # unreadable PREFIX of the pending order, the kernel re-takes the
         # same window every call (skipped items stay pending). The sweep
         # driver must stop on the no-progress batch (recognized == 0) and
@@ -553,8 +551,8 @@ class TestRecognition:
 
             harness.attach_recognizer(_StubOcr())
             # The no-progress STOP is bounded by kernel-call COUNT, not wall
-            # clock (#525): the driver must return after exactly one no-progress
-            # batch. `max_batches` is a generous livelock ceiling so a #386
+            # clock: the driver must return after exactly one no-progress
+            # batch. `max_batches` is a generous livelock ceiling so a
             # regression (re-taking the same window forever) returns instead of
             # hanging the suite — but a correct driver stops at batch 1, well
             # under it. Asserting `batches == 1` (not a 30s timeout) makes the
@@ -591,7 +589,7 @@ class TestRecognition:
         "test re-homing is #514)",
     )
     def test_native_vision_sweep_end_to_end(self, tmp_path) -> None:
-        # #342 P3: the native recognizer rides the kernel sweep with no Python
+        # The native recognizer rides the kernel sweep with no Python
         # on the recognition path — harness attach takes the native pyclass
         # straight through (AnyRecognizer::Native → Blocking → the
         # runtime's blocking pool → Vision), and the recognized text lands as derived rows the
@@ -682,15 +680,15 @@ class TestRecognition:
 
             harness.start_recognition("nope")
             status = await harness.status()
-            # An unknown OCR kind lands an 'error' row under the ocr source
-            # (#485): the engine is attached-but-errored, not absent.
+            # An unknown OCR kind lands an 'error' row under the ocr source:
+            # the engine is attached-but-errored, not absent.
             assert status["recognition"]["ocr"]["state"] == "error"
             await harness.close()
 
         asyncio.run(flow())
 
     def test_start_recognition_describe_missing_key_env_is_an_error_row(self, tmp_path) -> None:
-        # #485 PR1: a missing api_key_env raises a RuntimeError the boot path
+        # A missing api_key_env raises a RuntimeError the boot path
         # catches → an 'error' row keyed by the vlm source, with NO network
         # probe and NO attach. The per-engine /status map populates without
         # disturbing boot, and OCR is untouched (the vlm error adds no ocr row).
@@ -710,7 +708,7 @@ class TestRecognition:
         asyncio.run(flow())
 
     def test_start_recognition_describe_unreachable_endpoint_reports_error(self, tmp_path) -> None:
-        # #485 PR1 (follow-up B): an endpoint that answers NEITHER /health nor
+        # An endpoint that answers NEITHER /health nor
         # /v1/models (a closed port) is reported as an 'error' engine row — a
         # degraded engine must be visible, not silently 'ready'. The engine
         # still ATTACHES (the row carries its degenerate fingerprint), so the
@@ -757,14 +755,14 @@ class TestRecognition:
 
 class TestDedupOverOcr:
     def test_dedup_search_covers_ocr_vectors_max_over_items(self, tmp_path) -> None:
-        # #205: the text-space semantic ranking (KernelIndexView.search, the
+        # The text-space semantic ranking (KernelIndexView.search, the
         # max-over-items dedup the neighbor path relies on) matches a draft
         # against ALL of a note's text-modality vectors: a card whose content
         # lives ONLY inside an image surfaces as a near-dupe through its OCR
         # vector, while the card's own field text shares nothing with the
         # draft. Text-to-text — no modality gap, no activation gate. (Neighbors
-        # now route through the fused search action, #531, which ranks over the
-        # same text space; this pins the underlying max-over-items property.)
+        # route through the fused search action, which ranks over the same text
+        # space; this pins the underlying max-over-items property.)
         import hashlib
         from types import SimpleNamespace
 
@@ -849,7 +847,7 @@ class TestDedupOverOcr:
 
 
 class _StubDescribe:
-    """A captured describe recognizer (#485, the PyRecognizer wire contract):
+    """A captured describe recognizer (the PyRecognizer wire contract):
     canned generated prose under the kernel's ``vlm`` purpose. Distinct
     fingerprint from OCR so the two engines key their meta independently."""
 
@@ -867,12 +865,12 @@ class _StubDescribe:
 
 class TestDescribeAttach:
     def test_describe_routes_vector_only_through_the_binding_search(self, tmp_path) -> None:
-        # #485 PR1: a describe recognizer attached for the ``vlm`` purpose mints
+        # A describe recognizer attached for the ``vlm`` purpose mints
         # a TEXT-space vector for its generated prose (semantically searchable)
         # but its prose is NEVER reachable via the LEXICAL surfaces (exact /
         # fuzzy) — the VectorOnly destination, proven through the SAME pyo3
         # search path the server serves (`harness.kernel.search`, the fused
-        # exact/fuzzy/text ranking), not just at the kernel layer #538 covered.
+        # exact/fuzzy/text ranking).
         # OCR alongside it stays lexically searchable (byte-identical routing).
         import hashlib
         from types import SimpleNamespace
@@ -1006,7 +1004,7 @@ class TestDescribeAttach:
         asyncio.run(flow())
 
     def test_describe_vector_only_through_the_search_notes_action(self, tmp_path) -> None:
-        # #485 PR1 (follow-up A): the VectorOnly invariant proven at the actual
+        # The VectorOnly invariant proven at the actual
         # `search_notes` MCP ACTION path real clients hit — not just the kernel
         # search. A literal phrase living ONLY in the describe prose returns the
         # note (if at all) WITHOUT a `substring` annotation or an `exact`/`fuzzy`
@@ -1146,13 +1144,13 @@ class _StubOcr2:
         return "stub-ocr:v2"
 
 
-# ── Multi-space embedding set (#233) ─────────────────────────────────────────
+# ── Multi-space embedding set ────────────────────────────────────────────────
 
 
 class _FakeEmbedBackend:
     """A captured embedder backend over the wire contract (`embed_texts` /
     `model_fingerprint` / `embedding_dim`) — distinct fingerprints make two
-    distinct kernel embed spaces (#233)."""
+    distinct kernel embed spaces."""
 
     def __init__(self, fingerprint: str, dim: int = 16) -> None:
         self._fp = fingerprint
@@ -1206,7 +1204,7 @@ class _FakeRuntime:
 
 class TestMultiSpaceFanOut:
     def test_two_spaces_attach_and_a_failing_one_leaves_the_other_live(self, tmp_path) -> None:
-        # The harness fan-out (#233): the primary plus one secondary space both
+        # The harness fan-out: the primary plus one secondary space both
         # attach → the kernel holds TWO embed spaces. A SECOND secondary that
         # fails to start degrades only its own space — the others stay live.
         async def flow():
@@ -1303,10 +1301,10 @@ def _make_recalib_harness() -> Harness:
 
 
 class TestReloadRecalibratesSecondaryFloors:
-    """#596: reload() must recalibrate the secondary cross-space image floor
+    """reload() must recalibrate the secondary cross-space image floor
     after a reconcile, like every other reindex path
     (_drive_reindex/_rebuild_then_calibrate/_drive_boot_reindex). Otherwise the
-    #576/#580 floor stays computed against pre-reload vectors and mis-gates the
+    floor stays computed against pre-reload vectors and mis-gates the
     image space until the next boot/rebuild/cooperative-reacquire. N>=2 only."""
 
     def test_drive_boot_reindex_recalibrates(self) -> None:  # control
@@ -1325,29 +1323,23 @@ class TestReloadRecalibratesSecondaryFloors:
 
 
 class TestFacadeReadinessBootWindow:
-    """Repro for #650 — the recognition-vector family flake's CONFIRMED root
-    cause (NOT #628's stale "absent OCR vector / 0.154" framing).
+    """The facade-readiness race: a search during the boot rebuild window.
 
-    Team-debug @ b6c574e found the family flake (`test_asr_sweep_*`,
-    `test_sweep_stops_*`) is a facade-readiness race, not a missing vector:
     `boot()` spawns the host ``DerivedTextStore`` rebuild fire-and-forget
     (``_maybe_build_derived`` -> ``_spawn_bg(_rebuild_derived())`` — never
     awaited), so the facade sits at ``state=BUILDING`` until that un-awaited
     task's ``await kernel.rebuild_derived()`` continuation runs
     ``settle_external_build`` -> ``READY``. While ``BUILDING``,
-    ``DerivedTextStore.search_substring`` short-circuits to ``None`` (gated on
-    ``available == _state==READY``) **even though the recognition rows it would
-    return are already present in shrike.db**, written kernel-side by
-    ``recognition_sweep``. Under ``bazel test //shrike-py/tests/native:native
-    --local_test_jobs=10+`` (~10x process oversubscription) the un-awaited
-    settle is descheduled past a test's ``search_substring`` read -> the read
-    returns ``None`` -> the family asserts fail (~0.5%). The note's text vector
-    is always present (``modality_get`` count == 2); no ``SQLITE_BUSY``.
+    ``DerivedTextStore.search_substring`` must not short-circuit to ``None``
+    (gated on ``available == _state==READY``) when the recognition rows it would
+    return are already present in shrike.db, written kernel-side by
+    ``recognition_sweep`` — otherwise a read descheduled past the un-awaited
+    settle returns ``None``.
 
-    This pins the PRODUCT invariant the fix must restore: the boot-rebuild
-    ``BUILDING`` window MUST NOT silently drop already-present derived rows. The
-    same gap means a real ``search_notes`` substring/fuzzy query during the boot
-    build-window transiently misses OCR/ASR rows (a silent field-fall-back).
+    This pins the PRODUCT invariant: the boot-rebuild ``BUILDING`` window MUST
+    NOT silently drop already-present derived rows. The same gap means a real
+    ``search_notes`` substring/fuzzy query during the boot build-window
+    transiently misses OCR/ASR rows (a silent field-fall-back).
 
     Deterministic: the ``BUILDING`` window is entered with the real
     ``claim_external_build()`` primitive ``_rebuild_derived`` itself uses,
@@ -1422,7 +1414,7 @@ class TestFacadeReadinessBootWindow:
             assert harness.derived.claim_external_build(), "entered the BUILDING window"
             try:
                 rows = harness.derived.search_substring("powerhouse of the cell", limit=5)
-                # THE DEFECT (#650): present rows are silently dropped while BUILDING.
+                # THE DEFECT: present rows are silently dropped while BUILDING.
                 assert rows, (
                     "facade must serve already-present recognition rows during the boot "
                     "BUILDING window, not silently field-fall-back to None (#650)"

@@ -1,4 +1,4 @@
-"""The export_package action (#71 S2): delivery modes + the path-safety gate.
+"""The export_package action: delivery modes + the path-safety gate.
 
 Drives the action directly off ``build_actions`` (the registry the MCP/HTTP
 adapters bind) with a real kernel, a real ExportStore, and a temp export root —

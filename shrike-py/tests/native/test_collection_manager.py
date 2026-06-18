@@ -1,4 +1,4 @@
-"""Multi-collection routing — the CollectionManager (#68, slice 1).
+"""Multi-collection routing — the CollectionManager.
 
 Each registered collection routes to its own lazily-assembled Harness (own
 AsyncKernel + namespaced index + per-collection derived store), sharing one
@@ -116,9 +116,9 @@ class TestSelectorResolution:
         asyncio.run(flow())
 
     def test_no_default_set_among_several_resolves_to_boot_collection(self, tmp_path) -> None:
-        # The #66-review case: with profiles registered but NO default set, a
-        # bare (no-selector) call falls back to the daemon's boot collection
-        # rather than erroring — the boot collection is the implicit default.
+        # With profiles registered but NO default set, a bare (no-selector)
+        # call falls back to the daemon's boot collection rather than erroring
+        # — the boot collection is the implicit default.
         async def flow():
             cfg = tmp_path / "config.yml"
             # Two registered profiles, neither the boot collection, no default.
@@ -184,7 +184,7 @@ class TestLazyAssemblyAndIsolation:
             assert len(other_notes) == 1
 
             # The routed collection's index + derived store live in DISTINCT
-            # per-collection namespaces under the shared cache dir (#67/#547).
+            # per-collection namespaces under the shared cache dir.
             base = str(tmp_path / "cache")
             assert cache_layout.collection_index_dir(
                 base, str(tmp_path / "default.anki2")
@@ -306,7 +306,7 @@ class TestStatusRows:
 
 class TestLiveRegistryView:
     def test_register_then_route_in_one_session(self, tmp_path) -> None:
-        # Contract #2: the registry is a live view — a profile added to the
+        # The registry is a live view — a profile added to the
         # config AFTER the manager was built routes in the same session.
         async def flow():
             cfg = tmp_path / "config.yml"

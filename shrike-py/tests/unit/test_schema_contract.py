@@ -1,4 +1,4 @@
-"""The schema contract test (#330, kernel inversion S1).
+"""The schema contract test.
 
 ``shrike/schemas.py`` (Pydantic) and ``shrike-schemas`` (serde + schemars) must
 describe the same wire. Two gates:
@@ -31,7 +31,7 @@ shrike_native = pytest.importorskip("shrike_native")
 
 
 def test_wire_protocol_version_mirrors_rust() -> None:
-    # The #392 constant: one number, two homes, never allowed to drift.
+    # The constant: one number, two homes, never allowed to drift.
     assert shrike_native.wire_protocol_version() == schemas.WIRE_PROTOCOL_VERSION
 
 
@@ -106,7 +106,7 @@ VARIANT_OR_LOCAL = {
     "EmbeddingNotRunning",
     "StopSucceeded",
     "StopFailed",
-    # ExportPackageResponse (#71)
+    # ExportPackageResponse
     "ExportPackagePath",
     "ExportPackageUrl",
 }
@@ -305,7 +305,7 @@ ROUNDTRIP_CASES: list[tuple[str, dict]] = [
         },
     ),
     (
-        # The cross-modal coverage matrix (#235): every cell value rides Rust
+        # The cross-modal coverage matrix: every cell value rides Rust
         # unchanged, pinning the snake_case enum spelling on both sides.
         "CoverageMatrix",
         {
@@ -423,13 +423,13 @@ ROUNDTRIP_CASES: list[tuple[str, dict]] = [
             "unused_media": None,
         },
     ),
-    # The actions-over-HTTP error envelope (#505): one case per code, so the
+    # The actions-over-HTTP error envelope: one case per code, so the
     # snake_case wire values agree on both sides in practice.
     ("ActionError", {"code": "input_error", "message": "bad query"}),
     ("ActionError", {"code": "collection_busy", "message": "in use"}),
     ("ActionError", {"code": "unknown_action", "message": "no such action"}),
     ("ActionError", {"code": "internal_error", "message": "the server failed"}),
-    # The collection/profile registry enumeration (#66).
+    # The collection/profile registry enumeration.
     ("ProfileEntry", {"name": "work", "path": "/decks/work.anki2", "is_default": True}),
     (
         "ListProfilesResponse",
@@ -442,7 +442,7 @@ ROUNDTRIP_CASES: list[tuple[str, dict]] = [
         },
     ),
     ("ListProfilesResponse", {"profiles": [], "default": None}),
-    # Per-collection status rows (#68).
+    # Per-collection status rows.
     (
         "CollectionStatus",
         {
@@ -460,7 +460,7 @@ ROUNDTRIP_CASES: list[tuple[str, dict]] = [
         "CollectionStatus",
         {"name": "<default>", "path": "/c.anki2", "registered": False},
     ),
-    # Export to an Anki package (#71).
+    # Export to an Anki package.
     ("ExportPackageResult", {"note_count": 42, "out_path": "/tmp/deck.apkg"}),
     (
         "ExportPackageResponse",

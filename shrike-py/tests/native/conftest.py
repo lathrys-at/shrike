@@ -1,4 +1,4 @@
-"""Fixtures for the native collection-core parity harness (#278 series, step 1).
+"""Fixtures for the native collection-core parity harness.
 
 These tests require an `anki-core` build of the extension
 (`scripts/build-native.sh --anki-core`); on a default build every test here

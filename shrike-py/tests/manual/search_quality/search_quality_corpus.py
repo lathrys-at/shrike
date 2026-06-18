@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve + pin the search-quality corpus's Wikimedia Commons images (#559 PR2).
+"""Resolve + pin the search-quality corpus's Wikimedia Commons images.
 
 Corpus tooling (NOT a test): for every ``source: commons`` image in
 ``tests/manual/search_quality/manifest.json`` it resolves a real Commons file, **pins

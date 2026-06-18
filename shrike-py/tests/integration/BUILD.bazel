@@ -63,10 +63,10 @@ py_library(
 )
 
 # The embedding-half rosters, named here so :integration can be a GLOB minus
-# these (#426): an explicit srcs list silently orphans new files — five test
-# files on disk were in no target at all, so they ran in no CI lane. With the
-# glob, a new test file lands in :integration by default; if it actually needs
-# model externals it fails loudly there, and the author moves it into a half.
+# these: an explicit srcs list silently orphans new files (a file on disk in no
+# target runs in no CI lane). With the glob, a new test file lands in
+# :integration by default; if it actually needs model externals it fails loudly
+# there, and the author moves it into a half.
 _EMBEDDING_CORE = [
     "test_embedding.py",
     "test_semantic.py",
@@ -80,7 +80,7 @@ _EMBEDDING_BACKENDS = [
     "test_onnx_models.py",
 ]
 
-# The manual adversarial search-quality suite (#559): real CLIP + a downloaded
+# The manual adversarial search-quality suite: real CLIP + a downloaded
 # Wikimedia Commons corpus, env-gated and NEVER named on a CI command line.
 # Excluded from the :integration glob below so `bazel test //...` skips it.
 _SEARCH_QUALITY = ["test_search_quality.py"]
@@ -93,14 +93,13 @@ _SEARCH_QUALITY = ["test_search_quality.py"]
 # Sharded into 4 parallel Bazel test actions (`shard_count`) rather than one
 # `-n auto` xdist action: the launcher round-robins the collected items across
 # shards, each shard boots ONE shared session server and runs its ~1/4 SERIALLY
-# (`xdist = None`). This swaps the old scheduler-invisible xdist parallelism (a
-# single `large` action that secretly spawned ncpu worker+server subprocesses
-# while Bazel counted it as one test job and freely scheduled OTHER actions
-# alongside — silent oversubscription) for parallelism Bazel actually accounts:
-# each shard is one test job against `--local_test_jobs`, so the integration work
-# interleaves with the rest of the graph under a bounded core budget. The pip lane
-# keeps its own `pytest -n auto` (the conftest's per-xdist-worker server machinery
-# still serves it); this only retunes the Bazel target.
+# (`xdist = None`). This is parallelism Bazel actually accounts for — each shard
+# is one test job against `--local_test_jobs`, so the integration work interleaves
+# with the rest of the graph under a bounded core budget, instead of a single
+# action secretly spawning ncpu worker+server subprocesses the scheduler can't
+# see (silent oversubscription). The pip lane keeps its own `pytest -n auto` (the
+# conftest's per-xdist-worker server machinery still serves it); this only retunes
+# the Bazel target.
 pytest_test(
     name = "integration",
     size = "large",
@@ -115,12 +114,12 @@ pytest_test(
 
 # Embedding integration: two `manual` halves (so the per-PR //... lane never
 # fetches the hundreds of MB of model + llama-server externals; they run as
-# part of the unified lane, #262/#418/#422). Pulls models as pinned http_files
+# part of the unified lane). Pulls models as pinned http_files
 # and the host llama-server as an http_archive; the conftest assembles
 # whichever are in a target's runfiles (atomically, so any future xdist
 # workers can't race the copy). Each half runs SERIALLY (xdist=None): it's
 # model-load-bound with session/module-scoped servers, so one process = one
-# boot per fixture — measured (#426): file-parallel xdist was a net LOSS here
+# boot per fixture — file-parallel xdist measured as a net LOSS here
 # (each extra worker pays the full interpreter+import tax and oversubscribes
 # the runner against the other concurrent test actions). The two halves run
 # CONCURRENTLY as separate Bazel test actions, so the lane's wall cost is
@@ -176,7 +175,7 @@ pytest_test(
     ],
 )
 
-# The manual adversarial search-quality suite (#559) — `manual`, NEVER named on
+# The manual adversarial search-quality suite — `manual`, NEVER named on
 # a CI command line (unlike the embedding halves, which the unified lane runs).
 # `bazel test //...` skips it twice over: the :integration glob excludes it AND
 # `manual` keeps `//...` from building it. It needs the CLIP + MiniLM ONNX
@@ -221,7 +220,7 @@ py_library(
     deps = [requirement("httpx")],
 )
 
-# Source files for the //shrike-py:sdist source distribution (#245). testonly=False (overriding
+# Source files for the //shrike-py:sdist source distribution. testonly=False (overriding
 # the package default) so the non-testonly //shrike-py:sdist can stage them.
 filegroup(
     name = "dist_files",

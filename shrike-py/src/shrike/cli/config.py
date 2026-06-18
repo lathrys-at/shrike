@@ -66,7 +66,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "save_delay": None,
         "save_threshold": None,
     },
-    # The collection/profile registry (#66): a name -> collection-path mapping
+    # The collection/profile registry: a name -> collection-path mapping
     # (any .anki2 path), plus the active-default name. ``entries`` is an ordered
     # list; ``default`` names one of them (or is None). Empty by default; the
     # ``shrike profile`` commands manage it. See shrike.registry.
@@ -170,7 +170,7 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
     if idx_out:
         output["index"] = idx_out
 
-    # The collection/profile registry (#66): persisted only when non-empty, via
+    # The collection/profile registry: persisted only when non-empty, via
     # the registry model so the on-disk shape stays the single round-trip
     # contract (ordered entries + the active-default name; optional per-profile
     # fields emitted only when set).
@@ -180,7 +180,7 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> Path:
     if profiles_out:
         output["profiles"] = profiles_out
 
-    # The v2 capability sections (#498) pass through verbatim — structured,
+    # The v2 capability sections pass through verbatim — structured,
     # user-managed config; --save-config must never drop or rewrite them.
     for key in ("embedders", "recognizers", "managed"):
         if config.get(key) is not None:
@@ -297,7 +297,7 @@ def resolve_recognition(
     config: dict[str, Any], *, ocr_backend: str | None = None
 ) -> dict[str, Any]:
     """Resolve recognition (OCR/ASR) parameters via the flag → env → config
-    cascade (#221/#223), mirroring ``resolve_embedding``.
+    cascade, mirroring ``resolve_embedding``.
 
     ``None`` for ``ocr_backend`` means recognition is off — today's behaviour
     byte-for-byte. Env var: ``SHRIKE_OCR_BACKEND``. Config: ``recognition.ocr``.
@@ -325,16 +325,16 @@ def resolve_cache_dir(config: dict[str, Any], cache_dir_override: str | None = N
 
 
 def resolve_cross_space_margin(config: dict[str, Any]) -> float:
-    """The cross-space image floor margin via env → config → default (#580).
+    """The cross-space image floor margin via env → config → default.
 
     The floor is ``mean + margin·std`` of a secondary image space's typical best
-    match (#201b); ``margin`` is the precision/recall dial — higher → a stricter
+    match; ``margin`` is the precision/recall dial — higher → a stricter
     floor → more precision, less recall. Lives under ``search.cross_space_fusion``
     in config; env var ``SHRIKE_CROSS_SPACE_FLOOR_MARGIN``. Default ``1.0``
-    (``ACTIVATION_MARGIN`` — today's behaviour). This is an operational knob (no
-    v2 capability section), so it keeps the env→config→default cascade past
-    #523, like the cache dir / index-flush tuning. An unparseable value falls
-    back to the default rather than failing boot."""
+    (``ACTIVATION_MARGIN``). This is an operational knob (no v2 capability
+    section), so it keeps the env→config→default cascade, like the cache dir /
+    index-flush tuning. An unparseable value falls back to the default rather
+    than failing boot."""
     from shrike.harness.index import ACTIVATION_MARGIN
 
     env = os.environ.get("SHRIKE_CROSS_SPACE_FLOOR_MARGIN")
@@ -531,7 +531,7 @@ def resolve_embedding_profile(
     *,
     quiet: bool = False,
 ) -> dict[str, Any]:
-    """Resolve the embedding params, v2-first (#498 slice 1).
+    """Resolve the embedding params, v2-first.
 
     A config declaring the v2 sections (``embedders:``/``recognizers:``/
     ``managed:``) is parsed, resolved against the build's compiled features,
@@ -570,7 +570,7 @@ def resolve_embedding_profile(
             "is the only home for these (docs/distribution.md)"
         )
     # The legacy env twins don't apply under v2 either — warn rather than let
-    # an ambient variable silently do nothing (the cross-talk #498 kills).
+    # an ambient variable silently do nothing (the cross-talk v2 kills).
     legacy_env = [
         name
         for name in (
@@ -643,7 +643,7 @@ def build_server_spec(
     # quiet: this resolution runs passively on every client command (the
     # auto-start spec); the explicit start commands own the warnings.
     resolved_emb = resolve_embedding_profile(config, embedding_overrides, quiet=True)
-    # A v2 config rides --config (#498): the daemon resolves the structured
+    # A v2 config rides --config: the daemon resolves the structured
     # sections itself (remote endpoints have no flag spelling), so the spec
     # carries the config path and NO embedding flags.
     is_v2 = any(config.get(k) is not None for k in ("embedders", "recognizers", "managed"))

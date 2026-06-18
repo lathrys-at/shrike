@@ -1,4 +1,4 @@
-"""Registry model + config round-trip (#66, slice 1)."""
+"""Registry model + config round-trip."""
 
 from __future__ import annotations
 

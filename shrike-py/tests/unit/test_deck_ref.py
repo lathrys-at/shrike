@@ -1,4 +1,4 @@
-"""Deck references by ID (#88): name / numeric id / #id resolution and wiring."""
+"""Deck references by ID: name / numeric id / #id resolution and wiring."""
 
 from __future__ import annotations
 

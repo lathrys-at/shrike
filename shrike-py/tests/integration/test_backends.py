@@ -1,4 +1,4 @@
-"""Cross-backend parity tests — the minimal embedding subset run end to end (#172).
+"""Cross-backend parity tests — the minimal embedding subset run end to end.
 
 A parameterized fixture spins up a populated, indexed server per param; each test
 runs once per param:
@@ -89,8 +89,8 @@ def _wait_for_index_ready(server: ServerInfo, timeout: float = 60.0) -> dict:
     params=[
         pytest.param(("llama", 384), marks=requires_llama_server, id="llama"),
         pytest.param(("onnx", 384), marks=requires_onnxruntime, id="onnx"),
-        # No onnx-roberta server param (#441): "a second ONNX export loads and
-        # ranks end-to-end" exercises only model-agnostic plumbing; the roberta
+        # No onnx-roberta server param: "a second ONNX export loads and ranks
+        # end-to-end" exercises only model-agnostic plumbing; the roberta
         # lineage's own contracts (768-dim, no-PAD tokenizer, batch lock) are
         # pinned at backend level in conformance + test_onnx_models.
     ],

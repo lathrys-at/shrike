@@ -1,4 +1,4 @@
-//! Compile the Swift half (#398) into a static library and link it.
+//! Compile the Swift half into a static library and link it.
 //!
 //! macOS only — off macOS this is a no-op and the crate compiles to the
 //! `imp_stub` with zero platform deps (the Linux lane needs no Swift
@@ -82,7 +82,7 @@ fn build_swift() {
     println!("cargo:rustc-link-search=native={sdk}/usr/lib/swift");
     println!("cargo:rustc-link-lib=framework=Vision");
     println!("cargo:rustc-link-lib=framework=Foundation");
-    // The ASR half (#410): Speech (SpeechAnalyzer), AVFoundation
+    // The ASR half: Speech (SpeechAnalyzer), AVFoundation
     // (AVAudioFile), CoreMedia (CMTime ranges).
     println!("cargo:rustc-link-lib=framework=Speech");
     println!("cargo:rustc-link-lib=framework=AVFoundation");

@@ -3,16 +3,15 @@
 An alternative to the llama-server backend for deployments where a pinned
 llama.cpp binary is the wrong fit. It runs entirely in-process — no subprocess,
 no port, no health-wait, no orphan-reaping: ``start()`` loads the model into the
-native engine (the ``ort`` crate + the Rust ``tokenizers`` crate, #270);
-``stop()`` drops it. Tokenization, pooling, and L2 normalization all happen
-crate-side. Native-only since the #278 cutover (the Python onnxruntime+numpy
-engine retired with it).
+native engine (the ``ort`` crate + the Rust ``tokenizers`` crate); ``stop()``
+drops it. Tokenization, pooling, and L2 normalization all happen crate-side.
+Native-only.
 
-The onnxruntime *wheel* (a hard dependency of shrike-py since #497) remains the
-runtime carrier: the native engine dlopens the wheel's shared library — the
-pinned, provider-complete onnxruntime build — so there is exactly one runtime
-on disk (#269's linkage decision), and the wheel's Python API is still used for
-provider discovery (``get_available_providers``).
+The onnxruntime *wheel* (a hard dependency of shrike-py) remains the runtime
+carrier: the native engine dlopens the wheel's shared library — the pinned,
+provider-complete onnxruntime build — so there is exactly one runtime on disk,
+and the wheel's Python API is still used for provider discovery
+(``get_available_providers``).
 
 Pooling (mean/cls/last) changes a vector's *direction*, so it's vector-affecting
 and folded into ``model_fingerprint`` (a change forces an index rebuild, exactly
@@ -52,12 +51,11 @@ DEFAULT_MAX_LENGTH = 256
 DEFAULT_PROVIDERS = ("CPUExecutionProvider",)
 # A text ONNX export ships ``model.onnx`` at one or more precisions; auto-discovery
 # prefers full precision (best quality, and it batches deterministically) and falls
-# back to a quantized one. The empty suffix (``model.onnx``) is tried first, so the
-# existing renamed-to-``model.onnx`` fixtures still resolve unchanged; a quant-only
-# export (no plain ``model.onnx`` — e.g. ``embeddinggemma-300m`` ships only
+# back to a quantized one. The empty suffix (``model.onnx``) is tried first; a
+# quant-only export (no plain ``model.onnx`` — e.g. ``embeddinggemma-300m`` ships only
 # ``model_quantized.onnx`` + external data) resolves its quant graph without a
-# fetch-time rename. This is a SUPERSET of ``ClipBackend._VARIANT_SUFFIXES`` (the
-# shared precision names, in the same order) plus ``_q4f16`` — a real combined
+# rename. This is a SUPERSET of ``ClipBackend._VARIANT_SUFFIXES`` (the shared
+# precision names, in the same order) plus ``_q4f16`` — a real combined
 # 4-bit-weights/fp16-activations export some text models (embeddinggemma) ship but
 # the CLIP exports don't, so it lives only here. int8 (``_quantized``/``_int8``) is
 # batch-variant — the startup batch-safety probe catches that and embeds serially,
@@ -77,8 +75,7 @@ def locate_ort_dylib() -> Path:
 
     The native (Rust ``ort``) engine dlopens this exact library — the pinned,
     provider-complete onnxruntime build the wheel ships — so the engine and the
-    wheel always run the same onnxruntime (#269's linkage decision; no
-    duplicated runtime).
+    wheel always run the same onnxruntime (no duplicated runtime).
     """
     import onnxruntime
 
@@ -98,8 +95,8 @@ class OnnxBackend:
     """In-process ONNX text-embedding backend (text-only, native engine).
 
     Implements the :class:`~shrike.embedding_base.EmbedderBackend` protocol.
-    The engine is the Rust ``shrike_native.OnnxTextEmbedder`` (#270): ort +
-    the tokenizers crate + ndarray pooling, driven through the onnxruntime
+    The engine is the Rust ``shrike_native.OnnxTextEmbedder``: ort + the
+    tokenizers crate + ndarray pooling, driven through the onnxruntime
     shared library from the installed wheel.
     """
 
@@ -359,14 +356,13 @@ class OnnxBackend:
         """Stable identity for the loaded model — the index ``model_id``.
 
         The ``onnx-rs:`` namespace is the native engine's vector-space identity,
-        kept verbatim from the dual-engine bake (#270) so indexes built then load
-        without a rebuild. It never collides with a llama-server fingerprint
-        (``meta:``/``file:``) or the retired Python engine's ``onnx:`` (whose
-        vectors were float-noise-different — epic #265 convention 7: a non-bit-
-        exact engine change rebuilds once, never silently mixes spaces). Folds in
-        pooling (vector-affecting) and the note-text normalization version;
-        normalization is omitted on purpose (scale-invariant under the ``cos``
-        metric, see module docstring).
+        kept verbatim so indexes built under it load without a rebuild. It never
+        collides with a llama-server fingerprint (``meta:``/``file:``) or the
+        retired Python engine's ``onnx:`` (whose vectors were float-noise-
+        different — a non-bit-exact engine change rebuilds once, never silently
+        mixes spaces). Folds in pooling (vector-affecting) and the note-text
+        normalization version; normalization is omitted on purpose
+        (scale-invariant under the ``cos`` metric, see module docstring).
         """
         path = Path(self._model)
         # Use the resolved .onnx file's size when we can, else the path's own.
@@ -378,13 +374,13 @@ class OnnxBackend:
         return f"onnx-rs:{name}:{size}:pool={self._pooling}:textprep={EMBED_TEXT_VERSION}"
 
     def native_embedder(self) -> Any:
-        """The kernel-slot handle (#342 P2): the loaded engine composed behind
-        the engine contract (identity + probed batch policy + the asyncio
-        compute lane), so kernel embeds run native end-to-end and never
-        re-enter this facade. The facade keeps construction, the probe,
-        fingerprint assembly, and ``health()`` — ``embed_texts`` remains for
-        direct callers (the probe itself, tests). Must be called from a
-        coroutine context (it captures the running loop).
+        """The kernel-slot handle: the loaded engine composed behind the engine
+        contract (identity + probed batch policy + the asyncio compute lane),
+        so kernel embeds run native end-to-end and never re-enter this facade.
+        The facade keeps construction, the probe, fingerprint assembly, and
+        ``health()`` — ``embed_texts`` remains for direct callers (the probe
+        itself, tests). Must be called from a coroutine context (it captures
+        the running loop).
         """
         if not self.running:
             raise RuntimeError("ONNX embedding backend is not running")

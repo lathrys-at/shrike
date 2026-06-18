@@ -1,10 +1,10 @@
-//! llama-server policy (#342 P4b, #710) — the thin `ManagedProcess` impl atop
+//! llama-server policy — the thin `ManagedProcess` impl atop
 //! the generic [`shrike_process::Supervisor`]. This crate owns only what is
 //! *llama-specific*: binary resolution (`LLAMA_SERVER_PATH`), the argv
 //! vocabulary, the `/health` URL, the model/pooling/mmproj/router shape, and —
 //! load-bearing — the reserved-flag security guard. Spawn, health-wait, orphan
 //! reaping, and escalating stop are all the supervisor's; the orphan reaper
-//! (#594/#654) lives in `shrike-process`, gated on the dual signal.
+//! lives in `shrike-process`, gated on the dual signal.
 //!
 //! Security boundary preserved verbatim: `--host` is Shrike-owned — the
 //! embedding backend is deliberately pinned to loopback (audit §1.1) — so
@@ -39,7 +39,7 @@ pub const RESERVED_FLAGS: &[&str] = &[
     "--embeddings",
     "--embedding",
     "--mmproj",
-    // Router mode (#566) is Shrike-owned: the model-loading shape (single vs
+    // Router mode is Shrike-owned: the model-loading shape (single vs
     // router) is chosen by `ModelSpec`, never smuggled through the passthrough.
     "--models-dir",
     "--models-max",
@@ -57,7 +57,7 @@ pub const RESERVED_VALUE_FLAGS: &[&str] = &[
 ];
 
 /// What the server loads: one model (single-model mode, the default) or a
-/// directory of models served by llama.cpp's *router* mode (#566), where the
+/// directory of models served by llama.cpp's *router* mode, where the
 /// request's `model` field selects among them. The two are mutually exclusive
 /// — `--model` and `--models-dir` cannot coexist — so they are an enum, not a
 /// bag of optionals.
@@ -195,12 +195,12 @@ impl LlamaServerConfig {
 /// directly by hosts.
 struct LlamaPolicy {
     cfg: LlamaServerConfig,
-    /// Serve embeddings (the default) or chat — a describe/vision server (#433)
+    /// Serve embeddings (the default) or chat — a describe/vision server
     /// is a *chat* server and must not pass `--embeddings`.
     embeddings: bool,
     /// Multimodal projector(s) (`--mmproj`, repeatable): one for a vision chat
-    /// server (#433); one per modality for a multimodal *embeddings* server
-    /// (#501 — jina-v5-omni ships separate vision/audio mmprojs, loaded together
+    /// server; one per modality for a multimodal *embeddings* server
+    /// (jina-v5-omni ships separate vision/audio mmprojs, loaded together
     /// for both).
     mmprojs: Vec<String>,
     /// The health-probe agent, built once on the first poll and reused across
@@ -221,15 +221,15 @@ impl LlamaPolicy {
         }
     }
 
-    /// Switch to a *chat* server (no `--embeddings`) with an optional projector
-    /// (#433). An in-place reshape — host/port (and so the supervisor's cached
+    /// Switch to a *chat* server (no `--embeddings`) with an optional projector.
+    /// An in-place reshape — host/port (and so the supervisor's cached
     /// base URL) are untouched.
     fn set_chat_mode(&mut self, mmproj: Option<String>) {
         self.embeddings = false;
         self.mmprojs = mmproj.into_iter().collect();
     }
 
-    /// Load multimodal projector(s) on the (still embeddings) server (#501). An
+    /// Load multimodal projector(s) on the (still embeddings) server. An
     /// in-place reshape; `--embeddings` stays on.
     fn set_mmprojs(&mut self, mmprojs: Vec<String>) {
         self.mmprojs = mmprojs;
@@ -441,7 +441,7 @@ impl LlamaServerManager {
     }
 
     /// Reconfigure as a *chat* server (no `--embeddings`) with an optional
-    /// multimodal projector — the shape a remote-describe deployment runs (#433):
+    /// multimodal projector — the shape a remote-describe deployment runs:
     /// `llama-server -m model.gguf --mmproj proj.gguf`. A builder on the manager
     /// (not a config field) so the existing config constructors stay valid.
     /// Vision models want a generous `context_size` — image tokens are
@@ -452,7 +452,7 @@ impl LlamaServerManager {
         self
     }
 
-    /// Load multimodal projector(s) on an *embeddings* server (#501): the shape
+    /// Load multimodal projector(s) on an *embeddings* server: the shape
     /// behind a multimodal `embedders:` entry served by the managed
     /// llama-server. Repeatable because per-modality mmprojs load together
     /// (vision + audio for an omni model). Keeps `--embeddings` on.
@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     fn router_mode_emits_models_dir_and_max_not_model() {
-        // #566: router mode loads a directory of models (request-`model`-field
+        // Router mode loads a directory of models (request-`model`-field
         // routing), so `--models-dir`/`--models-max` replace `--model`. Global
         // defaults (--embeddings, --ctx-size, passthrough) still apply.
         let cfg = LlamaServerConfig::new(
@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn embeddings_mode_emits_repeatable_mmprojs() {
-        // The #501 omni shape: per-modality projectors load together on an
+        // The omni shape: per-modality projectors load together on an
         // EMBEDDINGS server — `--embeddings` stays on, one `--mmproj` each, in
         // declaration order.
         let m = manager(&[]).with_mmprojs(vec![

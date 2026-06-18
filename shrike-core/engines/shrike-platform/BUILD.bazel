@@ -7,7 +7,7 @@ package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
-# The Swift half (#398, in this glue crate since #709): the same `xcrun swiftc`
+# The Swift half: the same `xcrun swiftc`
 # invocation as build.rs (the cargo lane), so both builds produce identical
 # Swift — the 13.0 target is build.rs's default deployment floor (the cargo lane
 # additionally honors MACOSX_DEPLOYMENT_TARGET). macOS-only; off macOS nothing
@@ -53,7 +53,7 @@ cc_library(
         "Vision",
         "-framework",
         "Foundation",
-        # The ASR half (#410): Speech (SpeechAnalyzer), AVFoundation
+        # The ASR half: Speech (SpeechAnalyzer), AVFoundation
         # (AVAudioFile), CoreMedia (CMTime ranges).
         "-framework",
         "Speech",
@@ -66,7 +66,7 @@ cc_library(
     deps = [":swift_glue_import"],
 )
 
-# The raw platform-bindings glue (#709): GLUE ONLY — NO engine-api dep. macOS-only
+# The raw platform-bindings glue: GLUE ONLY — NO engine-api dep. macOS-only
 # innards (the Swift C-ABI shim + the SwiftString guard); off macOS the calls are
 # `None`-returning stubs, so this target exists on every platform with no Swift
 # toolchain. The engine-contract impls (AppleVisionRecognizer/AppleSpeechTranscriber)

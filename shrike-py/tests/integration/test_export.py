@@ -1,4 +1,4 @@
-"""Export integration — the full HTTP path (#71 S2).
+"""Export integration — the full HTTP path.
 
 Drives `export_package` over the real server: the default download-url delivery
 (export → GET the url → valid package bytes → reaped one-shot) and the

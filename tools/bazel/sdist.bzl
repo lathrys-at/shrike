@@ -1,4 +1,4 @@
-"""//shrike-py:sdist — a hermetic, stamped Python source distribution (#245).
+"""//shrike-py:sdist — a hermetic, stamped Python source distribution.
 
 hatchling builds the sdist from the explicit [tool.hatch.build.targets.sdist] include
 (git-independent — see pyproject.toml), with the version stamped from STABLE_VERSION

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-step local dev setup for the pip lane (#573). Idempotent and safe to re-run
+# One-step local dev setup for the pip lane. Idempotent and safe to re-run
 # — every step no-ops when already satisfied, so this doubles as a repair button
 # when the venv or the native extension drifts.
 #
@@ -49,7 +49,7 @@ fi
 source .venv/bin/activate
 
 # --------------------------------------------------------------- 2. deps -------
-# pyproject.toml lives in the shrike-py/ unit (#731); install editable from there.
+# pyproject.toml lives in the shrike-py/ unit; install editable from there.
 # The .venv stays at the repo root so native-stale.sh / .envrc / the pytest
 # backstop (all keyed off $VIRTUAL_ENV / sys.prefix) keep working unchanged.
 echo "==> installing the harness and dev tooling (pip install -e \"shrike-py/[dev]\")"

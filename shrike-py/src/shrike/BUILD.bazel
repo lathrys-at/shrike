@@ -3,7 +3,7 @@ load("@shrike_pip//:requirements.bzl", "requirement")
 
 package(default_visibility = ["//visibility:public"])
 
-# The Shrike Python package, as fine-grained sub-libraries (#259). One library
+# The Shrike Python package, as fine-grained sub-libraries. One library
 # per module (or per import-cluster), with explicit deps mirroring the real
 # import graph — so a test target depending on, say, :client is invalidated by
 # a client.py/schemas.py edit but not by a tools.py one, and Bazel's per-target
@@ -11,12 +11,12 @@ package(default_visibility = ["//visibility:public"])
 # bottom aggregates everything for consumers that want the whole package
 # (//shrike-py/bin, the wheel, the integration/native suites).
 #
-# Module layout (#730): the package is grouped into layered subpackages —
+# Module layout: the package is grouped into layered subpackages —
 # platform/ (paths, log, daemon, pathsafety), the top-level contract (schemas,
 # errors) + standalone client, harness/ (assembly + engines/), api/ (the verb
-# surface), server/ (the host), cli/. Per the reorg's "flat labels" decision the
-# targets here stay flat (//shrike-py/src/shrike:collection, not //shrike-py/src/shrike/harness:…) —
-# only the srcs point at the new subpaths — so the #259 per-module test-cache
+# surface), server/ (the host), cli/. The targets here stay flat ("flat labels":
+# //shrike-py/src/shrike:collection, not //shrike-py/src/shrike/harness:…) —
+# only the srcs point at the subpaths — so the per-module test-cache
 # granularity and the test///shrike-py/bin dep labels are preserved.
 #
 # Ground rules:
@@ -86,9 +86,9 @@ py_library(
     deps = [":pkg"],
 )
 
-# Shared server-local path-safety mechanism (#71): the capability-agnostic
-# helpers store_media (#164/#170), export (#71), and import (#72) all gate
-# through. Leaf — stdlib only. Lives in platform/ (#730): shared by api/actions
+# Shared server-local path-safety mechanism: the capability-agnostic
+# helpers store_media, export, and import all gate
+# through. Leaf — stdlib only. Lives in platform/: shared by api/actions
 # (the export gate) and server, so placing it in server/ would invert api→server.
 py_library(
     name = "pathsafety",
@@ -97,7 +97,7 @@ py_library(
     deps = [":pkg"],
 )
 
-# The export download store (#71): server-named temp packages + their one-shot
+# The export download store: server-named temp packages + their one-shot
 # download tokens, reaped on download/TTL/shutdown. Leaf — stdlib only.
 py_library(
     name = "export_store",
@@ -123,7 +123,7 @@ py_library(
     deps = [":pkg"],
 )
 
-# The collection/profile registry (#66): a name -> collection-path mapping
+# The collection/profile registry: a name -> collection-path mapping
 # persisted in config.yml. Leaf — stdlib only. Distinct from :profiles (the
 # capability/build profiles); they share the word, nothing else.
 py_library(
@@ -157,7 +157,7 @@ py_library(
     ],
 )
 
-# Recognition engines (#730): a package (engines/recognition/) whose __init__.py
+# Recognition engines: a package (engines/recognition/) whose __init__.py
 # re-exports the OCR facade, so callers import shrike.harness.engines.recognition.
 # Room for ASR/describe facades as siblings.
 py_library(
@@ -274,18 +274,18 @@ py_library(
     srcs = ["harness/harness.py"],
     imports = [".."],
     deps = [
-        ":actions",  # #68 routing: CollectionBundle (lazy, in resolve_bundle)
-        ":cache_layout",  # #68 routing: per-collection index/derived paths
-        ":cli_core",  # #68 routing: re-reads the registry via cli.config.load_config (lazy)
+        ":actions",  # routing: CollectionBundle (lazy, in resolve_bundle)
+        ":cache_layout",  # routing: per-collection index/derived paths
+        ":cli_core",  # routing: re-reads the registry via cli.config.load_config (lazy)
         ":collection",
         ":derived",
         ":embedding",
         ":embedding_base",
-        ":index",  # #580/#730: ACTIVATION_MARGIN (the cross-space floor margin default)
+        ":index",  # ACTIVATION_MARGIN (the cross-space floor margin default)
         ":pkg",
         ":profiles",
         ":recognition",
-        ":registry",  # #68 routing: the live registry view
+        ":registry",  # routing: the live registry view
         "//shrike-core/bindings/shrike-pyo3:shrike_native",
     ],
 )
@@ -298,7 +298,7 @@ py_library(
         ":collection",
         ":derived",
         ":index",
-        ":pathsafety",  # export_package's server-local output gate (#71)
+        ":pathsafety",  # export_package's server-local output gate
         ":pkg",
         ":schemas",
         "//shrike-core/bindings/shrike-pyo3:shrike_native",
@@ -363,17 +363,17 @@ py_library(
     ],
     imports = [".."],
     deps = [
-        ":cache_layout",  # server.py resolves the namespaced derived-store path (#547)
+        ":cache_layout",  # server.py resolves the namespaced derived-store path
         ":cli_core",
         ":collection",
         ":daemon",
         ":derived",
         ":embedding",
-        ":export_store",  # the export download store (#71)
+        ":export_store",  # the export download store
         ":harness",
         ":log",
         ":paths",
-        ":pathsafety",  # server-local path-safety helpers (#71)
+        ":pathsafety",  # server-local path-safety helpers
         ":pkg",
         ":profiles",
         ":schemas",
@@ -474,7 +474,7 @@ filegroup(
     ),
 )
 
-# Source files for the //shrike-py:sdist source distribution (#245) — the package tree minus
+# Source files for the //shrike-py:sdist source distribution — the package tree minus
 # the BUILD file, generated _version.py, and bytecode.
 filegroup(
     name = "dist_files",

@@ -1,10 +1,10 @@
-//! `shrike_native._native` — the Shrike PyO3 binding module (#269).
+//! `shrike_native._native` — the Shrike PyO3 binding module.
 //!
-//! The ONE crate that depends on `pyo3` (epic #265 convention 5, enforced by
+//! The ONE crate that depends on `pyo3` (convention 5, enforced by
 //! `//shrike-core:layering_check`). Every native compute crate (pure Rust) is bound
 //! to Python here.
 //!
-//! # Marshaling rules (epic #265 convention 6)
+//! # Marshaling rules
 //!
 //! Only these types cross the Python↔Rust boundary:
 //!
@@ -56,7 +56,7 @@ mod gated_log;
 #[cfg(feature = "anki-core")]
 mod kernel_actions;
 // The engine containers/capture handles exist to be ATTACHED to a kernel;
-// a compute-only build (#404) keeps them constructible (the pyclasses are
+// a compute-only build keeps them constructible (the pyclasses are
 // part of the module surface) but never reads the attach-path members.
 #[cfg_attr(not(feature = "anki-core"), allow(dead_code))]
 mod native_embedder;
@@ -96,7 +96,7 @@ pyo3::create_exception!(
 );
 
 /// Map the shared native error taxonomy onto the module's exception classes.
-/// The captured Rust span trace rides along as a PEP 678 note (#308), so the
+/// The captured Rust span trace rides along as a PEP 678 note, so the
 /// native context shows up in the Python traceback the Pythonic way.
 pub(crate) fn to_py_err(e: NativeError) -> PyErr {
     let trace = e.trace();
@@ -117,18 +117,18 @@ pub(crate) fn to_py_err(e: NativeError) -> PyErr {
     err
 }
 
-/// Rig native observability into the Python host (#308/#310) with the
+/// Rig native observability into the Python host with the
 /// first-class bridges, not a hand-rolled forwarder:
 ///
 /// - a `pyo3_log::Logger` is installed as the `log` crate's global logger,
 ///   forwarding every record to the stdlib `logging` module — logger name =
 ///   the Rust target (`shrike_derived`, ...), levels mapped, Python-side
 ///   filtering respected (with pyo3-log's level caching, so call this *after*
-///   the host configures `logging`). It is wrapped in [`gated_log::GatedLog`]
-///   (#450): a record emitted from a kernel-runtime thread attaches the GIL
+///   the host configures `logging`). It is wrapped in [`gated_log::GatedLog`]:
+///   a record emitted from a kernel-runtime thread attaches the GIL
 ///   inside pyo3-log, so each delivery claims a finalization-gate permit and
 ///   a record racing interpreter exit is dropped instead of straddling
-///   `Py_Finalize` (the #435 abort class). Construction mirrors
+///   `Py_Finalize` (the abort class). Construction mirrors
 ///   `pyo3_log::try_init()` — `Caching::LoggersAndLevels`, `Debug` default
 ///   filter, matching `log::set_max_level` — just with the gate in front.
 /// - the native crates instrument with `tracing` only; the `log-always`
@@ -159,14 +159,14 @@ fn init_logging(py: Python<'_>) -> PyResult<()> {
     Ok(())
 }
 
-/// The Rust-canonical wire contracts (#330): `{python_model_name: json_schema}`
+/// The Rust-canonical wire contracts: `{python_model_name: json_schema}`
 /// for every type in shrike-schemas -- the contract test's Rust side.
 #[pyfunction]
 fn schema_catalog() -> std::collections::HashMap<&'static str, String> {
     shrike_schemas::schema_catalog().into_iter().collect()
 }
 
-/// The action exchange's protocol version (#392) -- the contract test pins
+/// The action exchange's protocol version -- the contract test pins
 /// the Python mirror equal; a future remote handshake checks it.
 #[pyfunction]
 fn wire_protocol_version() -> u32 {
@@ -181,7 +181,7 @@ fn schema_roundtrip(name: &str, json: &str) -> PyResult<String> {
     shrike_schemas::roundtrip(name, json).map_err(NativeInputError::new_err)
 }
 
-/// The SSRF-guarded media URL fetch (#278 step 5b) standalone: the facades'
+/// The SSRF-guarded media URL fetch standalone: the facades'
 /// CONCURRENT prepare path downloads off the collection worker thread, then
 /// writes bytes through it — same architecture as the Python original.
 #[cfg(feature = "anki-core")]
@@ -192,7 +192,7 @@ fn fetch_media_url(
     url: String,
     allow_private: bool,
 ) -> PyResult<(Vec<u8>, Option<String>)> {
-    // The fetch is async now (#721 S2); this standalone helper is off the
+    // The fetch is async now; this standalone helper is off the
     // runtime (under `py.detach`), so it drives the future to completion via the
     // kernel runtime's `block_on` (a legal block_on site — not a runtime worker).
     py.detach(|| shrike_kernel::block_on(shrike_media::fetch_media_url(&url, allow_private)))
@@ -231,8 +231,8 @@ fn build_info() -> String {
     )
 }
 
-/// The #499 build-matrix features compiled into this extension. The config
-/// layer's capability source (#498): a config entry declaring a `runtime`
+/// The build-matrix features compiled into this extension. The config
+/// layer's capability source: a config entry declaring a `runtime`
 /// whose feature is absent here is a config error naming the build profile —
 /// never a silent no-op.
 #[pyfunction]
@@ -268,8 +268,8 @@ fn checked_div(py: Python<'_>, a: f64, b: f64) -> PyResult<f64> {
     .map_err(to_py_err)
 }
 
-// ── Embedding (#270) ─────────────────────────────────────────────────────────
-// The ort-backed engines (text + CLIP) are `engine-ort` builds only (#499);
+// ── Embedding ─────────────────────────────────────────────────────────
+// The ort-backed engines (text + CLIP) are `engine-ort` builds only;
 // the remote engine is `engine-remote`; the llama-server manager is
 // `manage-llama`. The default feature set carries them all (the server
 // profile), so existing builds are unchanged.
@@ -299,7 +299,7 @@ pub(crate) struct OnnxTextEmbedder {
 #[cfg(feature = "engine-ort")]
 impl OnnxTextEmbedder {
     /// The loaded engine, shared — `NativeEmbedder` composes the kernel-slot
-    /// handle from the same instance the facade probed (#342 P2).
+    /// handle from the same instance the facade probed.
     pub(crate) fn engine_arc(&self) -> std::sync::Arc<shrike_engine::onnx::TextEmbedder> {
         std::sync::Arc::clone(&self.inner)
     }
@@ -358,7 +358,7 @@ impl OnnxTextEmbedder {
     }
 }
 
-/// The native CLIP dual-encoder engine under the `ClipBackend` facade (#271).
+/// The native CLIP dual-encoder engine under the `ClipBackend` facade.
 ///
 /// Image bytes (PNG/JPEG/...) in, vectors out — preprocessing (decode, resize,
 /// center-crop, normalize) runs crate-side via the `image` crate, with the
@@ -434,7 +434,7 @@ impl ClipEmbedder {
     }
 }
 
-/// The generic remote-embeddings engine (#342 P4) under the llama facade —
+/// The generic remote-embeddings engine under the llama facade —
 /// and the future `backend: remote` kind (URL + key, no subprocess). One
 /// `/v1/embeddings` request per chunk, GIL released; identity ingredients
 /// (`/v1/models` id + meta) served raw for the facade's fingerprint policy.
@@ -458,7 +458,7 @@ impl RemoteEmbedder {
     #[new]
     #[pyo3(signature = (base_url, *, api_key=None, model=None))]
     fn new(base_url: String, api_key: Option<String>, model: Option<String>) -> PyResult<Self> {
-        // Construction validates the API key (header-injection guard, #383).
+        // Construction validates the API key (header-injection guard).
         let engine = shrike_engine::remote::RemoteEmbedder::new(
             shrike_engine::remote::RemoteEmbedderConfig {
                 base_url,
@@ -473,7 +473,7 @@ impl RemoteEmbedder {
     }
 
     /// Embed one chunk of texts as a single request (one vector per input).
-    /// The engine is async now (#721 S2 — route 2); this direct-call helper is
+    /// The engine is async now (route 2); this direct-call helper is
     /// off the runtime (under `py.detach`), so it drives the future via
     /// `shrike_kernel::block_on` (a legal block_on site — not a runtime worker).
     fn embed_chunk(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Vec<Vec<f32>>> {
@@ -482,8 +482,8 @@ impl RemoteEmbedder {
             .map_err(to_py_err)
     }
 
-    /// Embed one chunk of images via llama.cpp's native multimodal dialect
-    /// (#501) — the direct path for the facade's `embed_images` / tests; the
+    /// Embed one chunk of images via llama.cpp's native multimodal dialect —
+    /// the direct path for the facade's `embed_images` / tests; the
     /// kernel slot rides the `NativeEmbedder` composition instead. Bytes in,
     /// one vector per image; vision-gated inside the engine.
     fn embed_image_chunk(&self, py: Python<'_>, images: Vec<Vec<u8>>) -> PyResult<Vec<Vec<f32>>> {
@@ -499,7 +499,7 @@ impl RemoteEmbedder {
     }
 
     /// Whether the endpoint's loaded model serves image embeddings (its
-    /// vision mmproj is loaded), via `GET /props` (#501). The facade checks
+    /// vision mmproj is loaded), via `GET /props`. The facade checks
     /// this at start so a `modalities: [text, image]` entry against a
     /// text-only endpoint fails fast at boot, not at first image embed.
     fn vision_capable(&self, py: Python<'_>) -> bool {
@@ -522,7 +522,7 @@ impl RemoteEmbedder {
     }
 }
 
-/// The llama-server lifecycle manager (#342 P4b) under the llama facade:
+/// The llama-server lifecycle manager under the llama facade:
 /// spawn + health-wait + orphan reaping + escalating stop, all native. NOT
 /// an embedder — the facade composes manager → endpoint → RemoteEmbedder.
 #[cfg(feature = "manage-llama")]
@@ -572,7 +572,7 @@ impl LlamaServerManager {
         .with_pooling(pooling)
         .with_extra_args(extra_args)
         .with_pid_file(pid_file.map(std::path::PathBuf::from));
-        // Per-modality projectors for a multimodal embeddings server (#501):
+        // Per-modality projectors for a multimodal embeddings server:
         // an embeddings server (not chat_mode) that loads vision/audio
         // mmprojs to embed media. Empty = a text-only embeddings server.
         let manager = shrike_llama_server::LlamaServerManager::new(cfg).with_mmprojs(mmprojs);
@@ -583,7 +583,7 @@ impl LlamaServerManager {
         }
     }
 
-    /// Router mode (#566): ONE llama-server serving a directory of models, with
+    /// Router mode: ONE llama-server serving a directory of models, with
     /// the request's `model` field selecting among them (`--models-dir` +
     /// optional `--models-max`, no `--model`). A separate constructor so the
     /// single-model `new` stays byte-for-byte unchanged. mmprojs are
@@ -666,9 +666,9 @@ impl LlamaServerManager {
     }
 }
 
-// ── Derived-text engine (#281) ──────────────────────────────────────────────
+// ── Derived-text engine ──────────────────────────────────────────────
 
-/// Whether the linked SQLite has FTS5 with the trigram tokenizer (#300).
+/// Whether the linked SQLite has FTS5 with the trigram tokenizer.
 /// Constant-true under the bundled default; genuinely probed under platform
 /// linkage (a build without the bundled-sqlite feature).
 #[pyfunction]
@@ -676,7 +676,7 @@ fn derived_fts5_probe() -> bool {
     shrike_derived::fts5_trigram_available()
 }
 
-/// Whether this build statically links the bundled SQLite (#300) — for
+/// Whether this build statically links the bundled SQLite — for
 /// status/diagnostics.
 #[pyfunction]
 fn derived_sqlite_bundled() -> bool {
@@ -714,7 +714,7 @@ impl DerivedTextEngine {
 
     fn set_col_mod(&self, py: Python<'_>, value: i64) -> PyResult<()> {
         // A write-transaction commit (a journal sync) — off the GIL like the
-        // sibling methods (#445).
+        // sibling methods.
         py.detach(|| self.inner.set_col_mod(value))
             .map_err(to_py_err)
     }
@@ -766,7 +766,7 @@ impl DerivedTextEngine {
         .map_err(to_py_err)
     }
 
-    /// Literal-substring rows (#331) — `None` = use the find_notes fallback.
+    /// Literal-substring rows — `None` = use the find_notes fallback.
     #[pyo3(signature = (query, limit, scope=None))]
     fn search_substring(
         &self,
@@ -782,7 +782,7 @@ impl DerivedTextEngine {
         .map_err(to_py_err)
     }
 
-    /// Fuzzy (trigram/typo) rows, best-first, deduped per note (#331).
+    /// Fuzzy (trigram/typo) rows, best-first, deduped per note.
     #[pyo3(signature = (query, top_k, scope=None))]
     fn search_fuzzy(
         &self,
@@ -799,10 +799,10 @@ impl DerivedTextEngine {
     }
 }
 
-// ── Index engine (#273) ─────────────────────────────────────────────────────
+// ── Index engine ─────────────────────────────────────────────────────
 
 /// The native per-modality vector index engine under the `VectorIndex`
-/// orchestrator (the frozen #267 `IndexEngine` surface). Coarse, batched calls
+/// orchestrator (the frozen `IndexEngine` surface). Coarse, batched calls
 /// trafficking in i64 key arrays and f32 vector batches, all GIL-released.
 #[pyclass(frozen)]
 struct NativeIndexEngine {
@@ -929,13 +929,13 @@ impl NativeIndexEngine {
     }
 }
 
-// ── Fused compute (#274) ────────────────────────────────────────────────────
+// ── Fused compute ────────────────────────────────────────────────────
 
 /// Reciprocal Rank Fusion — the native implementation of the frozen
 /// `search_fusion.py` spec. Same canonical accumulation order, same dedup, same
 /// `(tier, -score, note_id)` ordering; the Python parity property suite pins
 /// the two byte-for-byte. The one implementation lives in the kernel
-/// (`shrike_kernel::fusion`, #380), so anki-core builds only (#404).
+/// (`shrike_kernel::fusion`), so anki-core builds only.
 #[cfg(feature = "anki-core")]
 #[pyfunction]
 #[pyo3(signature = (rankings, weights, k=60, priority_signals=vec![]))]
@@ -952,10 +952,10 @@ fn rrf_fuse(
     })
 }
 
-/// The path-derived per-collection index identity (#67). The single
-/// implementation lives in `shrike-cache` (cracked out of the kernel, #712);
+/// The path-derived per-collection index identity. The single
+/// implementation lives in `shrike-cache` (cracked out of the kernel);
 /// this binds it so the host can resolve the same `<cache_dir>/index/<namespace>/`
-/// the kernel writes (the routing capstone #68, status reporting, tests). A
+/// the kernel writes (the routing capstone, status reporting, tests). A
 /// Python parity test pins the two byte-for-byte.
 #[cfg(feature = "anki-core")]
 #[pyfunction]
@@ -963,9 +963,9 @@ fn index_namespace(py: Python<'_>, collection_path: String) -> String {
     py.detach(move || shrike_cache::index_namespace(&collection_path))
 }
 
-/// The path-derived per-collection derived-store path (#547):
+/// The path-derived per-collection derived-store path:
 /// `<cache_dir>/derived/<namespace>/shrike.db`. Binds `shrike-cache`'s single
-/// implementation (cracked out of the kernel, #712) so the host
+/// implementation (cracked out of the kernel) so the host
 /// `DerivedTextStore` opens exactly the file the kernel's `DerivedEngine`
 /// writes (they share one db). A Python parity test pins the two byte-for-byte.
 /// Returns a lossy-UTF-8 string (paths the host hands in are already UTF-8).
@@ -983,7 +983,7 @@ fn derived_db_path(py: Python<'_>, cache_dir: String, collection_path: String) -
 /// filename (`_native`), since PyO3 exports `PyInit__native` from it.
 #[pymodule]
 fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // The interpreter-finalization gate (#435): exported (the teardown tests
+    // The interpreter-finalization gate: exported (the teardown tests
     // close it deliberately) and armed via atexit in every importing process.
     m.add_function(wrap_pyfunction!(finalize_gate::finalize_gate_close, m)?)?;
     finalize_gate::register_exit_hook(m)?;
@@ -1000,7 +1000,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(fetch_media_url, m)?)?;
         m.add_function(wrap_pyfunction!(decode_media_b64, m)?)?;
     }
-    // The engine/manager matrix (#499): a class is present exactly when its
+    // The engine/manager matrix: a class is present exactly when its
     // feature is compiled — a lean build simply lacks the name (the Python
     // facade only rides full server builds, so nothing suppresses these).
     #[cfg(feature = "engine-ort")]
@@ -1019,7 +1019,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<py_recognizer::AppleVisionRecognizer>()?;
     #[cfg(feature = "engine-remote")]
     m.add_class::<py_recognizer::RemoteDescriber>()?;
-    // Feature-gated (#278): present only in `anki-core` builds; the stubtest
+    // Feature-gated: present only in `anki-core` builds; the stubtest
     // allowlist covers its absence from default builds.
     #[cfg(feature = "anki-core")]
     m.add_class::<anki_core::CollectionCore>()?;
@@ -1049,7 +1049,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_function(wrap_pyfunction!(derived_fts5_probe, m)?)?;
     m.add_function(wrap_pyfunction!(derived_sqlite_bundled, m)?)?;
-    // Bridge lifecycle test seams (#387): the leak tripwire counter + a
+    // Bridge lifecycle test seams: the leak tripwire counter + a
     // waker-retaining pending future to park on it.
     m.add_function(wrap_pyfunction!(
         asyncio_bridge::bridge_live_poll_callbacks,
@@ -1068,7 +1068,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         "IMAGE_PREP_VERSION_RS",
         shrike_engine::onnx::IMAGE_PREP_VERSION_RS,
     )?;
-    // The kernel saver's built-in flush tuning (#355 item 2) — the host's
+    // The kernel saver's built-in flush tuning — the host's
     // --index-save-* help text names the defaults it would override.
     #[cfg(feature = "anki-core")]
     {
@@ -1081,14 +1081,14 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
             shrike_kernel::index_orchestrator::DEFAULT_SAVE_THRESHOLD,
         )?;
     }
-    // The batch-safety probe surface (#342 P4): the spiked set + tolerance,
+    // The batch-safety probe surface: the spiked set + tolerance,
     // for tests that pin sensitivity/ceiling against the same texts the
     // native probe embeds.
     m.add(
         "BATCH_PROBE_TEXTS",
         shrike_engine_api::probe::BATCH_PROBE_TEXTS.to_vec(),
     )?;
-    // The vision probe set (#211): the same canonical synthetic images the
+    // The vision probe set: the same canonical synthetic images the
     // native vision probe embeds, so the Python CLIP host probes the vision
     // path against the identical set (mirrors BATCH_PROBE_TEXTS).
     m.add(

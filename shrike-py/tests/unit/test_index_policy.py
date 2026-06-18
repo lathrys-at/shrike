@@ -1,9 +1,9 @@
-"""The host-side index policy that survived the #355 facade retirement.
+"""The host-side index policy.
 
 The index itself (drift, reconcile, persistence, the debounced saver,
 calibration) is kernel-owned and pinned by the shrike-kernel/shrike-index Rust
-suites plus tests/native; what remains host-side is the pure #201b gate math
-the search action applies to kernel-calibrated stats.
+suites plus tests/native; what remains host-side is the pure gate math the
+search action applies to kernel-calibrated stats.
 """
 
 from __future__ import annotations

@@ -1,13 +1,12 @@
 # Consumed as `data` by //tools:llama_lock_in_sync_test (the de-dup tripwire that
-# asserts MODULE.bazel matches tools/llama-server.lock, #566). The tripwire moved
-# to //tools alongside its source + the lock (#695); it reads MODULE.bazel from
+# asserts MODULE.bazel matches tools/llama-server.lock); it reads MODULE.bazel from
 # the root package, so it's exported here.
 #
 # README.md / LICENSE / CHANGELOG.md are exported for //shrike-py:sdist — the
-# release sdist (now owned by the shrike-py/ unit, #731) stages these repo-root
-# files alongside the package tree. They stay at the repo root (one project
-# readme/licence/changelog covering both the Rust core and the Python harness),
-# so the unit reaches them by label rather than carrying copies.
+# release sdist stages these repo-root files alongside the package tree. They stay
+# at the repo root (one project readme/licence/changelog covering both the Rust
+# core and the Python harness), so the unit reaches them by label rather than
+# carrying copies.
 exports_files([
     "MODULE.bazel",
     "README.md",

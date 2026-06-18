@@ -1,15 +1,15 @@
-"""The MCP binding for the action registry (#276, implements #225).
+"""The MCP binding for the action registry.
 
 Iterates :func:`shrike.api.actions.build_actions`'s registry and generates the
 FastMCP ``@mcp.tool`` bindings, applying the ``_safe_tool`` policy — docstring
 ``inspect.cleandoc`` (so advertised descriptions carry no source indentation)
 and the error→``isError`` mapping (``ToolInputError``/``CollectionBusyError``
 logged without tracebacks, genuine bugs with one). FastMCP's ``outputSchema``
-emission is unchanged because the impls' response models are unchanged.
+emission follows from the impls' response models.
 
 This is one adapter among possible several: the registry itself is
-FastMCP-free, so #225's future agent-runtime adapters (on-device
-function-calling) bind the same actions without touching this module.
+FastMCP-free, so future agent-runtime adapters (on-device function-calling)
+bind the same actions without touching this module.
 """
 
 from __future__ import annotations
@@ -50,10 +50,10 @@ def _format_params(kwargs: dict[str, Any]) -> str:
 
 
 def _log_completed(name: str, kwargs: dict[str, Any], started: float) -> None:
-    # THE log line for a served call (#328): one INFO line carrying the tool
-    # name, its params, the action-recorded outcome, and the duration. Actions
-    # contribute the outcome via note_outcome(); anything else they log during
-    # the call is a warning/error (exceptional) or DEBUG (internals).
+    # THE log line for a served call: one INFO line carrying the tool name, its
+    # params, the action-recorded outcome, and the duration. Actions contribute
+    # the outcome via note_outcome(); anything else they log during the call is
+    # a warning/error (exceptional) or DEBUG (internals).
     elapsed_ms = (time.perf_counter() - started) * 1000
     outcome = _call_outcome.get() or "ok"
     params = _format_params(kwargs)
@@ -138,14 +138,14 @@ def _safe_tool(fn: Any) -> Any:
 
 
 def register_actions(mcp: FastMCP, actions: list[ActionDef]) -> None:
-    """Bind every registry action as an MCP tool (the old inline decoration order:
+    """Bind every registry action as an MCP tool (the decoration order:
     ``mcp.tool()`` over the ``_safe_tool``-wrapped impl)."""
     for action in actions:
         mcp.tool()(_safe_tool(action.impl))
 
 
 def build_action_tools(actions: list[ActionDef]) -> dict[str, Tool]:
-    """Build a ``name -> Tool`` map for the actions-over-HTTP edge (#505).
+    """Build a ``name -> Tool`` map for the actions-over-HTTP edge.
 
     Strict parity by construction: each ``Tool`` is built from the *exact same*
     ``_safe_tool``-wrapped impl that :func:`register_actions` binds to MCP

@@ -1,9 +1,9 @@
-//! The ONE anki-coupled module (#278's adapter-isolation rule).
+//! The ONE anki-coupled module (the adapter-isolation rule).
 //!
 //! Everything in this file talks to anki exclusively through its **protobuf
 //! service layer** — `Backend::run_service_method(service, method, bytes)` and
 //! `Backend::run_db_command_bytes(json)`, the exact surface pylib's rsbridge
-//! binds — never the bare crate API (#277 verdict review, binding constraint).
+//! binds — never the bare crate API (binding constraint).
 //! An anki tag bump is churn in this file only: re-extract the index tables
 //! from the generated dispatcher, run the tripwire tests, done.
 //!
@@ -23,7 +23,7 @@ use prost::Message;
 use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 
 // In test builds every dispatch is recorded, so the method-constant
-// coverage tripwire (#394) can assert each declared index is genuinely
+// coverage tripwire can assert each declared index is genuinely
 // exercised against a real collection — the interim gate until the
 // indices derive from anki's descriptors at build time.
 #[cfg(test)]
@@ -46,7 +46,7 @@ const SVC_NOTETYPES: u32 = 23;
 const SVC_NOTES: u32 = 25;
 const SVC_CARD_RENDERING: u32 = 27;
 const SVC_SEARCH: u32 = 29;
-// import_export (#71/#72). NOT a runtime-spinning service: its export/import
+// import_export. NOT a runtime-spinning service: its export/import
 // methods are `with_col` calls (no sync/network), so dispatching it is safe.
 const SVC_IMPORT_EXPORT: u32 = 37;
 const SVC_MEDIA: u32 = 39;
@@ -98,9 +98,9 @@ const SEARCH_FIND_AND_REPLACE: u32 = 5;
 // import_export methods (the MERGED backend dispatcher, tag 25.09.4): the
 // backend-level methods come first (ImportCollectionPackage=0,
 // ExportCollectionPackage=1), then the collection-level ones renumbered after
-// (ImportAnkiPackage=2, GetPresets=3, ExportAnkiPackage=4, …). #71 uses the two
-// export methods; #72 adds the import-anki-package one (a merge import; the
-// destructive import_collection_package=0 restore is the deferred #552).
+// (ImportAnkiPackage=2, GetPresets=3, ExportAnkiPackage=4, …). The two
+// export methods and the import-anki-package one (a merge import) are used; the
+// destructive import_collection_package=0 restore is deferred.
 const IMPORT_EXPORT_EXPORT_COLLECTION_PACKAGE: u32 = 1;
 const IMPORT_EXPORT_IMPORT_ANKI_PACKAGE: u32 = 2;
 const IMPORT_EXPORT_EXPORT_ANKI_PACKAGE: u32 = 4;
@@ -149,10 +149,10 @@ impl FieldsState {
     }
 }
 
-/// Build the import summary (#72) from anki's `ImportResponse.Log` — the
+/// Build the import summary from anki's `ImportResponse.Log` — the
 /// counts the `ImportSummary` carries. Kept here (adjacent to the RPC) since it
 /// reads the anki proto; the type itself lives in `crate::contract` (the
-/// collection contract, rehomed here in #706).
+/// collection contract).
 fn import_summary_from_log(
     log: anki_proto::import_export::import_response::Log,
 ) -> crate::contract::ImportSummary {
@@ -570,7 +570,7 @@ impl ServiceAdapter {
 
     // ── notetype JSON (schema11) RPCs — pylib's update_dict/new_field path ───
     //
-    // The note-type structural ops (#76) port operates on the schema11 JSON
+    // The note-type structural ops operate on the schema11 JSON
     // dicts through the SAME legacy RPCs pylib's ModelManager uses
     // (update_dict → update_notetype_legacy, new_field → a stock-Basic clone),
     // so the ord-based data/card migration semantics are identical by
@@ -674,7 +674,7 @@ impl ServiceAdapter {
         Ok(())
     }
 
-    // ── media (#70 port) ─────────────────────────────────────────────────────
+    // ── media ────────────────────────────────────────────────────────────────
 
     /// Store bytes under (a collision-resolved variant of) `desired_name`;
     /// returns the ACTUAL name Anki chose (pylib's `media.write_data`).
@@ -717,7 +717,7 @@ impl ServiceAdapter {
         )
     }
 
-    // ── import/export (#71/#72) ─────────────────────────────────────────────
+    // ── import/export ──────────────────────────────────────────────────────
 
     /// Export an `.apkg` (the modern Rust exporter, `ExportAnkiPackage`):
     /// whole-collection or deck/note-scoped, with optional scheduling/media.
@@ -785,7 +785,7 @@ impl ServiceAdapter {
     /// Import an `.apkg`/`.colpkg` via anki's modern Rust importer
     /// (`import_anki_package`) — a MERGE into the open collection (notes added/
     /// updated), NOT the destructive whole-collection restore (that is the
-    /// separate `import_collection_package`, deferred to #552). MUTATES the
+    /// separate `import_collection_package`, deferred). MUTATES the
     /// collection (bumps `col.mod`), so the caller MUST drive a drift reconcile
     /// afterward (never advance the index watermark — the col_mod bump is the
     /// signal). Returns per-bucket counts.
@@ -806,7 +806,7 @@ impl ServiceAdapter {
                 update_notes: options.update_notes as i32,
                 update_notetypes: options.update_notetypes as i32,
                 with_scheduling: options.with_scheduling,
-                // Deferred (#72 scope): not exposed; anki's default is false.
+                // Deferred: not exposed; anki's default is false.
                 with_deck_configs: false,
             }),
         };
@@ -840,8 +840,7 @@ impl ServiceAdapter {
             card_ids: card_ids.to_vec(),
         };
         // remove_cards returns OpChangesWithCount (service.rs) — decoding the
-        // wrong message here produced a wire-type error the ported pytest
-        // suite caught; the Rust round-trip lacked an empty-CARD case.
+        // wrong message here produces a wire-type error.
         let _: anki_proto::collection::OpChangesWithCount =
             self.call(SVC_CARDS, CARDS_REMOVE_CARDS, &req)?;
         Ok(())
@@ -922,12 +921,10 @@ impl ServiceAdapter {
     }
 
     /// Set the exact tag list on many notes in ONE read + ONE `UpdateNotes`
-    /// write (#445/#716): one batched DB read for the current note rows, then
+    /// write: one batched DB read for the current note rows, then
     /// one transaction + one undo entry — instead of the get+update round trip
-    /// and a journal commit per note (the 1000-note tag-set op previously paid
-    /// 3 RPCs and an fsync each). The read side used to fan out to one
-    /// `GetNote` RPC per note (the N+1 the "ONE call" framing hid), but the
-    /// service layer has no batched `GetNotes`; the DB proxy does (the same
+    /// and a journal commit per note. The service layer has no batched
+    /// `GetNotes`; the DB proxy does (the same
     /// `db_rows` surface `col_mod`/the prune reads use), so the whole read is
     /// one `SELECT … WHERE id IN (…)` round trip.
     ///
@@ -938,14 +935,13 @@ impl ServiceAdapter {
     /// regenerates cards), and anki re-stamps `mtime`/`usn` itself. So a wrong
     /// value here would silently CORRUPT the note (it does not error) —
     /// therefore the row we send MUST carry each note's *current*
-    /// guid/notetype_id/fields verbatim (only `tags` is overwritten), exactly
-    /// as the prior `GetNote` fetch did. `flds` is anki's 0x1f-separated field
-    /// blob, split the same way anki's `split_fields` (and our `typed_notes`)
-    /// does.
+    /// guid/notetype_id/fields verbatim (only `tags` is overwritten). `flds` is
+    /// anki's 0x1f-separated field blob, split the same way anki's
+    /// `split_fields` (and our `typed_notes`) does.
     ///
     /// Contract: callers must pre-filter to existing ids — an absent id is
     /// silently skipped here (the `IN (…)` read just omits it; no per-note
-    /// `GetNote`-style not-found error), mirroring the old per-note skip.
+    /// `GetNote`-style not-found error).
     ///
     /// # Errors
     ///
@@ -1037,7 +1033,7 @@ impl ServiceAdapter {
         Ok(resp.count as usize)
     }
 
-    /// Anki's own add-note validation — the #77 duplicate rule's source of truth.
+    /// Anki's own add-note validation — the duplicate rule's source of truth.
     ///
     /// # Errors
     ///
@@ -1088,15 +1084,15 @@ fn decode_backend_error(bytes: &[u8]) -> NativeError {
     }
 }
 
-// ── runtime-singularity pin (#374 design 9; revisited #503) ──────────────────
+// ── runtime-singularity pin ──────────────────────────────────────────────────
 // anki's Backend owns a LAZY tokio runtime whose only initializer is
 // `runtime_handle()`, consumed solely by the sync/AnkiWeb/AnkiHub services.
 // Shrike dispatches none of those services TODAY, so anki's runtime stays cold
-// and the kernel's owned runtime (#374) is the only one alive. This test pins
+// and the kernel's owned runtime is the only one alive. This test pins
 // exactly that: not one of the runtime-spinning service indices appears in the
 // dispatched set.
 //
-// #503 settled what happens when sync support DOES land (#33/#362 wakes these
+// When sync support DOES land (waking these
 // services): the invariant the kernel guarantees is NOT "one runtime" but
 // "sync ops never run on a runtime worker thread". anki's sync paths
 // `block_on`, which panics from any runtime-worker thread regardless of which

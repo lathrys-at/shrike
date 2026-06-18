@@ -1,18 +1,17 @@
-"""Backend case registry for the conformance + parity harness (#268).
+"""Backend case registry for the conformance + parity harness.
 
 Each :class:`BackendCase` describes one ``EmbedderBackend`` configuration runnable
 through ``test_backend_conformance.py``. **Registering a new backend implementation
 is one entry here** — that's the point: a new implementation's acceptance gate is
-this suite plus a ``parity_ref`` pointing at the implementation it replaces (the
-native engines #270/#271 earned default status this way; their Python references
-retired with the #278 cutover, so today's cases run restart parity).
+this suite plus a ``parity_ref`` pointing at the implementation it replaces. Today's
+cases run restart parity.
 
-Parity semantics (epic #265 convention 7): a case whose ``parity_ref`` is ``None``
-is compared against *a fresh instance of itself* (restart parity — fingerprint
-stability and vector reproducibility). A case with a ``parity_ref`` is compared
-against that reference implementation: byte-equal vectors **and** an identical
-fingerprint mean the new runtime may keep the reference's fingerprint namespace;
-anything less must namespace itself (never a tolerance-only match).
+Parity semantics: a case whose ``parity_ref`` is ``None`` is compared against *a
+fresh instance of itself* (restart parity — fingerprint stability and vector
+reproducibility). A case with a ``parity_ref`` is compared against that reference
+implementation: byte-equal vectors **and** an identical fingerprint mean the new
+runtime may keep the reference's fingerprint namespace; anything less must
+namespace itself (never a tolerance-only match).
 
 ``*_exact`` flags encode each runtime's determinism claim on CPU (CI runs CPU
 providers): the int8/fp32 ONNX paths are bit-exact; llama-server may sit on Metal
@@ -61,19 +60,19 @@ class BackendCase:
     # When the probe finds the model batch-safe, batched == serial byte-equal.
     batch_exact: bool
     # Build the *reference* implementation for cross-runtime parity, or None for
-    # self (restart) parity. A native backend (#270/#271) registers the Python
-    # implementation it replaces here.
+    # self (restart) parity. A native backend registers the Python implementation
+    # it replaces here.
     parity_ref: Callable[[pytest.FixtureRequest], EmbedderBackend] | None = None
     # True when the case claims the reference's fingerprint namespace — then the
     # parity test requires byte-equal vectors AND an identical fingerprint.
     claims_reference_namespace: bool = False
-    # False (#441): restart parity re-instantiates the backend — skip the second
-    # instantiation when it proves nothing beyond another case's run. The llama
-    # fingerprint is a pure function of the pinned binary + GGUF (cross-instance
-    # equality is tautological; an upgrade changing it is caught by neither
-    # form), and restart byte-determinism is an ENGINE property — minilm-int8
-    # pins it for the ONNX engine, clip for the CLIP engine; fp32/roberta would
-    # re-prove the same engines.
+    # restart parity re-instantiates the backend — skip the second instantiation
+    # when it proves nothing beyond another case's run. The llama fingerprint is a
+    # pure function of the pinned binary + GGUF (cross-instance equality is
+    # tautological; an upgrade changing it is caught by neither form), and restart
+    # byte-determinism is an ENGINE property — minilm-int8 pins it for the ONNX
+    # engine, clip for the CLIP engine; fp32/roberta would re-prove the same
+    # engines.
     restart_parity: bool = True
     marks: tuple[Any, ...] = field(default=())
 
@@ -120,9 +119,9 @@ def cases() -> list[BackendCase]:
     )
 
     return [
-        # The native ONNX engine (#270), the only engine since the #278 cutover.
-        # The onnx-rs: fingerprint namespace is its frozen vector-space identity
-        # from the dual-engine bake (indexes built then load without a rebuild).
+        # The native ONNX engine, the only engine. The onnx-rs: fingerprint
+        # namespace is its frozen vector-space identity from the dual-engine bake
+        # (indexes built then load without a rebuild).
         BackendCase(
             id="onnx-minilm-int8",
             ndim=384,
@@ -152,9 +151,9 @@ def cases() -> list[BackendCase]:
             restart_parity=False,
             marks=(requires_onnxruntime, requires_shrike_native),
         ),
-        # The native CLIP engine (#271), the only engine since the #278 cutover
-        # (clip-rs: namespace kept for the same reason). Image-path semantics
-        # are asserted as retrieval equivalence in test_clip_model.py.
+        # The native CLIP engine, the only engine (clip-rs: namespace kept for the
+        # same reason). Image-path semantics are asserted as retrieval equivalence
+        # in test_clip_model.py.
         BackendCase(
             id="clip-vit-b32",
             ndim=512,

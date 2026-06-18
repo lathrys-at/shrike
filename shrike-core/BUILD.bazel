@@ -1,16 +1,16 @@
 load("@rules_python//python:defs.bzl", "py_test")
 
-# The native Cargo workspace root (#269). crate_universe reads Cargo.toml +
+# The native Cargo workspace root. crate_universe reads Cargo.toml +
 # Cargo.lock from here (see MODULE.bazel).
 exports_files([
     "Cargo.toml",
     "Cargo.lock",
 ])
 
-# Crate-layering gate (epic #265 convention 5): `pyo3` may appear only in the
-# binding crate shrike-pyo3. A compute/kernel crate growing a pyo3 dependency is
-# exactly the structural drift that would make the stretch end-state (zero
-# necessary CPython) aspirational — fail fast.
+# Crate-layering gate: `pyo3` may appear only in the binding crate shrike-pyo3.
+# A compute/kernel crate growing a pyo3 dependency is exactly the structural
+# drift that would make the stretch end-state (zero necessary CPython)
+# aspirational — fail fast.
 py_test(
     name = "layering_check",
     size = "small",

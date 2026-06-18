@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bazel-lane coverage (#262) — runs `bazel coverage` over the py suites and prints
+# Bazel-lane coverage — runs `bazel coverage` over the py suites and prints
 # a per-file + total report from the merged lcov. Spawned server subprocesses ARE
 # captured (each py_binary's rules_python bootstrap self-instruments off the
 # inherited COVERAGE_DIR; the integration conftest gives each server its own
@@ -9,7 +9,7 @@
 #
 # Report-only, like CI's coverage posture: the fail_under ratchet stays on the
 # pip lane (scripts/coverage.sh), which also remains the basis of the published
-# number until the bazel number replaces it (tracked on #262). Note the metric
+# number until the bazel number replaces it. Note the metric
 # difference when comparing: lcov totals are line coverage; coverage.py's total
 # folds in branch coverage (pyproject sets branch=true), so the two can differ
 # by a point or so.
@@ -27,8 +27,7 @@ for arg in "$@"; do
 done
 
 # The non-embedding py suites — the same scope as scripts/coverage.sh's
-# `-m "not embedding"` run. //shrike-py/tests/unit/... covers both the pre- and
-# post-#259 target layout. A failing test still prints the (partial) report —
+# `-m "not embedding"` run. A failing test still prints the (partial) report —
 # bazel collects no coverage for a failed target, so the number is an
 # undercount then — and the script exits with bazel's status at the end.
 bazel_status=0

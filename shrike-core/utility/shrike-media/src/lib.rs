@@ -1,4 +1,4 @@
-//! `shrike-media` — the inbound/untrusted-media crate (#711, epic #703).
+//! `shrike-media` — the inbound/untrusted-media crate.
 //!
 //! The "acquire + validate untrusted bytes" half of media handling, cracked
 //! out of `shrike-kernel`'s `media_fetch`. The *store* half (store/fetch/list/
@@ -15,7 +15,7 @@
 //!   ([`guess_mime`]/[`mime_extension`]).
 //!
 //! **Trust-boundary code**: changes here go through the security-review gate.
-//! The SSRF model (origin of #164/#71/#72) is preserved exactly — it delegates
+//! The SSRF model is preserved exactly — it delegates
 //! the primitives to `shrike-network` (the one home for the is_global
 //! classifier + the IP-pinned agent), so the control is shared, not copied:
 //!
@@ -35,8 +35,8 @@
 //!
 //! Pure Rust, NO anki coupling, NO engine crate and NOT `shrike-kernel`: it
 //! sits BELOW both, so the kernel-purity and engine-purity layering rules both
-//! stay satisfied (//shrike-core:layering_check). The URL fetch is **async**
-//! (#721 S2): it rides `shrike_network::fetch_pinned_get` (the centralized
+//! stay satisfied (//shrike-core:layering_check). The URL fetch is **async**:
+//! it rides `shrike_network::fetch_pinned_get` (the centralized
 //! IP-pinned, per-hop-re-vetting reqwest loop) instead of a blocking `ureq`
 //! call, so `prepare_media_item` is an `async fn` the host drives on its
 //! runtime (the kernel `tokio::spawn`s each item concurrently; the standalone
@@ -55,7 +55,7 @@ use shrike_schemas::StoreMediaItem;
 use url::Url;
 
 // The SSRF classifier + the resolve-and-vet helper live in the shared
-// `shrike-network` crate (#592) so the remote engine crates use the SAME
+// `shrike-network` crate so the remote engine crates use the SAME
 // control. Re-exported here so the in-tree callers (the kernel's Python-facing
 // binding, any media caller) keep importing them from `shrike_media` unchanged.
 pub use shrike_network::{ip_is_allowed, resolve_public_ip};
@@ -63,8 +63,7 @@ pub use shrike_network::{ip_is_allowed, resolve_public_ip};
 /// The byte-source size cap — caller-supplied/downloaded bytes only; a
 /// server-local `path` inside an operator-configured root is deliberately
 /// uncapped. The one policy value the collection write tail and the
-/// fetch/decode caps must agree on, so it lives where both can see it (#711:
-/// rehomed from shrike-store now that both sides depend on shrike-media).
+/// fetch/decode caps must agree on, so it lives where both can see it.
 pub const MEDIA_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Per-request timeout for an inbound media URL fetch.
@@ -73,7 +72,7 @@ pub const URL_FETCH_TIMEOUT_SECS: u64 = 30;
 /// existing call sites and the error message that quotes it are unchanged).
 pub const MAX_MEDIA_REDIRECTS: usize = shrike_network::MAX_REDIRECTS;
 
-/// One store_media item after the kernel's off-actor prepare (#490): byte
+/// One store_media item after the kernel's off-actor prepare: byte
 /// sources arrive fetched/decoded; `path` items pass through whole (their
 /// gates are collection policy and run under the write); a failed prepare
 /// carries its per-item error. The interface between the acquire half (this
@@ -120,7 +119,7 @@ fn invalid(msg: impl Into<String>) -> NativeError {
 /// can only resolve inside the media dir (path-traversal guard for
 /// fetch/delete). Returns "" for a name that is only separators/dots — or
 /// only whitespace around them, which the emptiness check would otherwise
-/// pass (#382).
+/// pass.
 pub fn safe_media_name(name: &str) -> String {
     let normalized = name.replace('\\', "/");
     let trimmed = normalized.trim_end_matches('/');
@@ -136,15 +135,15 @@ pub fn safe_media_name(name: &str) -> String {
 /// Best-effort MIME from the filename extension (the subset the Python
 /// `mimetypes` table returns for media Anki actually stores). The store half's
 /// fetch/list responses read this; the one home for the store/response
-/// extension→MIME map the collection write paths key against (#711).
+/// extension→MIME map the collection write paths key against.
 ///
-/// DELIBERATELY DISTINCT from `shrike_engine_api::mime_for_name` (#711): that
+/// DELIBERATELY DISTINCT from `shrike_engine_api::mime_for_name`: that
 /// one is the engine routing-HINT (carries `heic`/`aiff`, omits `pdf`/`txt`/
 /// `css`/`js`); these are the store/response MIME the fetch/list/write paths
 /// serve. They are NOT to be merged: folding `mime_for_name` in here would
 /// force shrike-engine-api (a LEAF, the kernel↔ort firewall) to depend on
 /// shrike-media, pulling a media-fetch/SSRF edge into the engine contract.
-/// (Chesterton's fence; the lead's #711 ruling — leaf purity > table-count==1.)
+/// (Chesterton's fence: leaf purity > table-count==1.)
 pub fn guess_mime(filename: &str) -> Option<&'static str> {
     let ext = filename.rsplit('.').next()?.to_ascii_lowercase();
     Some(match ext.as_str() {
@@ -221,7 +220,7 @@ pub fn decode_media_b64(data: &str) -> NativeResult<Vec<u8>> {
 /// The SSRF posture (http/https only; per-hop is_global re-vet; IP-pin keeping
 /// SNI/cert/`Host` on the name; manual redirect following capped at
 /// [`MAX_MEDIA_REDIRECTS`]; the body size-capped while streaming) lives in the
-/// shared [`shrike_network::fetch_pinned_get`] (#721 S2) — the ONE audited copy
+/// shared [`shrike_network::fetch_pinned_get`] — the ONE audited copy
 /// every consumer rides. With `allow_private` the gate and pin are off (the
 /// operator opted into trusted internal hosts).
 ///
@@ -264,7 +263,7 @@ pub fn media_name_from_url(url: &str) -> Option<String> {
 /// One store_media item's prepare — validate, then decode/fetch the byte
 /// source (path items pass through; their gates are collection policy and
 /// run under the write). The ONE prepare both drivers share, now **async**
-/// (#721 S2 — the url path awaits [`fetch_media_url`]): the kernel `tokio::spawn`s
+/// (the url path awaits [`fetch_media_url`]): the kernel `tokio::spawn`s
 /// each item so they prepare concurrently on the runtime; the standalone binding
 /// drives it via `block_on`.
 pub async fn prepare_media_item(
@@ -358,7 +357,7 @@ mod tests {
         }
     }
 
-    /// The #591 SSRF parity regression, pinned at the media boundary too: the
+    /// The SSRF parity regression, pinned at the media boundary too: the
     /// allowlist must refuse 6to4 (2002::/16) and 3fff::/20 exactly like
     /// Python's `ipaddress.is_global`. A 6to4 address embeds an IPv4 in bytes
     /// 2..6, so `2002:7f00:0001::` is the 6to4 encoding of 127.0.0.1 —
@@ -408,7 +407,7 @@ mod tests {
         assert_eq!(safe_media_name(".."), "");
         assert_eq!(safe_media_name("dir/"), "dir");
         assert_eq!(safe_media_name("plain.png"), "plain.png");
-        // Whitespace-only (or whitespace-wrapped dots) is no name at all (#382).
+        // Whitespace-only (or whitespace-wrapped dots) is no name at all.
         assert_eq!(safe_media_name("   "), "");
         assert_eq!(safe_media_name(" .. "), "");
         assert_eq!(safe_media_name("a/  "), "");

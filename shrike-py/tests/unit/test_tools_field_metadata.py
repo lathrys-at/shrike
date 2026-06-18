@@ -1,8 +1,7 @@
-"""Tool-layer tests for update_note_type_field_metadata (#119): col_mod bump,
-no re-embed. Since the #391 re-home the watermark tail runs inside the
-kernel's op, so the assertions read observable state (the index watermark,
-the embed-call log) rather than spying host-side kernel calls that no
-longer happen."""
+"""Tool-layer tests for update_note_type_field_metadata: col_mod bump,
+no re-embed. The watermark tail runs inside the kernel's op, so the assertions
+read observable state (the index watermark, the embed-call log) rather than
+spying host-side kernel calls that no longer happen."""
 
 from __future__ import annotations
 

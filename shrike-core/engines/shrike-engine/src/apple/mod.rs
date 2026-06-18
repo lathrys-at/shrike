@@ -1,7 +1,7 @@
-//! The Apple platform recognizers as engines (#342 P3/#410; feature
+//! The Apple platform recognizers as engines (feature
 //! `engine-apple`): the `RecognizeMedia` impls for Vision OCR ([`vision`]) and
 //! SpeechAnalyzer ASR ([`speech`]), over `shrike-platform`'s raw Swift/C-ABI
-//! glue (#709). The glue returns raw JSON; THIS layer parses it into the
+//! glue. The glue returns raw JSON; THIS layer parses it into the
 //! engine-api types and owns the engine contract — so `shrike-platform` carries
 //! no `shrike-engine-api` dep, and the swiftc toolchain stays quarantined there
 //! (this crate is `build.rs`-free).

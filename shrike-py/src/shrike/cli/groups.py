@@ -1,20 +1,20 @@
 """Shared Click group classes: a canonical-order group and the search default-command group.
 
 ``OrderedGroup`` replaces Click's default alphabetical ``list_commands`` with a
-single **canonical order** (epic #682 §G), applied uniformly to the root group
+single **canonical order**, applied uniformly to the root group
 and every subgroup. Click derives both ``--help`` listings *and* shell
 completions from ``list_commands``, so ordering it once fixes both surfaces.
 
 ``SearchGroup`` is the ``shrike search`` group's class: ``search <query>`` runs a
 default search command, while ``search coverage`` / ``search query`` dispatch to
-named subcommands (epic #682 §A).
+named subcommands.
 """
 
 from __future__ import annotations
 
 import click
 
-# Canonical subcommand order per group (epic #682 §G), keyed by group name. Each
+# Canonical subcommand order per group, keyed by group name. Each
 # value lists the group's subcommand names in display order; any command not
 # listed here falls to the end, alphabetically (so a new command is visible but
 # never silently reorders the curated set). The verb classes behind the order:
@@ -53,7 +53,7 @@ def _ordered(names: list[str], order: list[str]) -> list[str]:
 
 
 class OrderedGroup(click.Group):
-    """A ``click.Group`` whose subcommands list in the canonical order (#682 §G).
+    """A ``click.Group`` whose subcommands list in the canonical order.
 
     The order is looked up by the group's own name in ``CANONICAL_ORDER``; a
     group with no entry falls back to alphabetical (Click's default), so adding a

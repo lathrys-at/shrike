@@ -1,4 +1,4 @@
-"""Tool-layer surfacing of CollectionBusyError (#65). Kernel-harness port (#355)."""
+"""Tool-layer surfacing of CollectionBusyError."""
 
 from __future__ import annotations
 

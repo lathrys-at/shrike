@@ -1,16 +1,16 @@
-//! The kernel's owned tokio runtime (#374): one runtime per process, owned
+//! The kernel's owned tokio runtime: one runtime per process, owned
 //! HERE — the walk-back of the injected-executor model. The kernel is
 //! idiomatic async Rust; hosts adapt the *action exchange* (an op in, a
 //! completion-backed future out via [`spawn_op`]) and never supply
 //! scheduling.
 //!
 //! **anki retains its own runtime; the kernel pins sync work off the runtime
-//! worker (#503).** anki's rslib owns an internal lazy tokio runtime whose
+//! worker.** anki's rslib owns an internal lazy tokio runtime whose
 //! sole consumers are the sync/AnkiWeb/AnkiHub services. Today none of those
 //! is dispatched on Shrike's call paths (pinned structurally in
 //! shrike-collection's `runtime_singularity` test), so anki's runtime is not
 //! instantiated and the kernel's is the only one alive. Once client sync
-//! (#33/#362) lands, anki's runtime DOES come up — two runtimes per process.
+//! lands, anki's runtime DOES come up — two runtimes per process.
 //! That is fine, because the invariant the kernel actually guarantees is not
 //! "one runtime" but **"a sync op never executes on a runtime worker
 //! thread"**. Two facts and the discipline they imply:
@@ -31,7 +31,7 @@
 //! `spawn_blocking`** — a blocking-pool thread is NOT a runtime context, so
 //! `block_on` is legal there. This is the same pattern the Python capture seams
 //! already use (`py_embedder.rs` / `py_recognizer.rs`: `spawn_blocking` + GIL
-//! attach), and it composes with #362's release-run-reopen orchestration (the
+//! attach), and it composes with the release-run-reopen orchestration (the
 //! actor releases, the sync op rides the blocking pool, the reopen reclaims).
 //!
 //! The panic-repro test below pins this structurally: it demonstrates that
@@ -107,12 +107,12 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
         .block_on(future)
 }
 
-/// The action-exchange edge (#374): spawn an op onto the kernel runtime and
+/// The action-exchange edge: spawn an op onto the kernel runtime and
 /// hand back a small Send future — a oneshot receiver, pollable from ANY
 /// context with no tokio dependency on the caller's side. **Dropping the
 /// returned future detaches observation; the op runs to completion** (a
 /// half-applied collection write from an abort would be far worse than a
-/// wasted compute) — byte-identical to the pre-#374 cancellation semantics.
+/// wasted compute).
 /// A oneshot that closes without a value means the op task panicked.
 ///
 /// # Errors
@@ -135,7 +135,7 @@ pub fn spawn_op<T: Send + 'static>(
 
 #[cfg(test)]
 mod sync_dispatch_pin {
-    //! The #503 acceptance gate: pin the SYNC-OP DISPATCH PATH structurally,
+    //! The acceptance gate: pin the SYNC-OP DISPATCH PATH structurally,
     //! not by luck.
     //!
     //! anki keeps its own runtime for client sync, so two runtimes will live

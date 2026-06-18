@@ -1,4 +1,4 @@
-"""Build the Python sdist for the //shrike-py:sdist Bazel rule (#245).
+"""Build the Python sdist for the //shrike-py:sdist Bazel rule.
 
 Invoked as a build action: stages the declared source files into a writable tree
 (Bazel inputs are read-only, and hatch-vcs's build hook writes _version.py into
@@ -12,7 +12,7 @@ the repo's), so the repo's `python -m build` keeps its git-based sdist unchanged
 //shrike-py:sdist ships exactly the staged tree (everything the rule's srcs put here).
 
 --project-subdir names the directory within the stage that holds pyproject.toml — the
-harness now lives in shrike-py/ (#731), so pyproject + the package sit under
+harness lives in shrike-py/, so pyproject + the package sit under
 shrike-py/ while README/LICENSE/CHANGELOG stay at the repo root (one project-wide
 set). The repo-root files are staged outside the project subdir, so they're COPIED
 into it (and the staged pyproject's `readme = "../README.md"` is rewritten to the
@@ -47,7 +47,7 @@ def main() -> None:
     ap.add_argument("--version-file", required=True)
     ap.add_argument("--out", required=True)
     # The dir within the stage that carries pyproject.toml (the project root for the
-    # build). Empty = the stage root (the pre-#731 layout).
+    # build). Empty = the stage root.
     ap.add_argument("--project-subdir", default="")
     ap.add_argument("srcs", nargs="*")
     args = ap.parse_args()
@@ -79,8 +79,8 @@ def main() -> None:
                 if os.path.isfile(p):
                     shutil.copy2(p, os.path.join(project_root, name))
 
-        # The shipped pyproject reads the README from the repo root (`../README.md`,
-        # #731); inside the staged project root the copy sits beside pyproject, so
+        # The shipped pyproject reads the README from the repo root (`../README.md`);
+        # inside the staged project root the copy sits beside pyproject, so
         # rewrite it to the local name for this build only (the repo's pyproject is
         # untouched).
         pyproject = os.path.join(project_root, "pyproject.toml")

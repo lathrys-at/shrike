@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Run the real-model search-quality suite and write RESULTS.md (#559 PR2b).
+"""Run the real-model search-quality suite and write RESULTS.md.
 
 The dogfooding artifact runner: it drives the SAME engine the pytest classes
 assert against (``tests.manual.search_quality.runner.run_search_quality``) — one source
 of truth — and renders the per-class recall/precision numbers, the cross-space
-floor-admission behaviour (#580), and the cross-lingual observations to
+floor-admission behaviour, and the cross-lingual observations to
 ``tests/manual/search_quality/RESULTS.md`` (gitignored — a local artifact).
 
 It is the manual suite's reporting half: where the pytest classes assert floors,
-this prints the actual numbers so a human (or #580's margin tuning) can read where
+this prints the actual numbers so a human (or the margin tuning) can read where
 the real models land. Same off-CI posture — it needs the cached models + the Commons
 corpus, runs nothing in CI.
 

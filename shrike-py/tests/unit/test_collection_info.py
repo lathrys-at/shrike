@@ -16,7 +16,7 @@ class TestCollectionInfo:
         info = await wrapper.get_collection_info(include=["decks"])
         assert info["decks"] is not None
         # Unrequested sections read as None — explicit nulls on the raw wire
-        # since the #391 to_wire retirement (.get() is the stable form).
+        # (.get() is the stable form).
         assert info.get("note_types") is None
         assert info.get("tags") is None
         assert info.get("stats") is None
@@ -53,7 +53,7 @@ class TestCollectionInfo:
     async def test_note_type_details_omitted_by_default(self, wrapper):
         info = await wrapper.get_collection_info(include=["note_types"])
         basic = next(nt for nt in info["note_types"] if nt["name"] == "Basic")
-        # No detail unless requested (explicit null on the raw wire, #391).
+        # No detail unless requested (explicit null on the raw wire).
         assert basic.get("detail") is None
 
     async def test_default_deck_present(self, wrapper):

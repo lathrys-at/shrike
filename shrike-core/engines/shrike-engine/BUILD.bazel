@@ -4,7 +4,7 @@ package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
-# Every engine-contract impl, feature-gated by family (#708). Bazel doesn't
+# Every engine-contract impl, feature-gated by family. Bazel doesn't
 # inherit cargo's default-features, and a hand-written `rust_library` builds ONE
 # fixed feature set, so the two binding builds name two targets:
 #
@@ -40,7 +40,7 @@ ENGINE_ONNX_DEPS = [
 ]
 
 # The remote-family deps (feature `remote`): the SSRF primitives + the async
-# transport (reqwest/tokio/futures, #721 S2 — route-2 async-direct, ureq gone) +
+# transport (reqwest/tokio/futures, route-2 async-direct) +
 # url + base64. Pure Rust, no ort.
 ENGINE_REMOTE_DEPS = [
     "//shrike-core/utility/shrike-network:shrike_network",
@@ -52,8 +52,7 @@ ENGINE_REMOTE_DEPS = [
 ]
 
 # The SERVER target: onnx + remote + the GPU EPs (the cargo default feature set;
-# Bazel crate_features don't inherit cargo defaults, so they're pinned here, like
-# the old shrike-embed target pinned cuda/directml/tensorrt).
+# Bazel crate_features don't inherit cargo defaults, so they're pinned here).
 rust_library(
     name = "shrike_engine",
     srcs = ENGINE_SRCS,
@@ -88,10 +87,10 @@ rust_test(
     crate = ":shrike_engine",
 )
 
-# The APPLE cone (#709): the engine-apple `RecognizeMedia` impls over
+# The APPLE cone: the engine-apple `RecognizeMedia` impls over
 # shrike-platform's raw Swift/C-ABI glue. Its own target/test (no binding build
 # enables engine-apple yet — the server excludes platform engines, mobile's
-# attach is a later #504 slice), so the macOS lane exercises the recognizers and
+# attach is a later slice), so the macOS lane exercises the recognizers and
 # the off-macOS lane the `unavailable` stubs. The OCR fixture rides compile_data
 # — include_bytes! resolves at rustc time in the sandbox.
 rust_library(

@@ -1,4 +1,4 @@
-"""Collection-layer tests for query (#97): raw Anki search expressions.
+"""Collection-layer tests for query: raw Anki search expressions.
 
 Exercises CollectionWrapper._query directly (no server). The query string goes
 straight to col.find_notes, so this also pins the error type for malformed input.
@@ -77,7 +77,7 @@ class TestCollectionQuery:
         full = _query(wrapper, "tag:m", fields_mode="full")["notes"][0]
         meta = _query(wrapper, "tag:m", fields_mode="meta")["notes"][0]
         assert full["content"]["Front"] == "metacard"
-        # Meta mode: no content (explicit null on the raw wire, #391).
+        # Meta mode: no content (explicit null on the raw wire).
         assert meta.get("content") is None
 
     def test_empty_result(self, wrapper):

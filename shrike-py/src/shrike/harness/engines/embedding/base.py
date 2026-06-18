@@ -7,9 +7,9 @@ on this minimal surface, never on a specific runtime. The implementations are
 embedder is just another implementation that advertises more ``modalities``.
 
 Keeping the surface this small is what lets the backend be swapped without
-touching the index (kernel-owned since #332/#353): drift detection, the
-per-note fingerprints, and persistence are all backend-agnostic — they only
-ever call ``embed_texts`` and read ``model_fingerprint``/``embedding_dim``.
+touching the index (kernel-owned): drift detection, the per-note fingerprints,
+and persistence are all backend-agnostic — they only ever call ``embed_texts``
+and read ``model_fingerprint``/``embedding_dim``.
 """
 
 from __future__ import annotations
@@ -18,9 +18,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-# Modality identifiers a backend may advertise in ``modalities``. Phase 1 backends
-# are all text-only; IMAGE/AUDIO/VIDEO/PDF are the multimodal seam (#162) and are
-# named here so a later slice extends this set rather than inventing strings.
+# Modality identifiers a backend may advertise in ``modalities``. IMAGE/AUDIO/
+# VIDEO/PDF are the multimodal seam, named here so a later slice extends this
+# set rather than inventing strings.
 TEXT = "text"
 IMAGE = "image"
 AUDIO = "audio"
@@ -43,7 +43,7 @@ class NoteEmbedInput:
 
     This boundary *type* lives here with the protocol seam (not in ``index.py``):
     it's what the collection produces and any index/embedder consumes, so homing it
-    on the leaf protocol module keeps the module graph acyclic (#266).
+    on the leaf protocol module keeps the module graph acyclic.
     """
 
     note_id: int

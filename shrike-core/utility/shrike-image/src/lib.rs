@@ -1,4 +1,4 @@
-//! Generic image preprocessing (#707): the byte → pixels → CHW-tensor pipeline
+//! Generic image preprocessing: the byte → pixels → CHW-tensor pipeline
 //! the CLIP vision path needs, extracted out of `shrike-embed/clip.rs` so it is
 //! reusable, independently testable, and free of any engine/kernel coupling.
 //!
@@ -27,7 +27,7 @@
 //! SIMD resize backend was prototyped but deferred: `fast_image_resize`'s
 //! Catmull-Rom differs from `image`'s by ~0.078 on a real downscale, far past
 //! the tolerance, so it is genuinely vector-affecting and belongs behind a
-//! consumer-fingerprint mechanism, not this crate's default — see #767.)
+//! consumer-fingerprint mechanism, not this crate's default.)
 
 #![deny(missing_docs)]
 #![deny(

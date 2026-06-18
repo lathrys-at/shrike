@@ -1,4 +1,4 @@
-//! The #637 drain gate (the "careful part"): an op already in flight when
+//! The drain gate (the "careful part"): an op already in flight when
 //! shutdown begins must still COMPLETE, not be abandoned.
 //!
 //! A SEPARATE test binary (own process — the runtime seam is process-global and

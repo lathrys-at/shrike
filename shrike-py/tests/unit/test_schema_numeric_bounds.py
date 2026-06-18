@@ -1,23 +1,21 @@
 """Numeric-bounds parity between schemas.py (Pydantic) and shrike-schemas (Rust).
 
-#606 (consolidates the S4-1..S4-5 review findings). The structural contract test
-(``test_schema_contract.py``) deliberately leaves numeric bounds out of the
-shape comparison; this module pins the two cases the audit flagged so the drift
-can't silently return:
+The structural contract test (``test_schema_contract.py``) deliberately leaves
+numeric bounds out of the shape comparison; this module pins the two cases so
+the drift can't silently return:
 
 (a) **Defensive direction** — fields the kernel (Rust) produces and Python only
-    receives. Rust's ``u32``/``u64`` already reject negatives/overflow at the
-    serde boundary; Python was an unbounded ``int``. After the fix Python
-    enforces ``ge=0`` too, so both sides reject the same bad values
-    (``ExportPackageResult.note_count``, ``ExportPackage{Path,Url}.bytes`` +
-    ``note_count``, ``ServerStatus.wire_protocol_version``).
+    receives. Rust's ``u32``/``u64`` reject negatives/overflow at the serde
+    boundary; Python enforces ``ge=0`` too, so both sides reject the same bad
+    values (``ExportPackageResult.note_count``, ``ExportPackage{Path,Url}.bytes``
+    + ``note_count``, ``ServerStatus.wire_protocol_version``).
 
-(b) **Advertised-schema direction** — fields Python enforces (``ge=``) but whose
-    Rust ``schemars`` schema (what MCP ``tools/list`` advertises) lacked the
-    ``minimum``, so a client reading that schema got inaccurate type info. After
-    the fix the Rust schema declares the bound (``FieldMetadataInput.size`` ≥ 1;
-    ``FieldOp``/``TemplateOp`` ``position`` ≥ 0). The Rust *serde* round-trip
-    still accepts any integer (the bound lives in the schema document, not in
+(b) **Advertised-schema direction** — fields Python enforces (``ge=``) whose
+    Rust ``schemars`` schema (what MCP ``tools/list`` advertises) must also
+    declare the ``minimum`` (``FieldMetadataInput.size`` ≥ 1;
+    ``FieldOp``/``TemplateOp`` ``position`` ≥ 0), or a client reading that
+    schema gets inaccurate type info. The Rust *serde* round-trip still accepts
+    any integer (the bound lives in the schema document, not in
     deserialization) — the contract is the advertised schema, asserted here.
 """
 

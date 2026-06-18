@@ -12,7 +12,6 @@ short version; these docs go deeper, one concern each.
 | [`embedding-and-recognition.md`](embedding-and-recognition.md) | The embedding service and its backends; OCR/recognition. |
 | [`indexing-and-search.md`](indexing-and-search.md) | Vector-index consistency, the derived-text sidecar, search fusion (RRF). |
 | [`tools.md`](tools.md) | The 26 MCP tools: where they live and the behaviours to preserve. |
-| [`conventions.md`](conventions.md) | Code style, the schema house style, performance rules, logging. |
 | [`decisions.md`](decisions.md) | The "why" behind non-obvious design choices, and the alternatives rejected. |
 | [`build-bazel.md`](build-bazel.md) | The Bazel build graph, the two lanes, caching, the locks. |
 

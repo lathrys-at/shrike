@@ -6,15 +6,14 @@ launchers keep working now that ``server`` is a package; ``python -m shrike.serv
 is served by ``__main__`` (which imports from ``shrike.server.server`` directly).
 
 The re-export is LAZY (module ``__getattr__``, PEP 562) rather than an eager
-``from shrike.server.server import main`` (#732): ``main`` resolves on first access
-instead of at package-import time. The eager form bound ``main`` while
-``server/__init__.py`` was still executing, which is fragile under the shared-process
+``from shrike.server.server import main``: ``main`` resolves on first access
+instead of at package-import time. The eager form binds ``main`` while
+``server/__init__.py`` is still executing, which is fragile under the shared-process
 test runner (xdist) — if the package object is observed mid-initialization (a
 partially-imported ``shrike.server`` in ``sys.modules``), ``shrike.server.main`` is
 intermittently absent, and ``mock.patch("shrike.server.main", ...)`` then fails with
-``AttributeError: module 'shrike.server' ... does not have the attribute 'main'``
-(the #730 reorg made ``server`` a package and introduced this; surfaced by CI under
-xdist). Resolving on access sidesteps any import-order/partial-module window.
+``AttributeError: module 'shrike.server' ... does not have the attribute 'main'``.
+Resolving on access sidesteps any import-order/partial-module window.
 """
 
 from __future__ import annotations

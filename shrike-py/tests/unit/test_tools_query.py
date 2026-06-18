@@ -1,4 +1,4 @@
-"""Tool-layer tests for collection_query (#97). Kernel-harness port (#355)."""
+"""Tool-layer tests for collection_query."""
 
 from __future__ import annotations
 

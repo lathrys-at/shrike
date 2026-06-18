@@ -1,4 +1,4 @@
-"""Unit tests for the server's transport-security helpers (audit 1.1 / 1.2)."""
+"""Unit tests for the server's transport-security helpers."""
 
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def test_extra_allowed_host_extends_loopback_list() -> None:
 def test_loopback_bind_host_folded_into_allow_list(
     host: str, expected_host: str, expected_origin: str
 ) -> None:
-    # #595: is_loopback accepts ALL of 127/8, so main() accepts a bind like
+    # is_loopback accepts ALL of 127/8, so main() accepts a bind like
     # --host 127.0.0.2 with no --allow-remote. The guard must therefore answer
     # that bind's own Host header rather than 421 every request (self-brick).
     settings = _build_transport_security(host)
@@ -105,8 +105,7 @@ def test_loopback_bind_host_folded_into_allow_list(
 
 
 def test_non_127_0_0_1_loopback_bind_is_reachable() -> None:
-    # The S1-1 repro, INVERTED to assert the CORRECT behavior: a legitimate client
-    # to a 127.0.0.2 bind must validate (was False → 421 before #595). 127.0.0.1
+    # A legitimate client to a 127.0.0.2 bind must validate. 127.0.0.1
     # stays valid too (the fixed loopback literals are not dropped).
     settings = _build_transport_security("127.0.0.2")
     mw = TransportSecurityMiddleware(settings)
@@ -121,14 +120,14 @@ def test_no_dns_rebinding_protection_disables_guard_on_any_bind() -> None:
     assert _build_transport_security("0.0.0.0", disable=True) is None
 
 
-# -- #605: --no-dns-rebinding-protection must reach /mcp, not just the custom routes --
+# -- --no-dns-rebinding-protection must reach /mcp, not just the custom routes --
 
 
 def test_disabled_guard_is_honored_on_mcp_endpoint_loopback() -> None:
-    # #605: with the guard disabled on a loopback bind, _build_transport_security
+    # With the guard disabled on a loopback bind, _build_transport_security
     # returns None — and FastMCP would SILENTLY re-enable DNS-rebinding protection
     # on /mcp for 127.0.0.1 when handed None (mcp fastmcp/server.py auto-enables for
-    # 127.0.0.1/localhost/::1). The custom routes honor the off-state but /mcp didn't.
+    # 127.0.0.1/localhost/::1). The custom routes honor the off-state; /mcp must too.
     # create_mcp must translate None into explicit protection-off so /mcp obeys the flag.
     security = _build_transport_security("127.0.0.1", disable=True)
     assert security is None
@@ -222,7 +221,7 @@ def test_is_loopback_ipv4_mapped_delegates_to_stdlib() -> None:
     assert _is_loopback(mapped) is ipaddress.ip_address(mapped).is_loopback
 
 
-# -- _server_is_purely_local (#164): gates the store_media server-local `path` --
+# -- _server_is_purely_local: gates the store_media server-local `path` --
 
 
 def _purely_local(**overrides) -> bool:
@@ -257,7 +256,7 @@ def test_any_remote_exposure_signal_disables_server_paths(overrides) -> None:
     assert _purely_local(**overrides) is False
 
 
-# -- _validate_media_path_root (#170): startup validation of --media-path-root --
+# -- _validate_media_path_root: startup validation of --media-path-root --
 
 
 def test_media_path_root_valid_dir_returns_realpath(tmp_path) -> None:

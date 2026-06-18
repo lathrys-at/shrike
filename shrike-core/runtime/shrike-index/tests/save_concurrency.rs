@@ -1,4 +1,4 @@
-//! #588 concurrency regression guards: the `save`-vs-`search`/`add`/`remove`
+//! Concurrency regression guards: the `save`-vs-`search`/`add`/`remove`
 //! safety the fix relies on is INFERRED (usearch 2.25.3 documents concurrent
 //! search+update but is silent on save-vs-search and save-vs-mutate), so these
 //! pin the load-bearing properties directly under contention:
@@ -8,10 +8,7 @@
 //!     guard), and
 //! (c) two concurrent saves to the same dir don't corrupt the files.
 //!
-//! Cases (a)/(b) are the review's pre-written probes (kept as regression tests
-//! after running green on this branch); (c) closes the two-savers race.
-//!
-//! IMPORTANT (a flaw the reviewer hit and these avoid): usearch is an
+//! IMPORTANT (a flaw these avoid): usearch is an
 //! APPROXIMATE index — a self-query legitimately misses its own key for a few
 //! permil of keys even with ZERO concurrency. So (a) asserts STRUCTURAL
 //! validity (non-empty, keys in range, finite distances), never exact recall.
@@ -66,7 +63,7 @@ fn tmpdir(tag: &str) -> std::path::PathBuf {
 /// NOTE: top-1 == self is NOT asserted — usearch is approximate, so a
 /// self-query legitimately misses its own key for a few permil of keys even
 /// with zero concurrency. Asserting exact recall would flake independent of the
-/// save (the flaw the reviewer hit).
+/// save.
 #[test]
 fn searches_during_repeated_saves_stay_correct_and_never_crash() {
     let ndim = 96usize;

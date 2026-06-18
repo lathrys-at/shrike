@@ -4,8 +4,8 @@ package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
-# Native vector index engine (#273) over the usearch Rust crate — same C++
-# core as usearch-python, pinned to the same version (the #272 verdict).
+# Native vector index engine over the usearch Rust crate — same C++
+# core as usearch-python, pinned to the same version.
 # Pure Rust — NO pyo3 (enforced by //shrike-core:layering_check).
 rust_library(
     name = "shrike_index",
@@ -25,7 +25,7 @@ rust_test(
     crate = ":shrike_index",
 )
 
-# The #272 cross-binding compat check: gated on SHRIKE_USEARCH_COMPAT_DIR
+# The cross-binding compat check: gated on SHRIKE_USEARCH_COMPAT_DIR
 # (a Python-written index to load); skips silently when unset.
 rust_test(
     name = "cross_binding_test",

@@ -1,14 +1,14 @@
-"""The search-quality metric engine (#559).
+"""The search-quality metric engine.
 
 A PURE function of ``(returned_matches_with_provenance, graded_gold)`` — no
 server, no model, no I/O. That purity is the load-bearing property: the same
-engine that pins the integration suite's pass/fail re-runs unchanged as #234's
+engine that pins the integration suite's pass/fail re-runs unchanged as a
 parameter sweep (over ``threshold`` / ``ACTIVATION_MARGIN`` / weights /
 ``RRF_K``), because none of those knobs change the *shape* of a query result,
 only which cards a server returns — and this module only ever consumes a
 returned-vs-gold pair.
 
-Grade scale (reconciled, #559):
+Grade scale (reconciled):
   0 = planted distractor (drives precision / false positives)
   1 = marginal (counts in nDCG only, never in the recall denominator)
   2 = relevant
@@ -31,7 +31,7 @@ from enum import StrEnum
 
 class FailureKind(StrEnum):
     """How a query's result diverged from its gold — recall and precision
-    regress independently, so the artifact must say which moved (#559)."""
+    regress independently, so the artifact must say which moved."""
 
     RECALL_MISS = "recall_miss"  # a grade>=2 gold card not in top-k
     PRECISION_FP = "precision_fp"  # a grade-0 card returned (incl. closed-world)
@@ -125,7 +125,7 @@ class GradedGold:
 
 # The canonical RRF constants (mirror shrike_kernel::fusion / search_fusion.py).
 # Kept here so the golden-order recompute is a pure, dependency-free check the
-# #234 sweep can vary; the parity suite is what pins these against the kernel.
+# sweep can vary; the parity suite is what pins these against the kernel.
 RRF_K = 60
 RRF_WEIGHTS: dict[str, float] = {
     "text": 1.0,

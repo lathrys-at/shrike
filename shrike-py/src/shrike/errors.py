@@ -21,7 +21,7 @@ class ServerError(ShrikeError):
 class CollectionBusyError(ShrikeError):
     """The collection couldn't be acquired — another process holds it.
 
-    Raised under cooperative locking (#64/#65) when the server can't re-open the
+    Raised under cooperative locking when the server can't re-open the
     collection because something else (typically Anki desktop) has it open. A
     distinct, expected outcome — catch it to retry rather than treating it as a
     generic ``ServerError``.

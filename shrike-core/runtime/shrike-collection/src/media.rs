@@ -1,8 +1,8 @@
-//! Media + maintenance (#278 series, step 5a) — the LOCAL halves of the #70
-//! media tools (store-from-bytes, fetch/list/delete, media check) and the #89
+//! Media + maintenance — the LOCAL halves of the
+//! media tools (store-from-bytes, fetch/list/delete, media check) and
 //! collection_prune, ported from CollectionWrapper. The URL-fetch path (the
 //! SSRF guard + IP pinning) is deliberately NOT here — it is trust-boundary
-//! code and lands as its own step (5b) under the security-review gate.
+//! code and lands as its own step under the security-review gate.
 
 use serde_json::Value;
 use shrike_error::NativeResult;
@@ -15,7 +15,7 @@ use shrike_schemas::{
 use crate::{embed_text, CollectionCore};
 
 // The basename path-traversal guard + the extension<->MIME map live in the
-// inbound-media crate (`shrike-media`, #711) — the one home both the store
+// inbound-media crate (`shrike-media`) — the one home both the store
 // write tail (here) and the kernel's fetch/decode path read. Imported, not
 // re-defined.
 use shrike_media::{guess_mime, mime_extension, safe_media_name};
@@ -117,7 +117,7 @@ impl CollectionCore {
         )
     }
 
-    /// The server-local `path` source (zero-copy intent; the #164/#170
+    /// The server-local `path` source (zero-copy intent; the path-safety
     /// gates): honored only with configured roots, after `..`/symlink
     /// resolution, contained in one of them.
     fn store_path_item(
@@ -151,7 +151,7 @@ impl CollectionCore {
         self.write_media_bytes(index, base, &data, None)
     }
 
-    /// The write half of the kernel's re-homed store (#391): byte sources
+    /// The write half of the kernel's re-homed store: byte sources
     /// were fetched/decoded off-actor on the kernel's blocking pool; `path`
     /// items run their gates here (containment is collection policy). One
     /// collection job per batch; per-item errors never sink it.
@@ -368,7 +368,7 @@ impl CollectionCore {
             .collect())
     }
 
-    /// `_prune` (#89): the four cleanups, preview-by-default at the tool
+    /// `_prune`: the four cleanups, preview-by-default at the tool
     /// layer. Returns the typed response plus the removed-note-id list out of
     /// band (kernel-internal — the host's index maintenance, never the wire).
     ///
@@ -520,7 +520,7 @@ mod tests {
         assert_eq!(safe_media_name(".."), "");
         assert_eq!(safe_media_name("dir/"), "dir");
         assert_eq!(safe_media_name("plain.png"), "plain.png");
-        // Whitespace-only (or whitespace-wrapped dots) is no name at all (#382).
+        // Whitespace-only (or whitespace-wrapped dots) is no name at all.
         assert_eq!(safe_media_name("   "), "");
         assert_eq!(safe_media_name(" .. "), "");
         assert_eq!(safe_media_name("a/  "), "");

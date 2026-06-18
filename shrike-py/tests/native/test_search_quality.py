@@ -1,11 +1,11 @@
-"""Deterministic, CI-stable search-quality classes (#559, PR1).
+"""Deterministic, CI-stable search-quality classes.
 
 These run IN CI on every PR: a stub embedder (controlled vectors, no model, no
 network) drives the REAL ``search_notes`` MCP action in-process, so the RRF
 fusion arithmetic, the exact-override tier, the activation gate, and the
 graceful-degradation paths are pinned without flake. They are the permanent
 regression guard for the fusion logic; the heavy real-model recall/precision
-numbers live in the manual suite (PR2).
+numbers live in the manual suite.
 
 Everything is asserted through the response provenance
 (``provenance[].signal`` / ``substring`` / ``fuzzy`` / ``score`` /
@@ -114,7 +114,7 @@ class TestSignalDisagreement:
         asyncio.run(flow())
 
     def test_fuzzy_weight_below_text_is_the_mitigation(self) -> None:
-        # The control (methodology #559): fuzzy is the ONLY signal weighted below
+        # The control: fuzzy is the ONLY signal weighted below
         # the rest (0.5 vs 1.0) — a near-miss is weaker evidence than a literal
         # or semantic hit. Two pure-arithmetic facts over the canonical
         # constants, no server:
@@ -212,7 +212,7 @@ class TestExactOverride:
                 matches = await ip.matches(query, limit=10, threshold=0.0)
                 got = _ids(matches)
 
-                # CHARACTERIZATION (#559 design-tension finding): the grade-0
+                # CHARACTERIZATION (a design-tension finding): the grade-0
                 # literal out-ranks the grade-3 semantic answer because the exact
                 # tier is blind to relevance. We PIN this (flag-on-change), not
                 # bless it — RRF's exact tier is "wrong" exactly here.
@@ -243,7 +243,7 @@ class TestExactOverride:
 
 
 class TestActivationGate:
-    """The #201b activation gate, end-to-end on the REAL calibration path: with
+    """The activation gate, end-to-end on the REAL calibration path: with
     >= CALIB_MIN (30) image-bearing notes the kernel calibrates the image
     modality's typical best-match (``mean + ACTIVATION_MARGIN·std``), so a
     non-text modality only joins the fusion when its best match clears that
@@ -254,7 +254,7 @@ class TestActivationGate:
     The filler images live on axes 5..14 and the target on axis 0, so the
     calibrated floor sits well above an orthogonal query's ~0 best image
     cosine and well below an on-axis query's 1.0 — robust to the margin, the
-    knife-edge characterization noted in #559 but here kept clearly on/off."""
+    knife-edge characterization here kept clearly on/off."""
 
     @staticmethod
     async def _build(tmp_path, *, target_axis: int = 0):
@@ -363,7 +363,7 @@ class TestActivationGate:
 
 
 class TestGracefulDegradation:
-    """The response ANNOUNCES degradation (the #181 two-tier contract + the
+    """The response ANNOUNCES degradation (the two-tier contract + the
     no-embedding / sub-trigram paths): a degraded search must surface its
     incompleteness through ``message`` / ``completeness`` / a ``score is None``,
     never silently return a thinner result that looks complete. The metric

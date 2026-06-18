@@ -70,8 +70,8 @@ class TestListNotes:
     async def test_meta_fields_mode(self, wrapper, basic_note):
         result = await wrapper.list_notes(ids=[basic_note], fields_mode="meta")
         note = result["notes"][0]
-        # Meta mode: no content — an explicit null on the raw wire since the
-        # #391 to_wire retirement, so .get() is the convention-stable form.
+        # Meta mode: no content — an explicit null on the raw wire, so .get()
+        # is the convention-stable form.
         assert note.get("content") is None
         assert "id" in note
         assert "note_type" in note

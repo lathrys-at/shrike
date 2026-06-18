@@ -1,10 +1,8 @@
-"""Note-type-surface behaviors (#278 step 4; cross-core parity retired at the cutover).
+"""Note-type-surface behaviors.
 
-The native note-type ops against the Python `shrike.note_types` results: the
-cross-core case runs the same sequence through the pip core in a subprocess on
-a separate collection file and compares the result dicts (ids stripped — they
-are creation timestamps). The data-safety properties (note data surviving
-renames/moves) are pinned natively, where the note contents can be read back.
+The native note-type ops against the Python `shrike.note_types` results. The
+data-safety properties (note data surviving renames/moves) are pinned natively,
+where the note contents can be read back.
 """
 
 from __future__ import annotations
@@ -45,9 +43,8 @@ def _no_ids(items: list) -> list:
 
 
 def test_note_type_surface_end_to_end(native_core):
-    # The cross-core comparison retired with the cutover (the wrapper IS the
-    # native core now; the per-case behavior suite lives in tests/unit). This
-    # keeps the end-to-end flow + result shapes pinned at the binding level.
+    # The per-case behavior suite lives in tests/unit; this keeps the
+    # end-to-end flow + result shapes pinned at the binding level.
     native_create = json.loads(native_core.upsert_note_types(json.dumps(CREATE_BATCH)))
     assert native_create[0]["status"] == "created"
     assert native_create[1]["status"] == "error"
@@ -100,9 +97,9 @@ def test_note_type_surface_end_to_end(native_core):
 
 
 def test_positional_replace_data_safety(native_core):
-    """The #99 regression class, end to end through the binding: a positional
-    rename/append keeps note data; a move is refused with the identity-tool
-    pointer; identity ops migrate data by name."""
+    """The positional-replace regression class, end to end through the binding:
+    a positional rename/append keeps note data; a move is refused with the
+    identity-tool pointer; identity ops migrate data by name."""
     native_core.upsert_note_types(
         json.dumps(
             [

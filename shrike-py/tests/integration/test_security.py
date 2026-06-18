@@ -27,14 +27,14 @@ def _base_url(server: ServerInfo) -> str:
 # destructive POSTs is non-destructive (the server survives — asserted below).
 _CUSTOM_ROUTES = [
     ("GET", "/status"),
-    ("GET", "/media/probe.png"),  # added in #70
+    ("GET", "/media/probe.png"),
     ("POST", "/shutdown"),
     ("POST", "/index/rebuild"),
     ("POST", "/index/save"),
     ("POST", "/embedding/start"),
     ("POST", "/embedding/stop"),
     ("POST", "/reload"),
-    ("POST", "/actions/collection_info"),  # the actions-over-HTTP edge (#505)
+    ("POST", "/actions/collection_info"),  # the actions-over-HTTP edge
 ]
 
 
@@ -173,7 +173,7 @@ class TestEmbeddingStartInputRobustness:
 
 
 class TestActionsErrorEnvelope:
-    """The actions-over-HTTP edge (#505) returns ONE error envelope, and it must
+    """The actions-over-HTTP edge returns ONE error envelope, and it must
     not leak server internals on any error code. The envelope is
     `{"code": <taxonomy>, "message": <non-leaking>}`; the security-critical case
     is the 500, whose message is FIXED — the real exception + traceback go only

@@ -1,4 +1,4 @@
-//! The #597 (S14b-1) post-shutdown fast-fail gate.
+//! The post-shutdown fast-fail gate.
 //!
 //! A SEPARATE test binary on purpose: the runtime seam (`init_runtime`) is
 //! process-global AND, after `shrike_runtime_shutdown`, terminally undriven —

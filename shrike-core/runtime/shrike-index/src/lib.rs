@@ -1,10 +1,9 @@
-//! Native vector index engine (#273) over the usearch Rust crate.
+//! Native vector index engine over the usearch Rust crate.
 //!
-//! Phase 2a (#272) first: the `spike` test module below answers the epic's
-//! biggest unknown — whether the official usearch Rust crate (same native C++
-//! core as usearch-python, pinned to the same 2.25.3) satisfies Shrike's exact
-//! index contract, including on-disk compatibility with files written by the
-//! Python binding. The Phase-2b engine is built on the verdict.
+//! The `spike` test module below answers the biggest unknown — whether the
+//! official usearch Rust crate (same native C++ core as usearch-python, pinned
+//! to the same 2.25.3) satisfies Shrike's exact index contract, including
+//! on-disk compatibility with files written by the Python binding.
 
 #![deny(missing_docs)]
 #![deny(
@@ -43,10 +42,10 @@ pub fn new_index(ndim: usize) -> NativeResult<Index> {
 
 #[cfg(test)]
 mod spike {
-    //! The #272 checklist, as executable evidence. Cross-binding (Python ↔ Rust)
-    //! on-disk compatibility is exercised end-to-end by the Phase-2b facade
-    //! tests (a Python-written index loaded through the native engine); here we
-    //! pin the crate-side semantics the engine relies on.
+    //! The crate-semantics checklist, as executable evidence. Cross-binding
+    //! (Python ↔ Rust) on-disk compatibility is exercised end-to-end by the
+    //! facade tests (a Python-written index loaded through the native engine);
+    //! here we pin the crate-side semantics the engine relies on.
 
     use super::*;
 

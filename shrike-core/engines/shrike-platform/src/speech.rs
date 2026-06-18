@@ -1,4 +1,4 @@
-//! The macOS SpeechAnalyzer ASR glue (#410): a thin `extern "C"` shim over the
+//! The macOS SpeechAnalyzer ASR glue: a thin `extern "C"` shim over the
 //! Swift glue (`swift/Transcribe.swift`), same C-ABI pattern as the OCR half.
 //! GLUE ONLY: returns raw JSON strings; `shrike-engine::apple` parses them.
 

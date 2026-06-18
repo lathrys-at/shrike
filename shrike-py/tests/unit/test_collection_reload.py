@@ -1,4 +1,4 @@
-"""Collection-layer tests for reopen (#79): close + re-open the handle.
+"""Collection-layer tests for reopen: close + re-open the handle.
 
 Exercises CollectionWrapper.reopen and the run-at-execution-time reading of
 self.col that makes a post-reopen op see the new handle.
@@ -26,9 +26,9 @@ def _add(wrapper, front, back="x"):
 
 class TestReopen:
     async def test_swaps_handle(self, wrapper):
-        # Since the cutover the wrapper keeps ONE native core whose reopen()
-        # swaps the underlying collection handle in place — pin the observable
-        # contract instead: ops keep working and the watermark stays readable.
+        # The wrapper keeps ONE native core whose reopen() swaps the underlying
+        # collection handle in place — pin the observable contract: ops keep
+        # working and the watermark stays readable.
         before = await wrapper.col_mod()
         await wrapper.reopen()
         assert await wrapper.col_mod() >= before  # a fresh Collection object

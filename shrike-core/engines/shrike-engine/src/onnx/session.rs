@@ -1,4 +1,4 @@
-//! Shared ort plumbing for the onnx engines (#270): runtime init, session
+//! Shared ort plumbing for the onnx engines: runtime init, session
 //! building with execution-provider resolution, the small input/tensor
 //! helpers, and L2 normalization. Both the text engine ([`super::text`]) and
 //! the CLIP dual-encoder ([`super::clip`]) build on these.
@@ -30,7 +30,7 @@ fn map_provider(name: &str) -> Option<ort::ep::ExecutionProviderDispatch> {
     use ort::ep;
     // onnxruntime-python provider names → ort EPs (the names the facade passes
     // are already resolved against onnxruntime.get_available_providers()).
-    // The GPU EPs are feature-gated (#384, default-on): a slim build with the
+    // The GPU EPs are feature-gated: a slim build with the
     // feature off degrades that name to None → CPU, which is always last.
     match name {
         "CPUExecutionProvider" => Some(ep::CPU::default().build()),

@@ -1,4 +1,4 @@
-"""tools/llama-server.lock and MODULE.bazel must pin the same llama.cpp (#566).
+"""tools/llama-server.lock and MODULE.bazel must pin the same llama.cpp.
 
 The de-dup tripwire (tools/check_llama_lock.py) also runs as a Bazel py_test
 (//tools:llama_lock_in_sync_test); this is its pip-lane twin so a drifted bump fails
@@ -16,9 +16,9 @@ from pathlib import Path
 def _repo_root() -> Path:
     """The repository root, where tools/ + MODULE.bazel live.
 
-    The harness moved into shrike-py/ (#731), so parents[2] is now shrike-py/, not
-    the repo root — tools/check_llama_lock.py + MODULE.bazel + the lock stayed at the
-    root. Resolve via git (path-independent), falling back to walking up to the
+    The harness lives in shrike-py/, so parents[2] is shrike-py/, not the repo
+    root — tools/check_llama_lock.py + MODULE.bazel + the lock are at the root.
+    Resolve via git (path-independent), falling back to walking up to the
     ancestor that carries MODULE.bazel.
     """
     here = Path(__file__).resolve()

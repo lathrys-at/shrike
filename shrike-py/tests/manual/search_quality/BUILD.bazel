@@ -3,7 +3,7 @@ load("@shrike_pip//:requirements.bzl", "requirement")
 
 package(default_testonly = True)
 
-# The shared search-quality support (#559): the pure metric engine + the
+# The shared search-quality support: the pure metric engine + the
 # manifest loader + the Commons resolve→pin→cache module (the manual corpus's
 # image sourcing). Native-free (no shrike_native, no harness) so the unit suite
 # can depend on the metric engine; ``commons`` needs ``httpx`` (the Commons API)
@@ -32,7 +32,7 @@ py_library(
     deps = [requirement("httpx")],
 )
 
-# The in-process harness driver + the real-model run engine (#559 PR2b): a real
+# The in-process harness driver + the real-model run engine: a real
 # Harness over a throwaway collection driving the REAL search_notes action.
 # Needs the native extension and the harness, so it's split off the native-free
 # base above. ``runner`` also imports ``tests.integration.model_cache`` (the
@@ -56,7 +56,7 @@ py_library(
     ],
 )
 
-# Source files for the //shrike-py:sdist source distribution (#245).
+# Source files for the //shrike-py:sdist source distribution.
 filegroup(
     name = "dist_files",
     testonly = False,

@@ -1,8 +1,8 @@
-"""#580 cross-space FLOOR-ADMISSION — validation harness.
+"""Cross-space FLOOR-ADMISSION — validation harness.
 
 Builds the REAL 2-space (MiniLM text + CLIP image) graded corpus ONCE, then
 sweeps the production baseline against the floor-admission prototype modes on
-the FOUR #580 axes (single-image-space case — the production-valid config; the
+the FOUR axes (single-image-space case — the production-valid config; the
 N>=2 multiplicity case is a kernel unit test + a config assertion, not a corpus
 axis):
 
@@ -19,7 +19,7 @@ axis):
       the off-topic one (no image#clip). The floor is the SOLE discriminator
       now that the relative gate is dropped — this is the load-bearing test.
   2.  modality_gap recall (no regression): R@1/@5/@k, MRR, nDCG@10.
-  3.  over-return leak (#576, must stay closed): 0 image#clip on the ∅-gold
+  3.  over-return leak (must stay closed): 0 image#clip on the ∅-gold
       query.
 
 Run (needs the real models + the Commons corpus, like the manual suite):
@@ -51,7 +51,7 @@ MODALITY_GAP = "modality_gap"
 SPURIOUS = "spurious_filename"
 
 # The 7 filename-collision cards (manifest ids) — their <img src> filename word
-# is in the query, so the relative gate stays shut on the pre-#580 baseline.
+# is in the query, so the relative gate stays shut on the relative-gate baseline.
 COLLISION_IDS = {
     1: "heart",
     2: "skeleton",
@@ -62,8 +62,8 @@ COLLISION_IDS = {
     15: "great_wall",
 }
 
-# The modes to sweep: the pre-#580 production gate (now eval-only) vs the #580
-# floor-admission family. `FloorAdmit` is the PRODUCTION default since #580.
+# The modes to sweep: the relative production gate (eval-only) vs the
+# floor-admission family. `FloorAdmit` is the PRODUCTION default.
 # (FloorAdmitBudget B=1.0 is included to show N=1 — the production-valid single-
 # image-space case — is unaffected by the budget; the budget only ever bites at
 # N>=2, which the single-image-space config error makes impossible.)
@@ -148,7 +148,7 @@ def _spurious_axis(returns: dict, manifest) -> list:
     NOTE the precision metric is ORDERING, not provenance-presence: the image
     activation signal is SPACE-LEVEL (once the floor opens, the WHOLE image
     ranking enters as one `image#clip` signal — so both senses carry the
-    provenance whenever either does; this is the established #201b behaviour, NOT
+    provenance whenever either does; this is the established behaviour, NOT
     a floor-admission change). The discrimination that matters is whether the
     on-topic sense RANKS ABOVE the off-topic one (cosine separation) and whether
     the on-topic card wins rank-1 overall."""

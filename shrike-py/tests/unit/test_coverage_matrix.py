@@ -1,4 +1,4 @@
-"""Unit coverage for the cross-modal coverage matrix (#235).
+"""Unit coverage for the cross-modal coverage matrix.
 
 The honest query-modality × target-modality matrix the harness derives for
 ``/status``: each cell is ``native`` (one live space embeds both modalities),
@@ -102,7 +102,7 @@ def test_matrix_validates_against_schema() -> None:
     assert model.text.audio == CoverageCell.VIA_DERIVED_TEXT
 
 
-# ── Per-space `native` cell (#229/#235 multi-space) ──────────────────────────
+# ── Per-space `native` cell (multi-space) ────────────────────────────────────
 
 
 def test_dedicated_text_plus_separate_clip_text_image_native_via_clip() -> None:
@@ -147,7 +147,7 @@ def test_two_disjoint_spaces_cross_via_derived_text_with_ocr() -> None:
 
 def test_per_space_reduces_to_union_for_a_single_space() -> None:
     # N=1 byte-identical: passing one space is identical to the union fallback
-    # (spaces=None) the pre-#235 tests use.
+    # (spaces=None).
     one = frozenset({"text", "image"})
     assert _coverage_matrix(one, frozenset({"ocr"}), [one]) == _coverage_matrix(
         one, frozenset({"ocr"})

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bazel workspace status — emit STABLE_VERSION from the git tag (#245), so the
+# Bazel workspace status — emit STABLE_VERSION from the git tag, so the
 # Bazel py_wheel stamps the same tag-derived version hatch-vcs produces on the pip
 # path. On a clean tag this is exactly what setuptools-scm emits, so the artifact ↔
 # tag guarantee holds and the parity gate matches the hatchling build:

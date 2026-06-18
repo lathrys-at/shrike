@@ -9,12 +9,12 @@
 # Readable, non-truncated test failures.
 test --test_output=errors
 
-# Stamp the build with the tag-derived version (STABLE_VERSION) so py_wheel (#245)
+# Stamp the build with the tag-derived version (STABLE_VERSION) so py_wheel
 # can embed it. Cheap (a `git describe`); only stamped outputs (the wheel) rebuild
 # on a version change, since it lands in stable-status.txt.
 build --workspace_status_command=tools/workspace_status.sh
 
-# `bazel coverage` (#262) — measures the Python package, spawned server
+# `bazel coverage` — measures the Python package, spawned server
 # subprocess included (each py_binary's rules_python bootstrap self-instruments
 # off the inherited COVERAGE_DIR; the integration conftest gives each spawned
 # server its own COVERAGE_DIR subdirectory so the fixed-name pylcov.dat reports

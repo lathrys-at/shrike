@@ -1,4 +1,4 @@
-"""The collection/profile registry (#66).
+"""The collection/profile registry.
 
 Shrike points at one collection via ``--collection`` / ``SHRIKE_COLLECTION``.
 Anki's own answer to "I have several collections" is *profiles*: separate,
@@ -7,20 +7,20 @@ isolated collections under Anki's base directory. This module is Shrike's
 ``.anki2`` path qualifies, not only ones under Anki's base dir — persisted in
 ``config.yml`` under a ``profiles:`` section.
 
-Two deliberate scope lines (the multi-collection milestone #15 sequencing):
+Two deliberate scope lines:
 
 - **The registry name is a friendly handle only.** The per-collection index
-  namespace (#67) keys on a stable function of the collection *file path*,
-  never the profile name — so this module never touches index cache paths.
+  namespace keys on a stable function of the collection *file path*, never the
+  profile name — so this module never touches index cache paths.
 - **An "active default" here is a config concept, not a server runtime
-  switch.** It records which profile the per-call selector (#68's routing
-  capstone) resolves to when no selector is passed. This module persists it;
-  it does not route, open collections, or apply per-profile settings.
+  switch.** It records which profile the per-call selector resolves to when no
+  selector is passed. This module persists it; it does not route, open
+  collections, or apply per-profile settings.
 
 The optional per-profile ``embedding`` / ``cache_dir`` fields round-trip
 through config but are **not resolved here** — applying a per-profile embedding
-config is routing (#68) and resolving a per-profile cache dir is namespacing
-(#67). They are modeled and stored, and that is all.
+config is routing and resolving a per-profile cache dir is namespacing. They are
+modeled and stored, and that is all.
 
 This is distinct from the capability/build :mod:`shrike.harness.profiles` module (which
 resolves ``embedders:``/``recognizers:`` against the compiled build). They
@@ -50,9 +50,8 @@ class CollectionProfile:
 
     ``embedding`` and ``cache_dir`` are optional per-profile overrides that
     round-trip through config but are deliberately **not resolved** by this
-    module (see the module docstring) — they are consumed by #67/#68. ``name``
-    is a handle for humans and the per-call selector; index identity never
-    derives from it.
+    module (see the module docstring). ``name`` is a handle for humans and the
+    per-call selector; index identity never derives from it.
     """
 
     name: str
@@ -87,8 +86,8 @@ class Registry:
     def resolve_default(self) -> CollectionProfile | None:
         """The active-default profile, or None when no default is set.
 
-        This is the config-level fallback the per-call selector (#68) resolves
-        to when a call passes no explicit selector. It does *not* route.
+        This is the config-level fallback the per-call selector resolves to when
+        a call passes no explicit selector. It does *not* route.
         """
         if self.default is None:
             return None
@@ -146,7 +145,7 @@ class Registry:
         ``embedding``, ``cache_dir`` — so a rename is purely a relabel. The
         active default follows the rename if it named ``old``. There is **no
         index/cache impact**: index identity keys on the collection *path*, never
-        the profile name (#67), so this is a pure config edit.
+        the profile name, so this is a pure config edit.
         """
         new = new.strip()
         if not new:
@@ -196,8 +195,8 @@ class Registry:
         :class:`RegistryError` if it isn't registered.
 
         This writes the config-level default — the persistent fallback the
-        per-call selector resolves to when no selector is passed (#68). It is
-        not a server runtime switch.
+        per-call selector resolves to when no selector is passed. It is not a
+        server runtime switch.
         """
         profile = self.get(name)
         if profile is None:
@@ -281,7 +280,7 @@ def _normalize_path(path: str) -> str:
 
     Kept deliberately free of any existence check: a registered collection may
     not exist yet (created later) or may live on removable media. The path is
-    the index-identity input (#67), so a stable absolute form matters; whether
-    the file is present is a routing-time concern (#68).
+    the index-identity input, so a stable absolute form matters; whether the
+    file is present is a routing-time concern.
     """
     return os.path.abspath(os.path.expanduser(path))

@@ -59,3 +59,6 @@ shrike-py/tests/manual/search_quality/RESULTS.md
 # into this gitignored scratch cache. Only the verify script + RESULTS.md +
 # ASSETS.md (pinned URLs/attribution) are committed.
 eval/mobileclip/cache/
+
+# Claude Code agent worktrees — transient, created by parallel subagents.
+.claude/worktrees/

@@ -432,18 +432,18 @@ class TestListNotesAdvanced:
             mcp("list_notes", {"deck": "Clamp", "limit": 999})
 
     def test_limit_below_min_rejected(self, mcp):
-        # The floor is 0 now (#685: 0 means "return all"); a negative is rejected.
+        # The floor is 0 (0 means "return all"); a negative is rejected.
         with pytest.raises(RuntimeError, match="greater than or equal to 0"):
             mcp("list_notes", {"deck": "ClampMin", "limit": -5})
 
     def test_limit_zero_accepted(self, mcp):
-        # limit=0 means "return all" (#685) — a valid value, not a bound violation.
+        # limit=0 means "return all" — a valid value, not a bound violation.
         result = mcp("list_notes", {"deck": "ClampZero", "limit": 0})
         assert "notes" in result
 
 
 class TestDerivedLexicalSearch:
-    """Substring + fuzzy lexical search via the real FTS5 derived-text store (#98).
+    """Substring + fuzzy lexical search via the real FTS5 derived-text store.
 
     Runs against the shared no-embedding server: the derived store is independent of the embedder,
     so substring and the `fuzzy` signal work with semantic ranking off. The note is ingested by the
@@ -713,9 +713,9 @@ class TestNoteTypeLifecycle:
         assert "OldName" not in names
 
     def test_field_update_preserves_note_data(self, mcp):
-        # Regression (#76): updating a note type's fields used to blank every
-        # note's content and delete its cards. Rename a field and confirm the
-        # existing note keeps its data under the new field name.
+        # Regression: updating a note type's fields must not blank every note's
+        # content or delete its cards. Rename a field and confirm the existing
+        # note keeps its data under the new field name.
         created = mcp(
             "upsert_note_types",
             {
@@ -750,7 +750,7 @@ class TestNoteTypeLifecycle:
         assert listed["content"] == {"Frente": "Q", "Back": "A"}
 
     def test_field_ops_move_rename_remove(self, mcp):
-        # update_note_type_fields: identity-based ops preserve data (#76).
+        # update_note_type_fields: identity-based ops preserve data.
         mcp(
             "upsert_note_types",
             {
@@ -845,7 +845,7 @@ class TestNoteTypeLifecycle:
         assert "update_note_type_fields" in result["results"][0]["error"]
 
     def test_template_ops_move_rename_remove(self, mcp):
-        # update_note_type_templates: identity-based ops preserve cards (#76).
+        # update_note_type_templates: identity-based ops preserve cards.
         mcp(
             "upsert_note_types",
             {
@@ -940,8 +940,8 @@ class TestNoteTypeLifecycle:
         assert result["results"][0]["status"] == "error"
 
     def test_find_replace_note_types(self, mcp):
-        # findAndReplaceInModels (#76): literal find/replace across a model's
-        # template HTML and CSS, scoped by front/back/css, returning a count.
+        # findAndReplaceInModels: literal find/replace across a model's template
+        # HTML and CSS, scoped by front/back/css, returning a count.
         mcp(
             "upsert_note_types",
             {
@@ -1394,7 +1394,7 @@ class TestMigrateNoteType:
 
 
 class TestCooperativeLocking:
-    """End-to-end cooperative locking on an isolated server (#64)."""
+    """End-to-end cooperative locking on an isolated server."""
 
     def test_status_reports_and_idle_release(self, server_factory):
         from shrike.client import ShrikeClient
@@ -1411,7 +1411,7 @@ class TestCooperativeLocking:
 
         st = client.status()
         assert st.locking == "cooperative"
-        # Boot release may not have landed yet — poll with a short deadline (#250).
+        # Boot release may not have landed yet — poll with a short deadline.
         assert wait_for_release(client, time.time() + 8)
 
         # An MCP op re-acquires the collection.
@@ -1422,8 +1422,8 @@ class TestCooperativeLocking:
         assert wait_for_release(client, time.time() + 8)
 
         # Re-acquire still works after release — including a WRITE through
-        # the kernel ops (the reopen-on-demand is kernel-side since the
-        # review fix; reads alone masked the regression).
+        # the kernel ops (the reopen-on-demand is kernel-side; a read alone
+        # would not exercise it).
         created = client.upsert_notes(
             [
                 {
@@ -1545,8 +1545,7 @@ class TestBatchLimits:
 
 class TestSigtermShutdown:
     """SIGTERM tears down cleanly: uvicorn's handlers drain the server, then
-    the post-serve teardown flushes/closes and releases the lock (found by the
-    post-series review — serve() previously returned with no teardown)."""
+    the post-serve teardown flushes/closes and releases the lock."""
 
     def test_sigterm_drains_and_tears_down(self, server_factory):
         import os

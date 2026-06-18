@@ -1,19 +1,17 @@
 """CollectionWrapper — the async facade over the NATIVE collection core.
 
-Since the #278 cutover every collection operation runs in Rust
-(``shrike_native.CollectionCore``, anki consumed exclusively through its
-protobuf service layer). This module is the Python *harness half*: one
-dedicated worker thread serializing every access, asyncio ergonomics for the
-HTTP host, the cooperative idle-release lifecycle (#64), the busy surface
-(#65), and the response-shape glue the tool layer consumes. There is no
-``anki.Collection`` here — the pip ``anki`` package is a test-only oracle.
+Every collection operation runs in Rust (``shrike_native.CollectionCore``, anki
+consumed exclusively through its protobuf service layer). This module is the
+Python *harness half*: one dedicated worker thread serializing every access,
+asyncio ergonomics for the HTTP host, the cooperative idle-release lifecycle,
+the busy surface, and the response-shape glue the tool layer consumes. There is
+no ``anki.Collection`` here — the pip ``anki`` package is a test-only oracle.
 
-Threading model (unchanged from the pre-cutover wrapper): the native core is
-internally synchronized (anki's Backend mutex), but Shrike still routes every
-op through a single worker thread so operations are *ordered*, the cooperative
-release/reopen lifecycle has one owner, and the event loop never blocks.
-``run``/``run_sync`` expose that thread; ``fn`` now receives the native
-``CollectionCore`` instead of an ``anki.Collection``.
+Threading model: the native core is internally synchronized (anki's Backend
+mutex), but Shrike still routes every op through a single worker thread so
+operations are *ordered*, the cooperative release/reopen lifecycle has one
+owner, and the event loop never blocks. ``run``/``run_sync`` expose that thread;
+``fn`` receives the native ``CollectionCore``.
 """
 
 from __future__ import annotations
@@ -44,7 +42,7 @@ OnDuplicate = Literal["error", "skip", "allow"]
 T = TypeVar("T")
 
 # Default seconds to hold the collection open after the last operation before
-# releasing the lock, in cooperative mode (#64). Near SQLite's conventional
+# releasing the lock, in cooperative mode. Near SQLite's conventional
 # ``busy_timeout``; short because holding blocks launching Anki and re-opening is
 # a cheap local SQLite open.
 DEFAULT_LOCK_HOLD = 5.0
@@ -163,7 +161,7 @@ class CollectionWrapper:
     One dedicated worker thread funnels all collection operations, so
     concurrent callers (event-loop tasks, custom HTTP routes, the startup
     path) are *ordered* rather than racing, and the cooperative idle-release
-    lifecycle (#64) has a single owner. Operations are exposed as ``async``
+    lifecycle has a single owner. Operations are exposed as ``async``
     methods; ``run_sync`` and ``close`` serve the startup/shutdown paths.
     """
 
@@ -186,8 +184,8 @@ class CollectionWrapper:
         self._open_flag = False
         self._release_handle: asyncio.TimerHandle | None = None
         # Standalone mode (tests, library use): the wrapper owns the worker
-        # thread. The server uses `over_kernel` instead (#332 S3d-2), where the
-        # kernel's injected executor is the one serialization domain.
+        # thread. The server uses `over_kernel` instead, where the kernel's
+        # injected executor is the one serialization domain.
         self._kernel: Any | None = None
         self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="shrike-collection"
@@ -207,7 +205,7 @@ class CollectionWrapper:
         cooperative: bool = False,
         hold_seconds: float = DEFAULT_LOCK_HOLD,
     ) -> CollectionWrapper:
-        """The server's mode (#332 S3d-2): wrap the kernel's OWN collection.
+        """The server's mode: wrap the kernel's OWN collection.
 
         ``core`` is the kernel's Arc-shared ``core_handle()`` and every op runs
         as one ``kernel.run_job`` on the kernel's injected executor — the same
@@ -325,7 +323,7 @@ class CollectionWrapper:
             raise RuntimeError("run_sync is unsupported in kernel mode; await run() instead")
         return self._executor.submit(lambda: self._locked(fn)).result()
 
-    # -- cooperative idle-release (#64) --------------------------------------
+    # -- cooperative idle-release --------------------------------------------
 
     def _schedule_release(self, loop: asyncio.AbstractEventLoop) -> None:
         """(Re)arm the idle-release timer; mirrors the index saver's debounce."""
@@ -433,7 +431,7 @@ class CollectionWrapper:
                 dt = datetime.fromisoformat(modified_since)
             except ValueError as e:
                 # Caller-supplied bad input: raise a clean, non-leaky ValueError
-                # the tool layer turns into a ToolInputError (#599), not
+                # the tool layer turns into a ToolInputError, not
                 # fromisoformat's "Invalid isoformat string" leak via the
                 # catch-all "Unhandled error" + traceback.
                 raise ValueError(
@@ -490,10 +488,8 @@ class CollectionWrapper:
         return await self.run(_one)
 
     async def notes_by_id(self, nids: list[int], fields_mode: str) -> dict[int, dict[str, Any]]:
-        """Batch ``note_to_dict`` (#445): ONE collection job for the whole id
-        set — the neighbor assembly previously did one job per candidate (up
-        to ~500 sequential actor round trips per upsert batch). Missing ids
-        are simply absent from the map."""
+        """Batch ``note_to_dict``: ONE collection job for the whole id set.
+        Missing ids are simply absent from the map."""
         if not nids:
             return {}
 
@@ -774,7 +770,7 @@ class CollectionWrapper:
 
         return await self.run(_prune)
 
-    # -- media (#70) ---------------------------------------------------------------
+    # -- media ---------------------------------------------------------------------
 
     async def store_media(
         self,
@@ -786,12 +782,12 @@ class CollectionWrapper:
         """Store a batch of media files; one bad item never sinks the batch.
 
         The STANDALONE wrapper path (tests; the server's store_media action
-        rides the kernel's re-homed op, which owns the concurrent prepare on
-        its blocking pool — #391). Each item is prepared off the worker
-        thread and concurrently (``asyncio.gather`` over ``to_thread`` of the
-        NATIVE fetch/decode); the prepared bytes are then written on the
-        worker thread; server-local ``path`` items go through the native
-        store whole (its containment gates are authoritative).
+        rides the kernel's op, which owns the concurrent prepare on its
+        blocking pool). Each item is prepared off the worker thread and
+        concurrently (``asyncio.gather`` over ``to_thread`` of the NATIVE
+        fetch/decode); the prepared bytes are then written on the worker
+        thread; server-local ``path`` items go through the native store whole
+        (its containment gates are authoritative).
         """
         roots = server_path_roots or []
 
@@ -885,7 +881,7 @@ class CollectionWrapper:
         return await self.run(lambda c: c.note_texts(ids))
 
     async def note_embed_inputs(self, note_ids: Sequence[int]) -> list[NoteEmbedInput]:
-        """Each note's embedding input — normalized text + image filenames (#162)."""
+        """Each note's embedding input — normalized text + image filenames."""
         ids = list(note_ids)
         return await self.run(
             lambda c: [

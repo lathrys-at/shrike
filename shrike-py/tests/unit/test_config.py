@@ -422,7 +422,7 @@ def _clean_embedding_env(monkeypatch) -> None:
 
 
 class TestResolveLocking:
-    """Cooperative-locking resolution (config → env → flag) and arg building (#64)."""
+    """Cooperative-locking resolution (config → env → flag) and arg building."""
 
     def test_defaults_off(self) -> None:
         r = resolve_locking({})
@@ -476,8 +476,8 @@ def test_server_spec_includes_locking_args() -> None:
 
 
 class TestEmbeddingProfileResolution:
-    """The #498 slice-1 wiring: a v2 config drives the legacy param shape
-    through resolve_embedding_profile; legacy configs run the old cascade."""
+    """A v2 config drives the legacy param shape through
+    resolve_embedding_profile; legacy configs run the old cascade."""
 
     V2 = {
         "embedders": [{"modalities": ["text"], "runtime": "onnx", "model": "~/m", "pooling": "cls"}]
@@ -525,7 +525,7 @@ class TestEmbeddingProfileResolution:
 
 
 class TestV2ServerSpec:
-    """A v2 config rides --config to the daemon (#498 slice 2)."""
+    """A v2 config rides --config to the daemon."""
 
     V2 = {
         "collection": "/tmp/c.anki2",
@@ -562,17 +562,15 @@ class TestV2ServerSpec:
 
 
 class TestLegacyConfigSameOutcomeBothPaths:
-    """#610: the SAME legacy config must DEGRADE on BOTH launch paths.
+    """The SAME legacy config must DEGRADE on BOTH launch paths.
 
     A legacy config (no v2 sections) whose synthesized capabilities the build
     can't serve — e.g. ``backend: llama`` (→ a ``remote`` entry needing the
-    managed llama-server) on a build lacking that engine — used to behave
-    oppositely by launch path: the CLI's ``resolve_embedding_profile`` short-
-    circuits ``caps.legacy`` to the no-build-validation ``resolve_embedding``
-    (degrade-with-warning), but the daemon ``--config`` path ran the build-
-    validating ``resolve_profile`` unconditionally → ``ProfileError`` → refuse to
-    boot. Both must degrade now (the legacy cascade is warn-and-map for one
-    release, #523 removes it).
+    managed llama-server) on a build lacking that engine — must degrade on both
+    paths: the CLI's ``resolve_embedding_profile`` short-circuits ``caps.legacy``
+    to the no-build-validation ``resolve_embedding`` (degrade-with-warning), and
+    the daemon ``--config`` path must degrade too rather than running the build-
+    validating ``resolve_profile`` → ``ProfileError`` → refuse to boot.
     """
 
     # backend defaults to "llama" when a model is present → a remote entry that
@@ -583,9 +581,8 @@ class TestLegacyConfigSameOutcomeBothPaths:
     MISMATCHED_BUILD = ("engine-ort",)
 
     def test_migrated_legacy_would_fail_build_validation(self) -> None:
-        # Establishes the divergence existed: the same caps that the legacy path
-        # degrades WOULD raise via resolve_profile on the mismatched build (the
-        # old daemon --config behavior).
+        # The same caps that the legacy path degrades WOULD raise via
+        # resolve_profile on the mismatched build.
         from shrike.harness.profiles import ProfileError, parse_capabilities, resolve_profile
 
         caps = parse_capabilities(dict(self.LEGACY))
@@ -604,9 +601,8 @@ class TestLegacyConfigSameOutcomeBothPaths:
 
     def test_daemon_config_path_degrades_not_refuse_boot(self, monkeypatch, tmp_path) -> None:
         # The daemon --config launch path drives the REAL server.main() far
-        # enough to resolve the config, on the mismatched build. Pre-fix it
-        # called resolve_profile → parser.error → SystemExit (refuse-boot);
-        # post-fix the legacy branch degrades and boot proceeds to building the
+        # enough to resolve the config, on the mismatched build. The legacy
+        # branch must degrade and let boot proceed to building the
         # EmbeddingRuntime — which we intercept with a sentinel to stop main()
         # before it opens a collection / starts asyncio.
         import shrike.server.server as server
@@ -614,7 +610,7 @@ class TestLegacyConfigSameOutcomeBothPaths:
         config_path = tmp_path / "legacy.yml"
         save_config(dict(self.LEGACY), config_path)
 
-        # A build that can't serve the migrated legacy entry: old path refuses.
+        # A build that can't serve the migrated legacy entry.
         monkeypatch.setattr(
             server.shrike_native, "build_features", lambda: set(self.MISMATCHED_BUILD)
         )

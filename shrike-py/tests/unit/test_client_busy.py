@@ -1,12 +1,10 @@
-"""ShrikeClient maps the busy action-error code to CollectionBusyError (#65, #687).
+"""ShrikeClient maps the busy action-error code to CollectionBusyError.
 
-The actions edge (#687) returns a typed ``ActionError{code, message}`` envelope
-with an HTTP status. A ``collection_busy`` code (409) means the collection
-couldn't be acquired (another process holds it under cooperative locking) — the
-op never ran, so the caller can retry. The client maps that ``code`` to a
-distinct, catchable ``CollectionBusyError``. The ``code`` is the authority — this
-replaces the old fragile mid-string ``collection_busy:`` text-sentinel parsing
-of the MCP ``isError`` body (the #598 footgun), now deleted with ``_call``.
+The actions edge returns a typed ``ActionError{code, message}`` envelope with an
+HTTP status. A ``collection_busy`` code (409) means the collection couldn't be
+acquired (another process holds it under cooperative locking) — the op never
+ran, so the caller can retry. The client maps that ``code`` to a distinct,
+catchable ``CollectionBusyError``. The ``code`` is the authority.
 """
 
 from __future__ import annotations

@@ -1,7 +1,3 @@
-# NOTE (#278 cutover): the Python-engine internals these tests used to pin —
-# numpy pooling math, pad-token resolution, feed dtype casting/filtering —
-# retired with the Python engine (they run crate-side now, pinned by the
-# integration model tests). What remains here is the facade's own behaviour.
 """Tests for the shrike.embedding_onnx OnnxBackend facade (fake native engine).
 
 File resolution, fingerprint behaviour, chunking/batch-cap policy, provider
@@ -161,7 +157,7 @@ class TestResolveFiles:
             OnnxBackend(model=str(tmp_path / "nope"))._resolve_files()
 
     def test_resolves_quantized_variant_when_no_plain_model(self, tmp_path: Path) -> None:
-        # A quant-only export (#667): only model_quantized.onnx present, no plain
+        # A quant-only export: only model_quantized.onnx present, no plain
         # model.onnx — the variant-suffix resolver finds it (no fetch-time rename).
         (tmp_path / "model_quantized.onnx").write_bytes(b"x")
         (tmp_path / "tokenizer.json").write_text("{}")
@@ -187,7 +183,7 @@ class TestResolveFiles:
         assert onnx_path.parent.name == "onnx"
 
     def test_external_data_companion_is_left_on_disk(self, tmp_path: Path) -> None:
-        # The external-data invariant (#667): _resolve_files returns the .onnx graph;
+        # The external-data invariant: _resolve_files returns the .onnx graph;
         # the sibling .onnx_data is NOT named in code (onnxruntime loads it relative
         # to the graph dir). The resolver must not trip over the extra file.
         (tmp_path / "model_quantized.onnx").write_bytes(b"x")
@@ -199,11 +195,11 @@ class TestResolveFiles:
         assert (onnx_path.parent / "model_quantized.onnx_data").is_file()
 
     def test_only_external_data_no_graph_stub_raises(self, tmp_path: Path) -> None:
-        # The external-data landmine (#667, joint-review ADV-2): a HALF-materialized
-        # dir holding ONLY the `.onnx_data` companion (a forgotten graph-stub data
-        # dep) must raise FileNotFoundError — the resolver must NEVER mistake the
-        # `.onnx_data` file for a graph (no variant suffix produces a `.onnx_data`
-        # name, so the suffix loop finds nothing and the dir is correctly rejected).
+        # The external-data landmine: a HALF-materialized dir holding ONLY the
+        # `.onnx_data` companion (a forgotten graph-stub data dep) must raise
+        # FileNotFoundError — the resolver must NEVER mistake the `.onnx_data`
+        # file for a graph (no variant suffix produces a `.onnx_data` name, so
+        # the suffix loop finds nothing and the dir is correctly rejected).
         (tmp_path / "model_quantized.onnx_data").write_bytes(b"weights")
         (tmp_path / "tokenizer.json").write_text("{}")
         with pytest.raises(FileNotFoundError, match="model"):
@@ -217,8 +213,8 @@ class TestFingerprint:
     def test_format_and_namespace(self, tmp_path: Path) -> None:
         _model_dir(tmp_path, content=b"hello")  # 5 bytes
         fp = OnnxBackend(model=str(tmp_path), pooling="mean").model_fingerprint()
-        # onnx-rs: is the native engine's vector-space identity, kept verbatim
-        # from the dual-engine bake (#270) — indexes built then load unchanged.
+        # onnx-rs: is the native engine's vector-space identity — indexes built
+        # then load unchanged.
         assert fp == f"onnx-rs:model.onnx:5:pool=mean:textprep={EMBED_TEXT_VERSION}"
         # Namespaced distinctly from a llama fingerprint (meta:/file:).
         assert fp.split(":")[0] == "onnx-rs"

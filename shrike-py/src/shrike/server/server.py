@@ -34,10 +34,6 @@ from shrike.harness.engines.embedding.runtime import (
 )
 from shrike.harness.harness import CollectionManager, Harness, HarnessParams, KernelConfigError
 from shrike.platform.daemon import AlreadyRunningError, ServerLock
-
-# The transport-free core (#275). The collectors and _maybe_rebuild moved there
-# with it; re-exported here so existing import sites (tests included) are
-# unchanged.
 from shrike.platform.log import configure_logging
 from shrike.platform.paths import cache_dir, state_dir
 from shrike.platform.pathsafety import (
@@ -48,17 +44,16 @@ from shrike.platform.pathsafety import (
 from shrike.schemas import WIRE_PROTOCOL_VERSION, ActionError, ActionErrorCode
 from shrike.server._mcp_perf import install_validator_cache
 
-# The kernel saver's built-in flush tuning (#355): the --index-save-* help
-# names the defaults the flags would override. Sourced from the kernel, not
-# the retired Python facade.
+# The kernel saver's built-in flush tuning: the --index-save-* help names the
+# defaults the flags would override. Sourced from the kernel.
 DEFAULT_SAVE_DELAY = float(shrike_native.INDEX_SAVE_DELAY_DEFAULT)
 DEFAULT_SAVE_THRESHOLD = int(shrike_native.INDEX_SAVE_THRESHOLD_DEFAULT)
 
-# The actions-over-HTTP wire-version header (#505/#392). Every /actions/*
-# response echoes the server's WIRE_PROTOCOL_VERSION; a request may carry the
-# same header to assert it speaks the same fabric (a mismatch is refused, the
-# minimum handshake a separately-shipped client needs). /status already reports
-# the version in its body — this is the per-call header form.
+# The actions-over-HTTP wire-version header. Every /actions/* response echoes
+# the server's WIRE_PROTOCOL_VERSION; a request may carry the same header to
+# assert it speaks the same fabric (a mismatch is refused, the minimum handshake
+# a separately-shipped client needs). /status already reports the version in its
+# body — this is the per-call header form.
 WIRE_VERSION_HEADER = "X-Shrike-Wire-Version"
 
 logger = logging.getLogger("shrike.server")
@@ -112,8 +107,8 @@ def _host_header_form(host: str) -> str:
     ``is_loopback`` accepts *any* 127/8 address (or an expanded ``::1``), so a bind
     Shrike happily accepts as loopback (e.g. ``--host 127.0.0.2``) may not be one of
     the fixed ``_LOOPBACK_HOSTS`` literals. A client then sends ``Host: 127.0.0.2:PORT``
-    and the guard rejects it (HTTP 421) — the server is reachable but answers nothing
-    (#595). Folding the actual bind host into the allow-list closes that self-brick.
+    and the guard rejects it (HTTP 421) — the server is reachable but answers nothing.
+    Folding the actual bind host into the allow-list closes that self-brick.
 
     The Host header carries an IPv6 literal in brackets (``Host: [::1]:8372``), so an
     IPv6 bind host is canonicalized (``ipaddress``) and bracketed; an IPv4 address or a
@@ -157,8 +152,8 @@ def _build_transport_security(
     - ``disable`` is set — the operator declares the network is the trust boundary
       (Shrike behind Caddy / on a tailnet / firewalled); or
     - the bind is non-loopback and no explicit ``allowed_hosts``/``allowed_origins``
-      were given — preserves the historical ``--allow-remote`` behaviour, where a
-      deliberately network-bound server has no fixed Host set to validate against.
+      were given — a deliberately network-bound server has no fixed Host set to
+      validate against (the ``--allow-remote`` behaviour).
 
     Otherwise returns settings allow-listing the loopback Host/Origin values (when
     bound to loopback) plus any explicit additions — so a loopback server behind a
@@ -166,7 +161,7 @@ def _build_transport_security(
     *actual* bind host is always folded in too: ``is_loopback`` accepts any 127/8
     address, so a bind Shrike happily accepts (e.g. ``--host 127.0.0.2``) that isn't
     one of the fixed loopback literals must still answer its own ``Host`` header
-    rather than self-brick with HTTP 421 (#595).
+    rather than self-brick with HTTP 421.
     """
     extra_hosts = allowed_hosts or []
     extra_origins = allowed_origins or []
@@ -207,10 +202,10 @@ def _build_transport_security(
 
 
 # The server-local path-safety mechanism is shared across capabilities
-# (store_media #164/#170, export #71, import #72) — the generic helpers live in
-# shrike.pathsafety. These module-level aliases keep the historical server.py
-# names that existing call sites and tests import; the per-capability *policy*
-# (which root list, which gate) stays at the call sites.
+# (store_media, export, import) — the generic helpers live in shrike.pathsafety.
+# These module-level aliases keep the server.py names that call sites and tests
+# import; the per-capability *policy* (which root list, which gate) stays at the
+# call sites.
 _is_loopback = is_loopback
 _server_is_purely_local = server_is_purely_local
 _validate_media_path_root = validate_path_root
@@ -231,10 +226,10 @@ def create_mcp(
 
     ``transport_security is None`` means "no guard" everywhere else in the host
     (the custom routes' ``TransportSecurityMiddleware(None)`` leaves protection
-    off). But FastMCP would *silently re-enable* the guard on ``/mcp`` for a
-    loopback host when handed ``None`` (mcp ``fastmcp/server.py`` auto-enables for
+    off). But FastMCP *silently re-enables* the guard on ``/mcp`` for a loopback
+    host when handed ``None`` (mcp ``fastmcp/server.py`` auto-enables for
     127.0.0.1/localhost/::1) — so ``--no-dns-rebinding-protection`` would be
-    honored on the custom routes yet ignored on ``/mcp`` (#605). Pass FastMCP an
+    honored on the custom routes yet ignored on ``/mcp``. Pass FastMCP an
     *explicit* protection-disabled settings instead of ``None`` so ``/mcp`` and
     the custom routes agree: when the guard is off, it is off on both.
     """
@@ -268,17 +263,17 @@ def _register_custom_routes(
     Host/Origin validation applied here via ``_guard`` — otherwise a browser page
     could drive ``/shutdown`` etc. through a no-preflight POST.
 
-    Each handler is parse → harness coroutine → JSONResponse (#332 S3d-2): the
-    operational verbs live on the kernel-mode Harness and await natively; only
-    what is genuinely host-specific stays here (the guard, uptime/pid/url
-    assembly, the media FileResponse, process exit).
+    Each handler is parse → harness coroutine → JSONResponse: the operational
+    verbs live on the kernel-mode Harness and await natively; only what is
+    genuinely host-specific stays here (the guard, uptime/pid/url assembly, the
+    media FileResponse, process exit).
 
     ``action_tools`` (the ``name -> Tool`` map from :func:`register_tools`) backs
-    the actions-over-HTTP edge (#505): a single ``POST /actions/{name}`` route,
-    behind the same ``_guard``, runs each named action through the *same*
+    the actions-over-HTTP edge: a single ``POST /actions/{name}`` route, behind
+    the same ``_guard``, runs each named action through the *same*
     ``_safe_tool``-wrapped impl the MCP tools bind — the UI edge of the one
-    catalog. When None (a future host that wants only the operational routes) the
-    actions route isn't registered.
+    catalog. When None (a host that wants only the operational routes) the actions
+    route isn't registered.
     """
     wrapper = harness.wrapper
     from starlette.requests import Request
@@ -313,8 +308,8 @@ def _register_custom_routes(
             elapsed_ms = (time.perf_counter() - started) * 1000
             # Every served route logs at INFO — including /status polls: knowing
             # what the server did (and how long it took) is the point. The one
-            # exception is the actions edge (#505): when an action reaches its
-            # impl, the _safe_tool wrapper ALREADY emits the canonical
+            # exception is the actions edge: when an action reaches its impl, the
+            # _safe_tool wrapper ALREADY emits the canonical
             # one-INFO-line-per-call (tool name + params + outcome + duration),
             # so the transport line here would be a SECOND INFO line for the
             # same call. Demote it to DEBUG for /actions/* (the handler logs its
@@ -368,9 +363,9 @@ def _register_custom_routes(
         # act on).
         status.update(await harness.status())
 
-        # Per-collection rows (#68): the boot/default collection plus every
-        # registered profile, with each one's held/index/col_mod. Only emitted
-        # when the manager knows of more than the single boot collection, so a
+        # Per-collection rows: the boot/default collection plus every registered
+        # profile, with each one's held/index/col_mod. Only emitted when the
+        # manager knows of more than the single boot collection, so a
         # single-collection daemon's payload is unchanged.
         if manager is not None:
             rows = manager.status_rows()
@@ -397,9 +392,9 @@ def _register_custom_routes(
     @app.custom_route("/export/{token}", methods=["GET"])
     @_guard
     async def handle_export(request: Request) -> Response:
-        # Serve a pending export package by its one-shot token (#71) — the
-        # download path export_package's `url` points at (no base64). Read-only;
-        # same Host/Origin guard. The token is the capability (secrets-random,
+        # Serve a pending export package by its one-shot token — the download
+        # path export_package's `url` points at (no base64). Read-only; same
+        # Host/Origin guard. The token is the capability (secrets-random,
         # unguessable); the file is a server-named temp under the cache dir, so
         # there is no traversal surface. Reaped after a successful stream — and
         # on TTL / shutdown by the store regardless.
@@ -482,14 +477,14 @@ def _register_custom_routes(
     async def handle_reload(request: Request) -> JSONResponse:
         return JSONResponse(await harness.reload())
 
-    # --- actions-over-HTTP: the UI edge of the action catalog (#505) ----------
+    # --- actions-over-HTTP: the UI edge of the action catalog ----------
     # POST /actions/{name}: typed JSON request -> typed JSON response over the
     # SAME named ops the MCP tools bind, served through the SAME _safe_tool path
     # (so error policy + INFO logging + arg coercion are identical), behind the
     # SAME Host/Origin guard. MCP stays the agent edge; this is the UI edge. The
     # body it returns is the structured content the MCP path emits, minus the
     # JSON-RPC envelope. The loopback daemon stays unauthenticated — auth is the
-    # relay/proxy edge (#52), never here.
+    # relay/proxy edge, never here.
     def _wire_headers() -> dict[str, str]:
         return {WIRE_VERSION_HEADER: str(WIRE_PROTOCOL_VERSION)}
 
@@ -504,8 +499,8 @@ def _register_custom_routes(
         async def handle_action(request: Request) -> JSONResponse:
             name = request.path_params.get("name", "")
 
-            # #392 handshake: an optional request wire-version header must match
-            # the server's. A mismatch is refused before the op runs — the
+            # Wire-version handshake: an optional request wire-version header must
+            # match the server's. A mismatch is refused before the op runs — the
             # minimum a separately-shipped client needs to fail fast on a fabric
             # skew. Absent header = no assertion (today's CLI/programmatic use).
             requested = request.headers.get(WIRE_VERSION_HEADER)
@@ -603,15 +598,14 @@ def _register_custom_routes(
     @app.custom_route("/shutdown", methods=["POST"])
     @_guard
     async def handle_shutdown(request: Request) -> JSONResponse:
-        # Graceful exit via uvicorn's own machinery (#344): flag should_exit
-        # and return a plain 200. Uvicorn completes in-flight responses —
-        # this one included — and closes every connection with a proper FIN
-        # before serve() returns; the harness teardown + lock release run on
-        # the serve() tail. The previous shape (close + BackgroundTask +
-        # sleep + os._exit) raced the client's read no matter the grace
-        # period: a process exit can turn the un-acked response bytes into a
-        # connection reset under a saturated runner, while a graceful close
-        # cannot.
+        # Graceful exit via uvicorn's own machinery: flag should_exit and return
+        # a plain 200. Uvicorn completes in-flight responses — this one
+        # included — and closes every connection with a proper FIN before
+        # serve() returns; the harness teardown + lock release run on the
+        # serve() tail. A process exit (close + BackgroundTask + sleep +
+        # os._exit) would race the client's read no matter the grace period: it
+        # can turn the un-acked response bytes into a connection reset under a
+        # saturated runner, while a graceful close cannot.
         request_shutdown()
         return JSONResponse({"status": "ok", "pid": os.getpid()})
 
@@ -619,8 +613,8 @@ def _register_custom_routes(
 def main() -> None:
     # prog is pinned so the help/usage text reads `shrike.server` regardless of
     # entry point (python -m shrike.server via __main__, the //shrike-py/bin launcher, or
-    # the foreground CLI) — the module became a package in #730, which would
-    # otherwise surface argv[0] as `__main__.py`.
+    # the foreground CLI) — the package would otherwise surface argv[0] as
+    # `__main__.py`.
     parser = argparse.ArgumentParser(prog="shrike.server", description="Shrike MCP server for Anki")
     parser.add_argument(
         "--collection",
@@ -884,12 +878,12 @@ def main() -> None:
         log_level_override=args.log_level,
     )
 
-    # Rig native observability into this process's logging (#308/#310): the
-    # Rust crates emit tracing events but never log directly — init_logging
-    # bridges them onto stdlib `logging` (logger name = the Rust target) and
-    # installs the span-trace subscriber behind the exception notes. Must run
-    # *after* configure_logging (pyo3-log caches effective levels). A missing
-    # native install just means no native logs to bridge.
+    # Rig native observability into this process's logging: the Rust crates emit
+    # tracing events but never log directly — init_logging bridges them onto
+    # stdlib `logging` (logger name = the Rust target) and installs the span-trace
+    # subscriber behind the exception notes. Must run *after* configure_logging
+    # (pyo3-log caches effective levels). A missing native install just means no
+    # native logs to bridge.
     with contextlib.suppress(ImportError):
         import shrike_native
 
@@ -942,10 +936,10 @@ def main() -> None:
             "Cooperative locking on: releasing the collection after %.0fs idle", hold_seconds
         )
 
-    # Kernel mode (#332 S3d-2): the kernel owns the collection, the vector
-    # index, and the derived ingest; the index files live in the cache dir as
-    # before. The media resolver pair is path-derived (lock-free) and feeds
-    # the kernel's image seam for a CLIP-style backend.
+    # Kernel mode: the kernel owns the collection, the vector index, and the
+    # derived ingest; the index files live in the cache dir. The media resolver
+    # pair is path-derived (lock-free) and feeds the kernel's image seam for a
+    # CLIP-style backend.
     cache_base = Path(args.cache_dir) if args.cache_dir else cache_dir()
     collection_abs = os.path.abspath(args.collection)
     media_base = (
@@ -970,25 +964,25 @@ def main() -> None:
         "batch_size": args.embedding_batch_size,
         "endpoint": None,
         "api_key_env": None,
-        # The capability config carries these (#501); the legacy flag path
-        # leaves them at the runtime defaults (text-only, no projectors).
+        # The capability config carries these; the legacy flag path leaves them
+        # at the runtime defaults (text-only, no projectors).
         "modalities": None,
         "mmprojs": None,
     }
-    # The v2 recognizers: a list of harness-ready plans (#485). The legacy
+    # The v2 recognizers: a list of harness-ready plans. The legacy
     # (no --config) path uses the --ocr-backend flag instead and leaves this
     # empty; a v2 config fills it from the resolved profile.
     recognizer_boot_plans: tuple[Any, ...] = ()
-    # The SECONDARY embedding spaces' runtime params (#233): the 2nd+ entries of
-    # a multi-space v2 config. Empty for the legacy/flag path and the N=1 case,
+    # The SECONDARY embedding spaces' runtime params: the 2nd+ entries of a
+    # multi-space v2 config. Empty for the legacy/flag path and the N=1 case,
     # so the single-space boot is byte-identical (no secondary runtime built).
     secondary_param_sets: tuple[dict[str, Any], ...] = ()
     if args.config:
-        # The daemon resolves the v2 capability sections itself (#498):
-        # structured entries (remote endpoints, api_key_env) have no flag
-        # spelling, so the CLI hands over the config path instead of params.
-        # A ProfileError here is a config error — refuse to boot, loudly
-        # (the CLI pre-validates, so this is the direct-invocation backstop).
+        # The daemon resolves the v2 capability sections itself: structured
+        # entries (remote endpoints, api_key_env) have no flag spelling, so the
+        # CLI hands over the config path instead of params. A ProfileError here
+        # is a config error — refuse to boot, loudly (the CLI pre-validates, so
+        # this is the direct-invocation backstop).
         legacy_flags = [
             name
             for name, value in (
@@ -1031,13 +1025,13 @@ def main() -> None:
             parser.error(str(e))
         if caps.legacy:
             # A legacy config (no v2 sections) DEGRADES with a warning on BOTH
-            # launch paths (#610): the CLI's resolve_embedding_profile short-
-            # circuits caps.legacy to this same resolve_embedding, never running
-            # the build-validating resolve_profile. Routing the daemon --config
-            # path here too is what keeps the two paths consistent — the legacy
-            # cascade is "warn-and-map for one release" (#523 removes it), so the
-            # intended behavior is degrade, not refuse-boot. A real v2-config
-            # error still hits resolve_profile below and refuses.
+            # launch paths: the CLI's resolve_embedding_profile short-circuits
+            # caps.legacy to this same resolve_embedding, never running the
+            # build-validating resolve_profile. Routing the daemon --config path
+            # here too is what keeps the two paths consistent — the legacy
+            # cascade is warn-and-map, so the intended behavior is degrade, not
+            # refuse-boot. A real v2-config error still hits resolve_profile below
+            # and refuses.
             for warning in caps.warnings:
                 logger.warning("%s", warning)
             try:
@@ -1062,8 +1056,8 @@ def main() -> None:
                 parser.error(str(e))
             for warning in plan.warnings:
                 logger.warning("%s", warning)
-            # The resolved recognizers (#485): describe (and, post-#502, remote OCR)
-            # ride the v2 config — no flag spelling, so they reach boot from here.
+            # The resolved recognizers: describe (and remote OCR) ride the v2
+            # config — no flag spelling, so they reach boot from here.
             recognizer_boot_plans = recognizer_plans(plan)
             all_param_sets = plan_to_runtime_params_set(plan)
 
@@ -1076,7 +1070,7 @@ def main() -> None:
                 return params
 
             # The PRIMARY space drives the index/search path (byte-identical N=1);
-            # the 2nd+ entries become SECONDARY spaces (#233), each its own runtime.
+            # the 2nd+ entries become SECONDARY spaces, each its own runtime.
             v2_params = _expand_paths(plan_to_runtime_params(plan))
             secondary_param_sets = tuple(_expand_paths(dict(p)) for p in all_param_sets[1:])
             emb_params.update({k: v for k, v in v2_params.items() if v is not None})
@@ -1107,7 +1101,7 @@ def main() -> None:
             batch_size=params.get("batch_size"),
             endpoint=params.get("endpoint"),
             api_key_env=params.get("api_key_env"),
-            # A router-managed remote (#567) is flagged by the `router` sub-map
+            # A router-managed remote is flagged by the `router` sub-map
             # profiles.py attaches to each shared-router consumer; the flag makes
             # the RemoteBackend derive its fingerprint/dim from the pinned model,
             # not the shared endpoint's /v1/models[0].
@@ -1119,21 +1113,21 @@ def main() -> None:
         )
 
     runtime = _runtime_from_params(emb_params, pid_file=resolved_state_dir / "embedding.pid")
-    # The SECONDARY embedding spaces (#233): each 2nd+ v2 entry is its own
-    # runtime, attached to its own kernel embed space. Each needs a default
-    # backend kind (a None backend is the no-embedder shape, which secondaries
-    # never are). Only a MANAGED llama-server secondary writes a pid file, and
-    # it would collide with the primary's, so secondaries get none (the in-
-    # process onnx/clip and remote backends — the multi-space shapes — have no
-    # subprocess to reap). Empty for the N=1 / legacy path → byte-identical.
+    # The SECONDARY embedding spaces: each 2nd+ v2 entry is its own runtime,
+    # attached to its own kernel embed space. Each needs a default backend kind
+    # (a None backend is the no-embedder shape, which secondaries never are).
+    # Only a MANAGED llama-server secondary writes a pid file, and it would
+    # collide with the primary's, so secondaries get none (the in-process
+    # onnx/clip and remote backends — the multi-space shapes — have no subprocess
+    # to reap). Empty for the N=1 / legacy path → byte-identical.
     secondary_runtimes = [
         _runtime_from_params({**p, "backend": p.get("backend") or DEFAULT_BACKEND}, pid_file=None)
         for p in secondary_param_sets
     ]
 
-    # The shared llama.cpp ROUTER (#567): when N remote/no-endpoint spaces share
-    # one managed server (managed.llama_server.models_dir), profiles.py attaches
-    # an identical `router` sub-map to each consumer's params. Build ONE
+    # The shared llama.cpp ROUTER: when N remote/no-endpoint spaces share one
+    # managed server (managed.llama_server.models_dir), profiles.py attaches an
+    # identical `router` sub-map to each consumer's params. Build ONE
     # `LlamaServerManager.router(...)` from it — the harness spawns it once,
     # every router-managed RemoteBackend talks to it over loopback, and only the
     # owner stops it. None in every other shape (N=1, single-managed, endpoint,
@@ -1167,17 +1161,18 @@ def main() -> None:
         )
 
     # The derived-text store (FTS5 trigram sidecar) is built by Harness.assemble
-    # AFTER the kernel opens the collection (#547/#562) — NOT here, before open.
-    # The store is namespaced per collection (#547): it opens the SAME
+    # AFTER the kernel opens the collection — NOT here, before open. The store is
+    # namespaced per collection: it opens the SAME
     # `<cache_dir>/derived/<namespace>/shrike.db` the kernel's DerivedEngine
     # writes (they share one file — the kernel ingests, this host surface reads).
     # The namespace canonicalizes the collection path, and that canonicalization
     # differs by whether the file EXISTS (realpath folds a symlinked prefix like
     # macOS /var/folders → /private/var/...; an absent file's lexical abspath does
-    # not). Building before the kernel created the file hashed a fresh collection
-    # under the abspath namespace while the kernel used the realpath one (#562),
-    # so the host /status read an empty store. assemble builds it post-open so the
-    # file exists for both sides; the native engine factory is the default.
+    # not). Building before the kernel created the file would hash a fresh
+    # collection under the abspath namespace while the kernel used the realpath
+    # one, so the host /status would read an empty store. assemble builds it
+    # post-open so the file exists for both sides; the native engine factory is
+    # the default.
 
     transport_security = _build_transport_security(
         args.host,
@@ -1238,13 +1233,12 @@ def main() -> None:
     def _resolve_path_roots(
         flag_value: list[str] | None, env_name: str, flag_label: str, capability: str
     ) -> list[str]:
-        """Validate + canonicalize an operator-allowed root list (#71): per
-        element (dedup, order-preserving) — the containment disjunction means
-        the weakest root governs, so one bad root (filesystem root, missing dir)
-        fails startup, not passes silently. Honored only on a purely-local
-        server; a root set on a non-purely-local one is refused (warn), never
-        half-enabled. Returns the active roots (empty → the capability stays
-        off)."""
+        """Validate + canonicalize an operator-allowed root list: per element
+        (dedup, order-preserving) — the containment disjunction means the weakest
+        root governs, so one bad root (filesystem root, missing dir) fails
+        startup, not passes silently. Honored only on a purely-local server; a
+        root set on a non-purely-local one is refused (warn), never half-enabled.
+        Returns the active roots (empty → the capability stays off)."""
         raw = list(flag_value or [])
         env = os.environ.get(env_name)
         if env:
@@ -1271,8 +1265,8 @@ def main() -> None:
         logger.info("%s enabled, confined to %s", capability, validated)
         return validated
 
-    # store_media's server-local `path` read (#170) and export's `output_path`
-    # write (#71): distinct capabilities, distinct root lists, the same gate.
+    # store_media's server-local `path` read and export's `output_path` write:
+    # distinct capabilities, distinct root lists, the same gate.
     server_path_roots = _resolve_path_roots(
         args.media_path_root,
         "SHRIKE_MEDIA_PATH_ROOTS",
@@ -1286,11 +1280,11 @@ def main() -> None:
         "export server-local output paths",
     )
 
-    # import_package's server-local `path` read (#72): a DISTINCT capability
-    # from store_media's read and export's write — import writes into the
-    # collection (a merge), a higher blast radius than a media-file read — so
-    # its own root list, never inheriting a media or export root. Same shared
-    # gate (#71's _resolve_path_roots): purely-local + per-root containment.
+    # import_package's server-local `path` read: a DISTINCT capability from
+    # store_media's read and export's write — import writes into the collection
+    # (a merge), a higher blast radius than a media-file read — so its own root
+    # list, never inheriting a media or export root. Same shared gate
+    # (_resolve_path_roots): purely-local + per-root containment.
     server_import_path_roots = _resolve_path_roots(
         args.import_path_root,
         "SHRIKE_IMPORT_PATH_ROOTS",
@@ -1298,12 +1292,12 @@ def main() -> None:
         "import_package server-local paths",
     )
 
-    # The collection/profile registry (#66): a read-only snapshot for the
+    # The collection/profile registry: a read-only snapshot for the
     # `list_profiles` enumeration action. Loaded from the server's config file
     # (the explicit --config, or the platform default), best-effort — a missing
     # or unreadable config yields an empty registry, never a boot failure. The
     # registry is host-side config; the server operates on --collection today,
-    # and routing by selector is the capstone (#68).
+    # and routing by selector is the capstone.
     from shrike.cli.config import DEFAULT_CONFIG_PATH, load_config
     from shrike.harness.registry import Registry
 
@@ -1314,17 +1308,17 @@ def main() -> None:
     except Exception:  # noqa: BLE001 — enumeration is a convenience, never gates boot
         logger.debug("profile registry unavailable; list_profiles will report empty")
 
-    # The export download store (#71): server-named temp packages under the
-    # cache dir + their one-shot download tokens, reaped on download / TTL /
-    # shutdown. Backs the default export delivery (the GET /export/{token}
-    # route below); the server-local output_path mode bypasses it.
+    # The export download store: server-named temp packages under the cache dir +
+    # their one-shot download tokens, reaped on download / TTL / shutdown. Backs
+    # the default export delivery (the GET /export/{token} route below); the
+    # server-local output_path mode bypasses it.
     from shrike.server.export_store import ExportStore
 
     export_store = ExportStore(str(cache_base))
 
-    # The cross-space image floor margin (#580): config/env-resolved (no flag —
-    # an operational knob, not a v2 capability section), so the server loads it
-    # from the config file the daemon was started with. Default 1.0.
+    # The cross-space image floor margin: config/env-resolved (no flag — an
+    # operational knob, not a v2 capability section), so the server loads it from
+    # the config file the daemon was started with. Default 1.0.
     from shrike.cli.config import load_config, resolve_cross_space_margin
 
     try:
@@ -1334,16 +1328,16 @@ def main() -> None:
     cross_space_floor_margin = resolve_cross_space_margin(_margin_config)
 
     async def _serve() -> None:
-        # Assembly runs ON the loop (#332 S3d-2): the kernel opens with a
-        # dedicated harness thread driving its executor; the wrapper rides the
-        # shared core; tools/routes register before the socket binds (no
-        # request is accepted until serve()).
+        # Assembly runs ON the loop: the kernel opens with a dedicated harness
+        # thread driving its executor; the wrapper rides the shared core;
+        # tools/routes register before the socket binds (no request is accepted
+        # until serve()).
         logger.info("Opening collection at %s", args.collection)
         harness = await Harness.assemble(
             collection_path=args.collection,
             cache_dir=str(cache_base),
             runtime=runtime,
-            # derived omitted: assemble builds it post-open at the kernel's path (#562).
+            # derived omitted: assemble builds it post-open at the kernel's path.
             cooperative=args.cooperative_lock,
             hold_seconds=hold_seconds,
             media_read=_read_img,
@@ -1355,17 +1349,17 @@ def main() -> None:
             shared_llama_manager=shared_llama_manager,
         )
         # Embedding starts at boot when anything configures it: a model (flag
-        # or config entry) OR a bare endpoint (#498 — a remote/attach entry's
-        # endpoint default model is a valid configuration with no model name).
+        # or config entry) OR a bare endpoint (a remote/attach entry's endpoint
+        # default model is a valid configuration with no model name).
         embedding_configured = bool(emb_params.get("model") or emb_params.get("endpoint"))
         await harness.boot(start_embedding=embedding_configured and not args.no_embedding)
 
-        # Recognition (#228/#221/#485): attach recognizers and sweep in the
-        # background. Off unless configured; a dead endpoint / missing engine
-        # degrades to an 'error' state row without disturbing the rest of the
-        # server. The legacy --ocr-backend flag still drives OCR directly; the
-        # v2 recognizers: config (describe today, remote OCR post-#502) drives
-        # the rest from the resolved profile.
+        # Recognition: attach recognizers and sweep in the background. Off unless
+        # configured; a dead endpoint / missing engine degrades to an 'error'
+        # state row without disturbing the rest of the server. The legacy
+        # --ocr-backend flag still drives OCR directly; the v2 recognizers:
+        # config (describe today, remote OCR) drives the rest from the resolved
+        # profile.
         if args.ocr_backend:
             harness.start_recognition(args.ocr_backend)
         for rec in recognizer_boot_plans:
@@ -1381,13 +1375,12 @@ def main() -> None:
             else:  # pragma: no cover — resolve_profile rejects unknown kinds
                 logger.warning("Unsupported recognizer kind %r; skipping", rec.kind)
 
-        # Multi-collection routing (#68): the manager wraps the boot harness as
-        # the default collection and lazily assembles a per-collection harness
-        # for any other registered profile a call selects (its own namespaced
-        # index + per-collection derived store, sharing this base cache dir and
-        # this embedding runtime). The default harness owns the shared runtime;
-        # routed harnesses attach its backend and never stop it. Selector
-        # plumbing through the tools/CLI is S2; per-collection status is S3.
+        # Multi-collection routing: the manager wraps the boot harness as the
+        # default collection and lazily assembles a per-collection harness for
+        # any other registered profile a call selects (its own namespaced index +
+        # per-collection derived store, sharing this base cache dir and this
+        # embedding runtime). The default harness owns the shared runtime; routed
+        # harnesses attach its backend and never stop it.
         manager = CollectionManager(
             params=HarnessParams(
                 cache_dir=str(cache_base),
@@ -1415,8 +1408,8 @@ def main() -> None:
             logger.info("Received %s, shutting down", sig_name)
             # Sync-safe teardown: flush each assembled collection's index + close
             # the sidecars; the collections are crash-safe (WAL) and the process
-            # exits now. Routed collections (#68) are flushed too; the shared
-            # runtime is stopped once.
+            # exits now. Routed collections are flushed too; the shared runtime is
+            # stopped once.
             for h in manager.active_harnesses():
                 with contextlib.suppress(Exception):
                     h.kernel.save_index()
@@ -1425,7 +1418,7 @@ def main() -> None:
             with contextlib.suppress(Exception):
                 harness.runtime.stop()
             with contextlib.suppress(Exception):
-                export_store.close()  # reap any pending download temps (#71)
+                export_store.close()  # reap any pending download temps
             server_lock.release()
             logger.info("Shutdown complete")
             sys.exit(0)
@@ -1434,7 +1427,7 @@ def main() -> None:
         signal.signal(signal.SIGINT, _signal_shutdown)
 
         # register_tools binds the action registry to MCP and returns the same
-        # actions as a name->Tool map for the actions-over-HTTP edge (#505).
+        # actions as a name->Tool map for the actions-over-HTTP edge.
         action_tools = register_tools(
             mcp,
             harness.wrapper,
@@ -1450,12 +1443,12 @@ def main() -> None:
             export_store=export_store,
             server_purely_local=purely_local,
             registry=profile_registry,
-            # Per-call collection routing (#68 S2): the manager resolves a
-            # selector to the right collection's bundle, lazily assembling it.
+            # Per-call collection routing: the manager resolves a selector to the
+            # right collection's bundle, lazily assembling it.
             resolver=manager.resolve_bundle,
         )
         # The uvicorn Server is created after route registration, so the
-        # /shutdown route reaches it through this late-bound holder (#344).
+        # /shutdown route reaches it through this late-bound holder.
         server_holder: list[Any] = []
 
         def _request_shutdown() -> None:
@@ -1497,17 +1490,17 @@ def main() -> None:
         server_holder.append(server)
         await server.serve()
 
-        # serve() returned: either /shutdown set should_exit (#344 — the
-        # graceful path; teardown belongs here, after the listener drained)
-        # or uvicorn exited without a replayed signal. A SIGTERM replays into
-        # _signal_shutdown above instead.
+        # serve() returned: either /shutdown set should_exit (the graceful path;
+        # teardown belongs here, after the listener drained) or uvicorn exited
+        # without a replayed signal. A SIGTERM replays into _signal_shutdown
+        # above instead.
         logger.info("Server drained; shutting down")
         with contextlib.suppress(Exception):
-            # Close every routed collection too (#68), default last (it stops
-            # the shared embedding runtime after the routed ones detach).
+            # Close every routed collection too, default last (it stops the
+            # shared embedding runtime after the routed ones detach).
             await manager.close()
         with contextlib.suppress(Exception):
-            export_store.close()  # reap any pending download temps (#71)
+            export_store.close()  # reap any pending download temps
         server_lock.release()
         logger.info("Shutdown complete")
 

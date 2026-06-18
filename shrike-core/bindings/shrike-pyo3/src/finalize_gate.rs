@@ -1,7 +1,7 @@
-//! The interpreter-finalization gate (#435).
+//! The interpreter-finalization gate.
 //!
 //! The kernel runtime's threads outlive the Python interpreter by design
-//! (#374 D) — and on CPython 3.12 under abi3 that leaves one genuine hazard:
+//! — and on CPython 3.12 under abi3 that leaves one genuine hazard:
 //! a foreign thread whose `PyGILState_Ensure`..`Release` window is still open
 //! when `Py_Finalize` starts. The interpreter zaps foreign thread states
 //! during finalization, and the thread's `PyGILState_Release` then aborts the
@@ -109,7 +109,7 @@ pub(crate) fn permit() -> Option<Permit<'static>> {
 }
 
 /// The process gate itself, for holders that need a *reference* rather than a
-/// one-shot claim (the gated `log::Log` wrapper, #450 — installed once,
+/// one-shot claim (the gated `log::Log` wrapper — installed once,
 /// claims per record).
 pub(crate) fn process_gate() -> &'static Gate {
     &GATE

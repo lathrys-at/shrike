@@ -1,18 +1,16 @@
-//! Native derived-text engine (#281): the FTS5-trigram store under the
+//! Native derived-text engine: the FTS5-trigram store under the
 //! `DerivedTextStore` facade, on rusqlite's **bundled** SQLite.
 //!
 //! The ONE implementation of the sidecar (`idx` FTS5 trigram + `rowmap`
 //! provenance + `segments` + `gated` below-gate markers + `meta` in
-//! `shrike.db`; the Python
-//! `SqliteDerivedEngine` it originally mirrored retired with the engine
-//! cutover). On a schema-version mismatch — or an `idx`↔`rowmap` pairing
+//! `shrike.db`). On a schema-version mismatch — or an `idx`↔`rowmap` pairing
 //! inconsistency found at open — the derived data is dropped and the next
 //! drift rebuilds: the derived-cache answer, no migrations. The bundled
 //! SQLite always has FTS5 + the trigram tokenizer, which is this engine's
 //! user-facing win: the facade's availability probe stops being load-bearing.
 //!
 //! **The single mutexed connection is a correctness invariant, not just
-//! thread-safety** (#396): `idx` is an FTS5 virtual table, so nothing at the
+//! thread-safety**: `idx` is an FTS5 virtual table, so nothing at the
 //! schema level (no FK, no trigger) ties its rowids to `rowmap` — the pairing
 //! holds because every write rides this one connection's
 //! `last_insert_rowid()` under [`DerivedEngine::lock`]. A future move to a
@@ -39,14 +37,14 @@ const SNIPPET_TOKENS: i64 = 12;
 
 pub use shrike_store::MatchRow;
 
-/// Whether this build statically links rusqlite's bundled SQLite (#300).
+/// Whether this build statically links rusqlite's bundled SQLite.
 /// Bundled guarantees FTS5 + trigram; a platform-linked build must rely on
 /// [`fts5_trigram_available`] instead.
 pub const fn sqlite_bundled() -> bool {
     cfg!(feature = "bundled")
 }
 
-/// Whether the linked SQLite has FTS5 with the trigram tokenizer (#300).
+/// Whether the linked SQLite has FTS5 with the trigram tokenizer.
 ///
 /// Probed on a throwaway in-memory connection — the same check the stdlib
 /// engine's probe performs. Trivially true under the bundled default; genuinely
@@ -59,7 +57,7 @@ pub fn fts5_trigram_available() -> bool {
         .is_ok()
 }
 
-/// The derived-text store (#98): the FTS5 trigram sidecar over note/recognized
+/// The derived-text store: the FTS5 trigram sidecar over note/recognized
 /// text, backing the lexical search signals plus the recognition bookkeeping.
 pub struct DerivedEngine {
     conn: Mutex<Connection>,
@@ -74,9 +72,9 @@ fn db_err(e: rusqlite::Error) -> NativeError {
 
 /// True for a transient SQLite lock contention (`SQLITE_BUSY`/`SQLITE_LOCKED`,
 /// incl. the `*_SNAPSHOT` variants). Two engines share one `shrike.db` file
-/// (the kernel's write connection + the Python facade's read connection, #547),
+/// (the kernel's write connection + the Python facade's read connection),
 /// so a read can momentarily lose the file lock to a concurrent write even with
-/// `busy_timeout` set — that case is RETRYABLE, not a real failure (#644).
+/// `busy_timeout` set — that case is RETRYABLE, not a real failure.
 fn is_busy(e: &rusqlite::Error) -> bool {
     matches!(
         e,
@@ -91,7 +89,7 @@ fn is_busy(e: &rusqlite::Error) -> bool {
 }
 
 /// How many extra times a read retries past a transient busy before surfacing
-/// it (#644). The connection's `busy_timeout` (5s) already absorbs the common
+/// it. The connection's `busy_timeout` (5s) already absorbs the common
 /// lock-acquisition wait; this is the belt for a busy that surfaces despite it
 /// (e.g. a snapshot conflict). A surviving busy then surfaces as `unavailable`
 /// — the caller (kernel search) propagates it rather than silently degrading to
@@ -119,7 +117,7 @@ impl DerivedEngine {
     /// Open (or create) the store and ensure the schema, resetting the derived
     /// data on a schema-version mismatch (no migrations — it's a rebuildable
     /// cache). Errors are `unavailable` — the facade recovers by discarding.
-    /// The current sidecar schema. v2 (#228): the `segments` table for
+    /// The current sidecar schema. v2: the `segments` table for
     /// recognition structure (boxes/spans) + recognition meta keys. A bump
     /// drops everything — recognition rows re-derive via the pending sweep.
     pub const SCHEMA_VERSION: i64 = 2;
@@ -132,11 +130,11 @@ impl DerivedEngine {
     /// Returns an error if the database cannot be opened or its schema migrated.
     pub fn open(path: &str, schema_version: i64) -> NativeResult<Self> {
         let conn = Connection::open(path).map_err(db_err)?;
-        // Plain rollback journaling + synchronous=NORMAL (#396). WAL was the
-        // original mode, but this store has exactly one connection (the
-        // engine mutex serializes everything), so WAL's concurrent-reader
-        // payoff never materializes — while its -wal/-shm sidecars complicate
-        // the one-file story the relay/sync design wants. DELETE keeps the
+        // Plain rollback journaling + synchronous=NORMAL. This store has
+        // exactly one connection (the engine mutex serializes everything), so
+        // WAL's concurrent-reader payoff never materializes — while its
+        // -wal/-shm sidecars complicate the one-file story the relay/sync
+        // design wants. DELETE keeps the
         // store a single file between transactions; NORMAL may lose the last
         // transaction on power loss (never integrity), which a rebuildable
         // cache absorbs: the col_mod watermark lags, reads as drift, rebuilds.
@@ -149,8 +147,7 @@ impl DerivedEngine {
         // "One connection" holds per ENGINE, but two engines can share the
         // file (the kernel's + the Python facade's read surface). With the
         // default busy_timeout of 0 a read overlapping a write transaction
-        // got an instant SQLITE_BUSY instead of waiting out a brief lock
-        // (#445 audit correctness flag).
+        // got an instant SQLITE_BUSY instead of waiting out a brief lock.
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(db_err)?;
 
@@ -219,7 +216,7 @@ impl DerivedEngine {
     }
 
     /// One DDL string for the FTS5 table — `create_tables` and the rebuild's
-    /// drop-and-recreate reset (#445) must stay byte-identical.
+    /// drop-and-recreate reset must stay byte-identical.
     const IDX_DDL: &'static str =
         "CREATE VIRTUAL TABLE IF NOT EXISTS idx USING fts5(txt, tokenize='trigram')";
 
@@ -239,7 +236,7 @@ impl DerivedEngine {
             [],
         )
         .map_err(db_err)?;
-        // Below-gate recognition markers (#416): a (note, source, ref) the
+        // Below-gate recognition markers: a (note, source, ref) the
         // recognizer judged and the gate dropped — no text row exists, but
         // the pending sweep must count it DONE (or it re-recognizes forever).
         // Invalidated with the recognized rows on a recognizer-fingerprint
@@ -260,8 +257,8 @@ impl DerivedEngine {
         .map_err(db_err)?;
         // (source, note_id): refs_for_source/texts_for_source filter on
         // `source` alone — without this leading-column index they full-scan
-        // rowmap, and texts_for_source(OCR) sits on every upsert's tail
-        // (#445). IF NOT EXISTS + create_tables-on-open retrofits existing
+        // rowmap, and texts_for_source(OCR) sits on every upsert's tail.
+        // IF NOT EXISTS + create_tables-on-open retrofits existing
         // stores.
         conn.execute(
             "CREATE INDEX IF NOT EXISTS rowmap_source ON rowmap(source, note_id)",
@@ -286,7 +283,7 @@ impl DerivedEngine {
 
     /// Stamp the derived-store drift watermark.
     ///
-    /// INVARIANT (#585): set `value` ONLY after the rows for every write up to
+    /// INVARIANT: set `value` ONLY after the rows for every write up to
     /// `value`'s `col.mod` are DURABLY COMMITTED to this store. The watermark is
     /// the sole drift signal (`rebuild_derived` reconciles iff `get_col_mod() !=
     /// live col.mod`), so stamping it past an un-ingested write certifies that
@@ -310,7 +307,7 @@ impl DerivedEngine {
     }
 
     /// Indexed row count. Errors are surfaced (`unavailable`), never folded
-    /// to 0 — a locked/corrupt store must not read as an empty one (#396).
+    /// to 0 — a locked/corrupt store must not read as an empty one.
     ///
     /// # Errors
     ///
@@ -412,7 +409,7 @@ impl DerivedEngine {
         refs_text: &[(String, String)],
     ) -> NativeResult<()> {
         // prepare_cached: the two insert statements parse once per
-        // connection, not once per row (#445 — a rebuild paid ~2 prepares
+        // connection, not once per row (a rebuild would pay ~2 prepares
         // per field row; the cache also serves every later ingest).
         let mut ins_idx = conn
             .prepare_cached("INSERT INTO idx(txt) VALUES(?1)")
@@ -455,8 +452,8 @@ impl DerivedEngine {
         tx.commit().map_err(db_err)
     }
 
-    /// Replace MANY notes' text rows for one source in ONE transaction
-    /// (#445): callers hold whole upsert batches, and one-commit-per-note
+    /// Replace MANY notes' text rows for one source in ONE transaction:
+    /// callers hold whole upsert batches, and one-commit-per-note
     /// under DELETE journaling is journal create+fsync+delete per note. The
     /// delete half batches across all ids; inserts pair idx↔rowmap per row
     /// exactly like `ingest`.
@@ -475,7 +472,7 @@ impl DerivedEngine {
         // Duplicate ids: LAST entry wins — matching the per-note loop this
         // replaced (each occurrence delete+inserted, so the final one stood).
         // The batch deletes each id's rows ONCE up front, so without this
-        // guard a duplicate would double-insert (#447 review).
+        // guard a duplicate would double-insert.
         let mut last: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
         for (i, (id, _)) in notes.iter().enumerate() {
             last.insert(*id, i);
@@ -539,7 +536,7 @@ impl DerivedEngine {
     /// Full (re)build from (note_id, source, ref, text) rows; stamps col_mod.
     /// One transaction — a failure rolls everything back.
     ///
-    /// The rebuild is **collection-derived-sources-scoped** (#228): it
+    /// The rebuild is **collection-derived-sources-scoped**: it
     /// replaces `field` rows (cheap — re-read from the collection) but
     /// PRESERVES recognition-derived rows (`ocr`/`asr` — expensive, with
     /// their own fingerprint-keyed invalidation), so a boot-drift rebuild
@@ -560,7 +557,7 @@ impl DerivedEngine {
         // exist (no recognition rows to preserve — the common case), drop
         // and recreate the table instead: measured 40× faster than even a
         // whole-table DELETE at 50k rows, and FTS5's 'delete-all' shortcut
-        // is unavailable on a content-ful table (#445). DDL is transactional
+        // is unavailable on a content-ful table. DDL is transactional
         // in SQLite, and the recreate reuses the schema's own DDL string.
         let has_other: bool = tx
             .query_row(
@@ -583,8 +580,8 @@ impl DerivedEngine {
             tx.execute("DELETE FROM rowmap", []).map_err(db_err)?;
         }
         {
-            // Parse the two insert statements once, not once per row (#445:
-            // ~2 prepares × every field row of the collection per rebuild).
+            // Parse the two insert statements once, not once per row
+            // (~2 prepares × every field row of the collection per rebuild).
             let mut ins_idx = tx
                 .prepare_cached("INSERT INTO idx(txt) VALUES(?1)")
                 .map_err(db_err)?;
@@ -634,7 +631,7 @@ impl DerivedEngine {
         tx.commit().map_err(db_err)
     }
 
-    /// A free-form meta value (e.g. the recognizer fingerprint, #228).
+    /// A free-form meta value (e.g. the recognizer fingerprint).
     ///
     /// # Errors
     ///
@@ -663,9 +660,9 @@ impl DerivedEngine {
         Ok(())
     }
 
-    /// Store one item's recognition structure (#228: segments JSON — boxes
+    /// Store one item's recognition structure (segments JSON — boxes
     /// for OCR, time spans for ASR) alongside its text row, keyed like the
-    /// row. One pass, many consumers: #230 (occlusion) reads these back.
+    /// row. One pass, many consumers: occlusion reads these back.
     ///
     /// # Errors
     ///
@@ -708,7 +705,7 @@ impl DerivedEngine {
     }
 
     /// All (note_id, ref) pairs for one source — the pending sweep's "what
-    /// has already been recognized" set (#228). Deliberately a full-set read:
+    /// has already been recognized" set. Deliberately a full-set read:
     /// the sweep's pending diff needs the complete set, and the pairs are
     /// small. Bounding belongs to the sweep's batching, not this query.
     ///
@@ -728,7 +725,7 @@ impl DerivedEngine {
         Ok(rows)
     }
 
-    /// Record below-gate outcomes (#416): each (note_id, ref) was recognized
+    /// Record below-gate outcomes: each (note_id, ref) was recognized
     /// and the gate dropped it — no text row, but the pending sweep counts it
     /// done. One transaction per batch.
     ///
@@ -752,7 +749,7 @@ impl DerivedEngine {
     }
 
     /// All below-gate (note_id, ref) markers for one source — unioned with
-    /// [`Self::refs_for_source`] by the pending sweep's done-set diff (#416).
+    /// [`Self::refs_for_source`] by the pending sweep's done-set diff.
     ///
     /// # Errors
     ///
@@ -771,7 +768,7 @@ impl DerivedEngine {
     }
 
     /// Drop ALL below-gate markers for one source — the recognizer-fingerprint
-    /// invalidation path (#416): a new engine re-judges everything, gated
+    /// invalidation path: a new engine re-judges everything, gated
     /// items included, exactly like stored rows re-derive.
     ///
     /// # Errors
@@ -785,7 +782,7 @@ impl DerivedEngine {
     }
 
     /// All (note_id, ref, text) rows for one source — the embed-input
-    /// composition reads recognized text back for vector minting (#199).
+    /// composition reads recognized text back for vector minting.
     /// Deliberately a full-set read (the composition consumes the whole set);
     /// volume is bounded by recognized-text size, not media size.
     ///
@@ -808,7 +805,7 @@ impl DerivedEngine {
         Ok(rows)
     }
 
-    /// `texts_for_source` scoped to a note set (#445): the per-upsert embed
+    /// `texts_for_source` scoped to a note set: the per-upsert embed
     /// composition needs only the WRITTEN notes' recognized texts — the
     /// full-set read belongs to rebuild/reconcile, not the op tail.
     ///
@@ -852,7 +849,7 @@ impl DerivedEngine {
     /// One FTS5 MATCH (rank-ordered), returning provenance + snippet rows.
     /// A bad expression is `invalid_input` — the facade maps it to its
     /// OperationalError fallback path. `scope`, when given, restricts the
-    /// match to those note ids INSIDE the query (the #177 scoped-search path:
+    /// match to those note ids INSIDE the query (the scoped-search path:
     /// the id set comes from anki's indexed deck:/tag: search, so scoped
     /// literal search needs no over-fetch and no post-hoc recall gamble).
     ///
@@ -873,7 +870,7 @@ impl DerivedEngine {
         let txt_col = if with_text { "idx.txt" } else { "NULL" };
         // Small scopes inline as literals (i64s — no injection surface);
         // large ones are staged in a TEMP table, since SQLite's parser caps
-        // long expression lists (#396).
+        // long expression lists.
         let scope_clause = match scope {
             Some(ids) if !ids.is_empty() => {
                 if ids.len() <= Self::INLINE_ID_MAX {
@@ -891,7 +888,7 @@ impl DerivedEngine {
             Some(_) => "AND 0 ".to_string(), // an empty scope matches nothing
             None => String::new(),
         };
-        // Hidden-source exclusion (#485): a VectorOnly recognition source is
+        // Hidden-source exclusion: a VectorOnly recognition source is
         // dropped BEFORE ranking/limiting, so its rows never surface on a
         // lexical query yet stay stored for provenance + reconcile. Bound as
         // positional params (starting after the three fixed ones below) — the
@@ -912,7 +909,7 @@ impl DerivedEngine {
              FROM idx JOIN rowmap m ON m.rowid = idx.rowid \
              WHERE idx MATCH ?2 {scope_clause}{exclude_clause}ORDER BY rank LIMIT ?3"
         );
-        // Retry a transient busy (#644): two engines share the file, so a read
+        // Retry a transient busy: two engines share the file, so a read
         // can lose the lock to a concurrent write even with `busy_timeout`. The
         // closure re-prepares + re-runs per attempt; a busy at prepare or step
         // bubbles as a `rusqlite::Error` for `with_busy_retry` to retry, while a
@@ -957,7 +954,7 @@ impl DerivedEngine {
     }
 }
 
-/// The store contract (#389): every method forwards to the inherent impl, so
+/// The store contract: every method forwards to the inherent impl, so
 /// the concrete engine keeps its full API while the kernel consumes
 /// `Arc<dyn DerivedStore>`.
 impl shrike_store::DerivedStore for DerivedEngine {
@@ -1104,7 +1101,7 @@ mod tests {
 
     #[test]
     fn busy_retry_succeeds_after_transient_busy() {
-        // #644 (option 2): a read that hits a transient SQLITE_BUSY a few times
+        // A read that hits a transient SQLITE_BUSY a few times
         // then succeeds is RETRIED to success — it never surfaces as an error.
         use std::cell::Cell;
         let calls = Cell::new(0usize);
@@ -1126,7 +1123,7 @@ mod tests {
     fn busy_retry_surfaces_a_persistent_busy_as_unavailable() {
         // A busy that outlives the retries surfaces (as `unavailable`) — the
         // kernel caller then propagates it rather than silently degrading to a
-        // fallback that can't serve OCR/ASR text (#644).
+        // fallback that can't serve OCR/ASR text.
         let err = with_busy_retry::<i32>(|| Err(busy_err())).unwrap_err();
         assert_eq!(err.kind(), shrike_error::ErrorKind::Unavailable);
     }
@@ -1148,7 +1145,7 @@ mod tests {
 
     #[test]
     fn scoped_match_restricts_to_the_id_set() {
-        // The #177 scoped-search path: the id set rides INSIDE the FTS5
+        // The scoped-search path: the id set rides INSIDE the FTS5
         // query, so a scoped literal/fuzzy search has exact recall within
         // scope and zero hits outside it.
         let (e, _dir) = store();
@@ -1193,8 +1190,9 @@ mod tests {
 
     #[test]
     fn probe_reports_linkage_capability() {
-        // Under the bundled default the probe MUST pass (the #281 guarantee);
-        // under platform linkage it reports whatever the host library has —
+        // Under the bundled default the probe MUST pass (the bundled-SQLite
+        // guarantee); under platform linkage it reports whatever the host
+        // library has —
         // on this dev host the test only runs if the store above worked, so
         // the probe must agree.
         assert!(fts5_trigram_available());
@@ -1205,7 +1203,7 @@ mod tests {
 
     #[test]
     fn ingest_many_matches_per_note_ingest() {
-        // One-transaction batch ingest (#445) is behavior-identical to the
+        // One-transaction batch ingest is behavior-identical to the
         // per-note loop it replaces: rows replaced per (note, source), blank
         // texts skipped, other notes untouched.
         let (e, _dir) = store();
@@ -1265,7 +1263,7 @@ mod tests {
     fn ingest_many_and_scoped_texts_work_beyond_the_inline_cap() {
         // The staged-temp-table branch (> INLINE_ID_MAX ids) changes the SQL
         // shape (id params go empty; only `source` stays bound) — pin it for
-        // both new APIs (#447 review).
+        // both new APIs.
         let (e, _dir) = store();
         let n = DerivedEngine::INLINE_ID_MAX + 7;
         let batch: Vec<(i64, Vec<(String, String)>)> = (0..n as i64)
@@ -1348,7 +1346,7 @@ mod tests {
 
     #[test]
     fn rebuild_over_field_only_rows_resets_and_reindexes() {
-        // #445: with no recognition rows to preserve, the rebuild swaps the
+        // With no recognition rows to preserve, the rebuild swaps the
         // row-by-row FTS5 delete for a drop-and-recreate. A second build
         // over an already-populated store must leave exactly the new rows
         // searchable (the rowid↔rowmap pairing is rebuilt from scratch).
@@ -1402,7 +1400,7 @@ mod tests {
 
     #[test]
     fn rebuild_preserves_recognition_rows_and_prunes_orphans() {
-        // #228: a drift rebuild replaces `field` rows but never discards
+        // A drift rebuild replaces `field` rows but never discards
         // recognition-derived rows (re-recognition is expensive) — except for
         // notes that vanished from the collection.
         let (e, _dir) = store();
@@ -1485,7 +1483,7 @@ mod tests {
 
     #[test]
     fn gated_markers_persist_survive_ingest_and_invalidate() {
-        // #416: below-gate markers round-trip, survive a sibling image's
+        // Below-gate markers round-trip, survive a sibling image's
         // ingest (the replace must not put a gated item back in the pending
         // set), drop with note removal, prune with dead notes on rebuild,
         // and clear wholesale on fingerprint invalidation.
@@ -1551,10 +1549,10 @@ mod tests {
     }
 }
 
-// ── lexical search policy (#331: re-homed from the Python facade) ────────────
-// The MATCH-expression building + result filtering that used to live in
-// `shrike/derived.py`. One implementation: the Python facade delegates here
-// through the binding, and the kernel's search assembly calls it directly.
+// ── lexical search policy ────────────────────────────────────────────────────
+// The MATCH-expression building + result filtering. One implementation: the
+// Python facade delegates here through the binding, and the kernel's search
+// assembly calls it directly.
 
 /// FTS5's trigram tokenizer can't match a term shorter than 3 chars.
 pub const MIN_TRIGRAM: usize = 3;
@@ -1716,7 +1714,7 @@ mod lexical_tests {
 
     #[test]
     fn exclude_sources_hides_vector_only_rows_from_lexical_search() {
-        // #485: a VectorOnly recognition source (VLM describe) is STORED for
+        // A VectorOnly recognition source (VLM describe) is STORED for
         // provenance + reconcile, but excluded from substring/fuzzy BEFORE
         // ranking — so its prose can NEVER surface on a lexical query.
         let dir = std::env::temp_dir().join(format!(
@@ -1784,7 +1782,7 @@ mod lexical_tests {
 
 #[cfg(test)]
 mod hardening_tests {
-    //! #396: open-time integrity, fallible count, journal-mode policy, and
+    //! Open-time integrity, fallible count, journal-mode policy, and
     //! the staged-id-set path for collection-scale scopes/deletes.
 
     use super::*;

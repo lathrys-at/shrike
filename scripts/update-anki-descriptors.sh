@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Refresh the checked-in anki protobuf descriptor set after an anki tag bump
-# (#278 cutover). The Bazel build of the `anki` crate reads this file via the
+# Refresh the checked-in anki protobuf descriptor set after an anki tag bump.
+# The Bazel build of the `anki` crate reads this file via the
 # DESCRIPTORS_BIN override (see shrike-core/third_party/anki/BUILD.bazel); cargo
 # regenerates the live copy under target/ on every build of anki_proto.
 #

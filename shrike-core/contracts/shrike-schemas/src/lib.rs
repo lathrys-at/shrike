@@ -1,4 +1,4 @@
-//! Rust-canonical wire contracts (#330, kernel inversion S1).
+//! Rust-canonical wire contracts.
 //!
 //! Every Shrike tool request/response and server-status shape, as serde types
 //! mirroring `src/shrike/schemas.py` — which remains the Python *binding*,
@@ -14,7 +14,7 @@
 //! - `Literal[True]`-style fields that are *not* a union's tag use the
 //!   [`literals`] types (const-valued, schema `const`).
 //! - Unknown keys are ignored (Pydantic's `extra="ignore"`; serde's default).
-//! - Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-pyo3.
+//! - Pure Rust — NO pyo3; bound to Python in shrike-pyo3.
 
 #![deny(missing_docs)]
 #![deny(
@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::literals::{LiteralFalse, LiteralTrue, ReloadedLiteral};
 
 /// Stable wire marker prefixing a tool's MCP isError text when the call failed
-/// because the collection couldn't be acquired (#65). Mirrors
+/// because the collection couldn't be acquired. Mirrors
 /// `schemas.COLLECTION_BUSY_CODE`.
 pub const COLLECTION_BUSY_CODE: &str = "collection_busy";
 
@@ -192,7 +192,7 @@ pub struct SearchMatch {
     pub provenance: Vec<SignalContribution>,
 }
 
-/// A similar-note candidate attached to an upsert result (#204/#531).
+/// A similar-note candidate attached to an upsert result.
 /// Neighbors are search results — a created/updated note's neighbors are a
 /// `search_notes` of its own content — so a neighbor mirrors a search match.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -206,8 +206,8 @@ pub struct Neighbor {
     #[serde(default)]
     /// The neighbor's tags.
     pub tags: Vec<String>,
-    /// Which signals surfaced the candidate (#208) — the search-provenance
-    /// shape (#182): ANY search signal (`text`, `exact`, `image`, `tag`,
+    /// Which signals surfaced the candidate — the search-provenance
+    /// shape: ANY search signal (`text`, `exact`, `image`, `tag`,
     /// `fuzzy`), not just text.
     #[serde(default)]
     pub provenance: Vec<SignalContribution>,
@@ -472,7 +472,7 @@ pub enum FieldOp {
         /// The field name the op addresses.
         name: String,
         // 0-based insert position; mirror the Python `ge=0` so the advertised
-        // schema declares the bound it enforces (#606).
+        // schema declares the bound it enforces.
         #[serde(default)]
         #[schemars(range(min = 0))]
         /// 0-based insert position; absent appends.
@@ -509,7 +509,7 @@ pub struct FieldMetadataInput {
     /// Editor font family; absent leaves it unchanged.
     pub font: Option<String>,
     // Edit-time font size in px; mirror the Python `ge=1` so the advertised
-    // schema declares the bound it enforces (#606).
+    // schema declares the bound it enforces.
     #[serde(default)]
     #[schemars(range(min = 1))]
     /// Editor font size in px; absent leaves it unchanged.
@@ -553,7 +553,7 @@ pub enum TemplateOp {
         front: String,
         /// Back-side template HTML.
         back: String,
-        // 0-based insert position; mirror the Python `ge=0` (#606).
+        // 0-based insert position; mirror the Python `ge=0`.
         #[serde(default)]
         #[schemars(range(min = 0))]
         /// 0-based insert position; absent appends.
@@ -795,7 +795,7 @@ pub struct SearchResponse {
     #[serde(default)]
     /// An optional advisory (e.g. index still building).
     pub message: Option<String>,
-    /// The two-tier live-search contract (#181): "partial" = the
+    /// The two-tier live-search contract: "partial" = the
     /// embedding-bearing signals were skipped at the caller's request
     /// (tier="live"); "full" = the final answer for this query/server state.
     #[serde(default)]
@@ -805,7 +805,7 @@ pub struct SearchResponse {
     pub version: Option<i64>,
 }
 
-/// `SearchResponse.completeness` (#181) — mirrors the Pydantic
+/// `SearchResponse.completeness` — mirrors the Pydantic
 /// `Literal["partial", "full"]`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -1136,7 +1136,7 @@ pub struct FindReplaceResponse {
     pub samples: Vec<FindReplaceSample>,
 }
 
-/// The result of importing an `.apkg`/`.colpkg` (#72) — per-bucket note counts
+/// The result of importing an `.apkg`/`.colpkg` — per-bucket note counts
 /// from anki's importer (`ImportResponse.Log`) + whether the import reconciled
 /// the index. The per-bucket mirror of `shrike.schemas.ImportPackageResponse`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1217,7 +1217,7 @@ pub enum EmbeddingStatus {
         #[serde(default)]
         /// Whether embeds run batched or serially.
         batch: Option<BatchMode>,
-        /// The modalities this space embeds (#498/#235).
+        /// The modalities this space embeds.
         #[serde(default)]
         modalities: Option<Vec<String>>,
     },
@@ -1252,7 +1252,7 @@ pub struct IndexProgress {
     pub total: i64,
 }
 
-/// One per-modality sub-index's size/ndim (#684). Mirror of Pydantic's
+/// One per-modality sub-index's size/ndim. Mirror of Pydantic's
 /// `IndexModalityStat`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct IndexModalityStat {
@@ -1290,7 +1290,7 @@ pub struct IndexBase {
     #[serde(default)]
     /// Per-modality activation-gate calibration stats.
     pub activation: Option<BTreeMap<String, BTreeMap<String, f64>>>,
-    /// Per-modality sub-index breakdown (#684): each sub-index's own size/ndim.
+    /// Per-modality sub-index breakdown: each sub-index's own size/ndim.
     #[serde(default)]
     pub modalities: Vec<IndexModalityStat>,
 }
@@ -1401,7 +1401,7 @@ pub enum RecognitionState {
     Error,
 }
 
-/// One attached recognition engine's self-report (#228/#485). The Rust mirror
+/// One attached recognition engine's self-report. The Rust mirror
 /// of `shrike.schemas.RecognitionEngineStatus`; `ServerStatus.recognition` is
 /// a map of these keyed by source (`ocr`/`vlm`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1431,7 +1431,7 @@ pub struct DedupStats {
     pub buckets: Vec<i64>,
 }
 
-/// One collection's state in a multi-collection daemon's `/status` (#68): a row
+/// One collection's state in a multi-collection daemon's `/status`: a row
 /// per known collection (the boot/default plus every registered profile). The
 /// per-collection mirror of `shrike.schemas.CollectionStatus`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1459,7 +1459,7 @@ pub struct CollectionStatus {
     pub col_mod: Option<i64>,
 }
 
-/// How one (query-modality → target-modality) pair is reachable (#235). The
+/// How one (query-modality → target-modality) pair is reachable. The
 /// Rust mirror of `shrike.schemas.CoverageCell`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1480,7 +1480,7 @@ pub enum CoverageCell {
     Unavailable,
 }
 
-/// One query modality's reachability to each target modality (#235). The Rust
+/// One query modality's reachability to each target modality. The Rust
 /// mirror of `shrike.schemas.CoverageRow`; every cell is a `CoverageCell` (no
 /// absent target, only an `Unavailable` one).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1496,7 +1496,7 @@ pub struct CoverageRow {
     pub audio: CoverageCell,
 }
 
-/// The cross-modal coverage matrix (#235): per query modality, a `CoverageRow`
+/// The cross-modal coverage matrix: per query modality, a `CoverageRow`
 /// naming how each target modality is reachable. The Rust mirror of
 /// `shrike.schemas.CoverageMatrix`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -1518,7 +1518,7 @@ pub struct ServerStatus {
     #[serde(default)]
     /// Always true (the server answered).
     pub running: LiteralTrue,
-    /// The action exchange's protocol version (#392).
+    /// The action exchange's protocol version.
     pub wire_protocol_version: u32,
     /// The server PID.
     pub pid: i64,
@@ -1538,7 +1538,7 @@ pub struct ServerStatus {
     pub log: Option<String>,
     /// The primary embedding space's health.
     pub embedding: EmbeddingStatus,
-    /// Per-space embedding health (#681): one entry per configured embedder (the
+    /// Per-space embedding health: one entry per configured embedder (the
     /// primary plus every secondary space). `embedding` above stays the primary
     /// for back-compat; this is the full list. Empty on older payloads.
     #[serde(default)]
@@ -1554,22 +1554,22 @@ pub struct ServerStatus {
     #[serde(default = "default_true")]
     /// Whether the collection lock is currently held.
     pub collection_held: bool,
-    /// Dedup best-match statistics (#207) — None until the first upsert with
+    /// Dedup best-match statistics — None until the first upsert with
     /// neighbors runs.
     #[serde(default)]
     pub dedup: Option<DedupStats>,
-    /// Per-engine recognition state (#228/#485): a map keyed by source
+    /// Per-engine recognition state: a map keyed by source
     /// (`ocr`/`vlm`), each row {state, backend, fingerprint}. An EMPTY map is
     /// "nothing attached" (distinct from an attached-but-errored engine).
     #[serde(default)]
     pub recognition: std::collections::BTreeMap<String, RecognitionEngineStatus>,
-    /// The cross-modal coverage matrix (#498/#235): for each (query, target)
+    /// The cross-modal coverage matrix: for each (query, target)
     /// modality pair, how the target is reachable — `native`, `via_derived_text`
     /// (a recognizer derives text from the target into the text space), or
     /// `unavailable`. None on payloads from older servers (the flat shape).
     #[serde(default)]
     pub coverage: Option<CoverageMatrix>,
-    /// Multi-collection routing (#68): one row per known collection (the
+    /// Multi-collection routing: one row per known collection (the
     /// boot/default plus every registered profile). None on a single-collection
     /// server / older payloads; the top-level fields describe the default
     /// collection (which the operational routes act on).
@@ -1671,7 +1671,7 @@ pub struct ReloadResponse {
     pub rebuilding: bool,
 }
 
-/// One registered collection profile (#66). The registry name is a friendly
+/// One registered collection profile. The registry name is a friendly
 /// handle only — index identity keys on the collection file path, never the
 /// name. `is_default` marks the active default (the profile the per-call
 /// selector resolves to when none is passed).
@@ -1686,9 +1686,9 @@ pub struct ProfileEntry {
     pub is_default: bool,
 }
 
-/// The collection/profile registry enumeration (#66): the registered profiles
+/// The collection/profile registry enumeration: the registered profiles
 /// and the active-default name (`None` when none is set). Read-only — selection
-/// as routing is the capstone (#68).
+/// as routing is the capstone.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ListProfilesResponse {
     #[serde(default)]
@@ -1699,7 +1699,7 @@ pub struct ListProfilesResponse {
     pub default: Option<String>,
 }
 
-/// The kernel's export-op outcome (#71): the count of notes written and the
+/// The kernel's export-op outcome: the count of notes written and the
 /// on-disk path the package landed at. Internal wire — the kernel op returns
 /// this; the host action wraps it into [`ExportPackageResponse`] (adding the
 /// download `url` / `bytes`, which the kernel doesn't know about).
@@ -1711,7 +1711,7 @@ pub struct ExportPackageResult {
     pub out_path: String,
 }
 
-/// The export tool's response (#71): the package the export produced, handed
+/// The export tool's response: the package the export produced, handed
 /// back as a server-local `path` (when the operator opted into a contained
 /// `output_path`) OR a downloadable `url` (the default — the server wrote a
 /// temp file; never base64, mirroring `fetch_media`). Discriminated on
@@ -1772,10 +1772,10 @@ pub enum StopResponse {
 }
 
 // ============================================================================
-// The action exchange error envelope (#505)
+// The action exchange error envelope
 // ============================================================================
 
-/// The machine-readable class of an actions-over-HTTP failure (#505).
+/// The machine-readable class of an actions-over-HTTP failure.
 ///
 /// The UI edge (`POST /actions/{name}`) maps the transport-neutral error
 /// contract the actions raise — and that `_safe_tool` re-raises — onto a small,
@@ -1789,7 +1789,7 @@ pub enum StopResponse {
 /// `ActionError`), not a standalone catalog entry — its shape is contract-tested
 /// through `ActionError`. The codes (and their HTTP status): `input_error` (400,
 /// a caller mistake — a `ToolInputError` or argument-validation failure);
-/// `collection_busy` (409, contention under cooperative locking #65 — the op
+/// `collection_busy` (409, contention under cooperative locking — the op
 /// never ran, retryable); `unknown_action` (404, no such action name);
 /// `internal_error` (500, an unexpected server bug — detail logged, never
 /// returned, so it can't leak to a UI client).
@@ -1811,7 +1811,7 @@ pub enum ActionErrorCode {
     InternalError,
 }
 
-/// The one error envelope every `POST /actions/{name}` failure returns (#505).
+/// The one error envelope every `POST /actions/{name}` failure returns.
 ///
 /// Defined once here (the wire contract is shrike-schemas verbatim) and mirrored
 /// by `shrike.schemas.ActionError`. `message` is a non-leaking human string: for
@@ -1861,7 +1861,7 @@ macro_rules! catalog {
     };
 }
 
-/// The action exchange's protocol version (#392) — the compatibility story,
+/// The action exchange's protocol version — the compatibility story,
 /// decided while there is one consumer:
 ///
 /// - **The exchange evolves additively.** A breaking change to an action's
@@ -2045,11 +2045,11 @@ mod tests {
 
     #[test]
     fn note_roundtrip_lossless_full_and_meta() {
-        // #715 rests on `read_notes_batch` parsing each `note_dicts` wire dict
-        // via `from_value::<Note>` losslessly — the dict IS a serialized `Note`.
-        // Pin that round-trip value-for-value across the edges the search path
-        // hydrates: full mode, meta mode (no content), an embedded 0x1f field
-        // separator, multibyte unicode, and empty tags.
+        // The search path rests on `read_notes_batch` parsing each `note_dicts`
+        // wire dict via `from_value::<Note>` losslessly — the dict IS a
+        // serialized `Note`. Pin that round-trip value-for-value across the
+        // edges the search path hydrates: full mode, meta mode (no content), an
+        // embedded 0x1f field separator, multibyte unicode, and empty tags.
         let full = Note {
             id: 42,
             note_type: "Basic".into(),
@@ -2077,9 +2077,9 @@ mod tests {
 
     #[test]
     fn searchmatch_wire_shape_absent_equals_null() {
-        // The exact equivalence #715 rests on: the new typed edge emits
+        // The exact equivalence the search path rests on: the typed edge emits
         // score/substring/fuzzy as explicit null when None, AND a wire object
-        // that OMITS those keys (the pre-#715 shape, where they were never set)
+        // that OMITS those keys (the older shape, where they were never set)
         // deserializes to the IDENTICAL struct — so old-omit ≡ new-null once
         // each side passes through `SearchMatch` (de)serialization.
         let none = SearchMatch {
@@ -2151,7 +2151,7 @@ mod tests {
         assert!(serde_json::from_str::<Neighbor>(json).is_ok());
     }
 
-    // The numeric-bound parity the advertised schema must declare (#606): the
+    // The numeric-bound parity the advertised schema must declare: the
     // Python side enforces these with `ge=`; without the schemars `range`, the
     // schema served via MCP `tools/list` claimed any integer, so a client
     // following it strictly had inaccurate type info.

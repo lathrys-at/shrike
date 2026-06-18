@@ -1,9 +1,9 @@
-//! The pure-Rust kernel (#279, slice 2 — PR 1: the no-CPython keystone).
+//! The pure-Rust kernel.
 //!
-//! This crate composes the native compute plane into the embedded-host shape
-//! #224 specs: it owns the collection core (anki via its protobuf service
-//! layer, #278), the vector index engine, the derived-text store, the
-//! fusion — and, since the tokio pivot (#374), **its own runtime**
+//! This crate composes the native compute plane into the embedded-host shape:
+//! it owns the collection core (anki via its protobuf service
+//! layer), the vector index engine, the derived-text store, the
+//! fusion — and, since the tokio pivot, **its own runtime**
 //! ([`runtime`]). The kernel is idiomatic async Rust: every op is an
 //! `async fn` composing with ordinary awaits (embed → index add → derived
 //! ingest), collection access serializes through a task-actor
@@ -11,19 +11,14 @@
 //! in, a completion-backed future out via [`spawn_op`] — never scheduling.
 //! (anki keeps its own runtime for sync; the kernel guarantees sync ops never
 //! run on a runtime worker thread, not that only one runtime exists — see
-//! [`runtime`] for the `spawn_blocking` discipline and its #503 panic-repro
+//! [`runtime`] for the `spawn_blocking` discipline and its panic-repro
 //! gate.)
 //!
-//! There is **no pyo3 anywhere in this dependency tree** (epic #265 convention
-//! 5, enforced by `//shrike-core:layering_check`); the no-CPython smoke test in
+//! There is **no pyo3 anywhere in this dependency tree** (enforced by
+//! `//shrike-core:layering_check`); the no-CPython smoke test in
 //! this crate links the kernel without Python and runs open → upsert → search
-//! (a semantic and a lexical signal both contributing) → close — the #279
+//! (a semantic and a lexical signal both contributing) → close — the
 //! acceptance's executable form.
-//!
-//! Slice-2 series (recorded on #279): this keystone first; then the kernel's
-//! action core + Rust-canonical schemas with the Pydantic contract test; then
-//! the Python harness rebased onto `shrike-pyo3` kernel bindings, retiring the
-//! transitional Python schedulers from #275.
 
 #![deny(missing_docs)]
 #![deny(
@@ -59,28 +54,28 @@ use shrike_store::{DerivedStore, VectorIndex};
 pub mod runtime;
 pub use runtime::{block_on, init_runtime, spawn_op};
 
-// The multi-engine routing key (#485): re-exported so the pyo3 binding maps
+// The multi-engine routing key: re-exported so the pyo3 binding maps
 // the harness's purpose string onto it as `shrike_kernel::RecognitionPurpose`
 // without reaching into the `recognize` module.
 pub use recognize::RecognitionPurpose;
 
-// The embed-slot set (#233): the ordered set of embedding spaces the kernel
-// now holds in place of a single service. Re-exported so the bindings name
+// The embed-slot set: the ordered set of embedding spaces the kernel
+// holds in place of a single service. Re-exported so the bindings name
 // the carrier as `shrike_kernel::EmbedSpaces` without reaching into the module.
 pub use embed_set::{EmbedSpace, EmbedSpaces};
 
-// The engine contract (#342): traits live in shrike-engine-api — the kernel
+// The engine contract: traits live in shrike-engine-api — the kernel
 // consumes them and re-exports for downstream paths; it names no engine.
 pub use shrike_engine_api::{
     Embedder, ImageEmbedder, ImageResolver, Locator, MediaItem, Recognition, Recognizer, Segment,
 };
 
-// The export request/scope/format types (#71): the collection contract's,
+// The export request/scope/format types: the collection contract's,
 // re-exported so the pyo3 binding constructs them as `shrike_kernel::*`
 // without reaching past the kernel into the collection crate.
 pub use shrike_collection::{ExportOutcome, ExportRequest, ExportScope, PackageFormat};
 
-/// The collection as a task-actor (#374): every access is one job sent to a
+/// The collection as a task-actor: every access is one job sent to a
 /// single spawned task that runs them **inline, sequentially** — FIFO
 /// serialization by construction, no thread affinity (the task owns the
 /// receiver and migrates freely across runtime workers between polls;
@@ -97,10 +92,10 @@ pub use shrike_collection::{ExportOutcome, ExportRequest, ExportScope, PackageFo
 /// that `block_on`s would panic if invoked *directly* in a job (any
 /// runtime-worker thread is a runtime context). anki's `block_on` lives only
 /// on the sync/AnkiWeb service paths, none of which Shrike dispatches today
-/// (pinned in shrike-collection); when client sync (#33/#362) lands, those
+/// (pinned in shrike-collection); when client sync lands, those
 /// sync ops MUST ride `spawn_blocking` rather than an inline job — a
 /// blocking-pool thread is a legal `block_on` site. The discipline and its
-/// panic-repro gate live in [`runtime`] (#503).
+/// panic-repro gate live in [`runtime`].
 pub struct SerializedCollection {
     core: Arc<dyn Collection>,
     /// `None` after [`SerializedCollection::shutdown`] — dropping the sender
@@ -149,7 +144,7 @@ impl SerializedCollection {
         })
     }
 
-    /// The actor around a PRE-BUILT store (#389 compose): same loop, same
+    /// The actor around a PRE-BUILT store (compose): same loop, same
     /// serialization discipline — only construction differs (an injected
     /// impl is built by the host's assembly, not on the actor task; the
     /// path-opening convenience above keeps anki construction inside it).
@@ -178,7 +173,7 @@ impl SerializedCollection {
 
     /// Run a job against the collection, serialized; the await IS the
     /// transition point ops chain continuations onto. Re-acquires first if
-    /// idle-released (#64's open-on-demand, kernel-side — so a cooperative
+    /// idle-released (open-on-demand, kernel-side — so a cooperative
     /// release between any two jobs self-heals; contention surfaces as the
     /// BUSY tier from `ensure_open`).
     ///
@@ -205,7 +200,7 @@ impl SerializedCollection {
     /// Close the collection on the actor. Idempotent: once the actor is
     /// drained (a prior close/shutdown) the collection went down with it, so
     /// already-gone is the already-closed outcome, not an error — typed here
-    /// rather than string-matched by the caller (#382). Mirrors `run` except
+    /// rather than string-matched by the caller. Mirrors `run` except
     /// for that one rule.
     ///
     /// # Errors
@@ -279,51 +274,49 @@ pub struct NoteSpec {
 
 /// The kernel: one open collection + the index orchestrator (which owns and
 /// maintains the engine) + the derived store + fusion, every op an idiomatic
-/// async fn on the kernel's own runtime (#374). No transport, no Python.
-/// Index maintenance is **kernel-internal** (#332 S3d):
+/// async fn on the kernel's own runtime. No transport, no Python.
+/// Index maintenance is **kernel-internal**:
 /// upserts/deletes keep the orchestrator's vectors, fingerprints, and
-/// watermarks current, and the debounced saver (tokio::time, #374 B2)
+/// watermarks current, and the debounced saver (tokio::time)
 /// bounds what a crash can discard.
 pub struct Kernel {
     /// Arc so the tag refresher's background task can read through the
-    /// actor without holding the kernel itself (#445).
+    /// actor without holding the kernel itself.
     collection: Arc<SerializedCollection>,
-    /// The N-space index coordinator (#232): one orchestrator+saver per
+    /// The N-space index coordinator: one orchestrator+saver per
     /// embedding space, keyed by content fingerprint. The PRIMARY space lives
     /// at the base index dir directly (the in-place migration rule), so a
-    /// single-space deployment is byte-identical to the pre-#232 single
-    /// orchestrator. The index/search paths consume [`IndexSet::primary`] this
-    /// PR; removal + the watermark advance fan out to every space (#232's data
-    /// layer; the search fan-out is PR-C).
+    /// single-space deployment is byte-identical to the single
+    /// orchestrator. The index/search paths consume [`IndexSet::primary`];
+    /// removal + the watermark advance fan out to every space.
     index_set: Arc<index_set::IndexSet>,
     derived: Arc<dyn DerivedStore>,
-    /// The attachable embedding spaces (#342's first registry slot, an ordered
-    /// SET since #233): swappable at runtime — the harness attaches on
+    /// The attachable embedding spaces (the first registry slot, an ordered
+    /// SET): swappable at runtime — the harness attaches on
     /// embedding start, detaches on stop, and a model swap is detach + attach.
     /// Ops that need embedding degrade (lexical-only search,
     /// unindexed-but-created upserts) when the set is empty, mirroring the
-    /// Python host's gating. Arc so the tag refresher shares the gate (#445).
-    /// This PR (#233) lands the carrier; the index/search paths still consume
-    /// the PRIMARY text space ([`EmbedSpaces::primary`]) so single-space stays
-    /// byte-identical — the fan-out is PR-B/C (#232/#234).
+    /// Python host's gating. Arc so the tag refresher shares the gate.
+    /// The index/search paths consume the PRIMARY text space
+    /// ([`EmbedSpaces::primary`]) so single-space stays byte-identical.
     embed: Arc<RwLock<EmbedSpaces>>,
-    /// Tag-centroid state (#178/#179): the live key→tag map for the engine's
+    /// Tag-centroid state: the live key→tag map for the engine's
     /// `tag.text` space + the hygiene knobs. Centroids refresh in the
     /// background after membership-relevant index ops, coalesced under
-    /// write bursts (#445); boot/rebuild paths refresh synchronously.
+    /// write bursts; boot/rebuild paths refresh synchronously.
     tag_keys: Arc<tag_centroids::TagKeyMap>,
     tag_config: tag_centroids::TagCentroidConfig,
     tag_refresh: Arc<tag_centroids::TagRefresher>,
-    /// The recognition services (#228/#342/#485, the second registry slot):
+    /// The recognition services (the second registry slot):
     /// OCR/ASR/describe engines the harness attaches at runtime, exactly like
-    /// the embed slot — but **keyed by purpose** (#485) so OCR, ASR, and VLM
+    /// the embed slot — but **keyed by purpose** so OCR, ASR, and VLM
     /// describe can be attached independently, each sweeping its own pending
     /// set / source / fingerprint / destination. The kernel runs the pipeline
     /// over whatever is registered; recognition for a purpose is simply off
     /// when its slot is empty.
     recognize: RwLock<BTreeMap<recognize::RecognitionPurpose, Arc<RecognizeService>>>,
     recognition_gate: recognize::RecognitionGate,
-    /// Bounds concurrent LONG-RUNNING recognition dispatches (#485): a VLM
+    /// Bounds concurrent LONG-RUNNING recognition dispatches: a VLM
     /// describe / ASR call parks a blocking-pool thread for its whole duration
     /// while holding model residency, so an unbounded fan-out (several
     /// purposes, several collections sharing one runtime, or a future
@@ -332,7 +325,7 @@ pub struct Kernel {
     /// (not a batch-size cap) because it bounds CONCURRENCY without shrinking a
     /// single sweep's batch — throughput per call is unchanged.
     slow_recognition: Arc<tokio::sync::Semaphore>,
-    /// The watermark over-certification guard (#585/#590): tracks in-flight +
+    /// The watermark over-certification guard: tracks in-flight +
     /// un-healed-failed writes per watermark space (index, derived) so an
     /// advance never certifies a `col.mod` whose writes this op did not actually
     /// index/ingest. See [`watermark`]. `Arc` so a write can `register` INSIDE
@@ -341,15 +334,15 @@ pub struct Kernel {
     /// write is always registered before any later op's job runs, hence before
     /// any later op can complete-and-advance).
     watermarks: Arc<watermark::WatermarkTracker>,
-    /// The per-secondary-space cross-space IMAGE activation floor (#576),
+    /// The per-secondary-space cross-space IMAGE activation floor,
     /// keyed by space key. A dedicated CLIP secondary is image-only
-    /// (`WriteMode::ImageOnly`), so the engine's own #201b calibration — which
-    /// samples a space's *text* sub-index as pseudo-queries — finds no text
-    /// vectors there and yields no floor. This map is the harness-driven
+    /// (`WriteMode::ImageOnly`), so the engine's own intra-modal calibration —
+    /// which samples a space's *text* sub-index as pseudo-queries — finds no
+    /// text vectors there and yields no floor. This map is the harness-driven
     /// replacement: calibrated by CLIP-text-embedding a sample of note texts
     /// (the live dual encoder's text side) and firing them at the secondary's
-    /// image vectors, the #201b method with the pseudo-queries sourced from the
-    /// encoder instead of stored vectors. Recomputed at every (re)build / model
+    /// image vectors, the intra-modal method with the pseudo-queries sourced
+    /// from the encoder instead of stored vectors. Recomputed at every (re)build / model
     /// change; `build_cross_space` reads it to gate each secondary's `image`
     /// ranking. Empty until the first calibration (the floor is then a no-op
     /// and only the relative gate applies — today's behaviour).
@@ -367,7 +360,7 @@ pub struct RecognizeService {
 }
 
 /// How many long-running recognition dispatches (VLM describe / ASR) may run
-/// concurrently across the kernel (#485). A small bound: these calls park a
+/// concurrently across the kernel. A small bound: these calls park a
 /// blocking-pool thread for their whole duration while holding model
 /// residency, so the ceiling protects the pool from an unbounded fan-out
 /// (multiple purposes, several collections sharing the runtime, a future
@@ -376,7 +369,7 @@ pub struct RecognizeService {
 /// fast/bounded and never acquires a permit.
 pub const SLOW_RECOGNITION_CONCURRENCY: usize = 2;
 
-/// The derived-store source recognized image text lands under (#199/#228).
+/// The derived-store source recognized image text lands under.
 pub const OCR_SOURCE: &str = "ocr";
 /// The derived-store meta key holding the recognizer fingerprint.
 pub const RECOGNIZER_FINGERPRINT_KEY: &str = "recognizer_fingerprint";
@@ -405,28 +398,28 @@ pub type KernelImages = (Box<dyn ImageEmbedder>, Box<dyn ImageResolver>);
 
 pub(crate) const FIELD_SOURCE: &str = "field";
 
-/// A shared, pre-enumerated `(note_id, media_names)` set for one media kind
-/// (#485): the multi-purpose recognition sweep enumerates each kind once and
+/// A shared, pre-enumerated `(note_id, media_names)` set for one media kind:
+/// the multi-purpose recognition sweep enumerates each kind once and
 /// hands this Arc to every same-kind purpose's sweep, so the collection is
 /// never re-scanned per purpose.
 type MediaRefs = Arc<[(i64, Vec<String>)]>;
 
-/// The NOTE-item vector spaces (#178): every note search is scoped to these,
+/// The NOTE-item vector spaces: every note search is scoped to these,
 /// so other entity kinds sharing the engine (per-(tag, modality) centroids in
 /// `tag.*` spaces) can never surface a non-note key from a note query — the
 /// no-leakage property is structural, not a post-filter.
 pub const NOTE_MODALITIES: &[&str] = &["text", "image"];
 
-/// The per-modality tag-centroid spaces (#178/#179): `tag.text` holds the
+/// The per-modality tag-centroid spaces: `tag.text` holds the
 /// renormalized mean of member notes' TEXT vectors per tag (never a
 /// cross-modal mean — the modality gap makes one semantically empty).
 pub const TAG_TEXT_SPACE: &str = "tag.text";
 
 /// Deterministically truncate `items` to at most `cap` via a PARTIAL LCG
-/// Fisher-Yates (#576): only the first `cap` slots are drawn, so a large
+/// Fisher-Yates: only the first `cap` slots are drawn, so a large
 /// collection isn't fully shuffled to take the sample. Stable across runs (a
 /// fixed seed) — the calibration stats are statistical, never byte-pinned.
-/// Mirrors the engine's own #201b sampler (`engine.rs::calibrate_activation`).
+/// Mirrors the engine's own sampler (`engine.rs::calibrate_activation`).
 fn deterministic_sample<T>(items: &mut Vec<T>, cap: usize) {
     let n = items.len();
     if n <= cap {
@@ -446,7 +439,7 @@ fn deterministic_sample<T>(items: &mut Vec<T>, cap: usize) {
 impl Kernel {
     /// Open a collection and its sidecar stores (cache_dir holds the derived
     /// store and the index files, like the Python host's cache layout).
-    /// Scheduling AND timing are the kernel's own (#374): the owned runtime
+    /// Scheduling AND timing are the kernel's own: the owned runtime
     /// spawns the collection actor, and the debounced index flush rides
     /// tokio::time unconditionally. Saver defaults apply; a host with tuning
     /// flags uses [`Self::open_with`].
@@ -460,7 +453,7 @@ impl Kernel {
     }
 
     /// [`Self::open`] with the index-flush tuning the host's
-    /// `--index-save-*` flags carry (#355 item 2): `save_delay` is the idle
+    /// `--index-save-*` flags carry: `save_delay` is the idle
     /// debounce in seconds, `save_threshold` the unsaved-change count that
     /// forces an immediate flush. `None` = the built-in default.
     ///
@@ -487,8 +480,8 @@ impl Kernel {
                 .chain(std::iter::once(TAG_TEXT_SPACE.to_string()))
                 .collect(),
         )?);
-        // The derived store is namespaced per collection (#547), mirroring the
-        // index (#67): `<cache_dir>/derived/<namespace>/shrike.db`, so a daemon
+        // The derived store is namespaced per collection, mirroring the
+        // index: `<cache_dir>/derived/<namespace>/shrike.db`, so a daemon
         // serving several collections never shares one `shrike.db` (which would
         // cross-contaminate substring/fuzzy/OCR search). Migrate an existing
         // flat `<cache_dir>/shrike.db` into this collection's namespace first,
@@ -509,7 +502,7 @@ impl Kernel {
             DerivedEngine::SCHEMA_VERSION,
         )?);
         tracing::debug!(collection = collection_path, "kernel opened");
-        // The vector index is namespaced per collection (#67): each collection
+        // The vector index is namespaced per collection: each collection
         // gets its own `<cache_dir>/index/<path-derived-id>/` so a daemon
         // serving several collections never collides their indexes. The layout
         // also migrates an existing flat (single-collection) layout into this
@@ -527,7 +520,7 @@ impl Kernel {
         )
     }
 
-    /// The injection seam (#389): a kernel over PRE-BUILT stores — the
+    /// The injection seam: a kernel over PRE-BUILT stores — the
     /// deployment ladder's composition point (remote/platform impls swap in
     /// here; [`Self::open`] is the all-local convenience over it). The
     /// collection arrives as the bare store; the kernel wraps it in its own
@@ -547,7 +540,7 @@ impl Kernel {
     ) -> NativeResult<Self> {
         let collection = Arc::new(SerializedCollection::from_store(collection));
         // The injection seam carries pre-built stores and no collection path,
-        // so it can't derive a per-collection index namespace (#67): the index
+        // so it can't derive a per-collection index namespace: the index
         // stays flat under `cache_dir`. The composing caller owns multiplexing
         // if it ever serves several collections through this seam.
         let layout = shrike_cache::IndexLayout::flat(cache_dir);
@@ -573,9 +566,9 @@ impl Kernel {
     ) -> NativeResult<Self> {
         std::fs::create_dir_all(cache_dir).context(ErrorKind::Internal, "cache dir")?;
         std::fs::create_dir_all(&index_layout.dir).context(ErrorKind::Internal, "index dir")?;
-        // The N-space index coordinator (#232): the PRIMARY space is the engine
+        // The N-space index coordinator: the PRIMARY space is the engine
         // built/injected above, opened at the base index dir DIRECTLY (no
-        // subdir → the in-place migration rule, byte-identical to pre-#232).
+        // subdir → the in-place migration rule, byte-identical to the single space).
         // Its modalities are the engine's own (NOTE_MODALITIES + tag.text for an
         // opened kernel; the injected engine's for the compose seam). Secondary
         // spaces are built by the factory over their own modalities.
@@ -597,7 +590,7 @@ impl Kernel {
         let tag_keys = Arc::new(tag_centroids::TagKeyMap::default());
         let tag_config = tag_centroids::TagCentroidConfig::default();
         // Tag centroids bind to the PRIMARY/dedicated text space's engine +
-        // saver (#232): a pure function of THAT space's text vectors, never
+        // saver: a pure function of THAT space's text vectors, never
         // fanned out. The primary's engine/saver Arcs are fixed for the kernel's
         // life (only secondaries are ever added), so these stay valid.
         let tag_refresh = tag_centroids::TagRefresher::new(
@@ -624,9 +617,9 @@ impl Kernel {
         })
     }
 
-    /// Attach (or swap) the OCR recognition service — the #342 slot pattern,
+    /// Attach (or swap) the OCR recognition service — the slot pattern,
     /// second instance. The OCR-defaulting convenience over
-    /// [`attach_recognizer_with`] (#485): existing hosts and kernel tests keep
+    /// [`attach_recognizer_with`]: existing hosts and kernel tests keep
     /// the single-arg shape and target the OCR purpose. The harness follows up
     /// by driving the pending sweep.
     pub fn attach_recognizer(
@@ -637,7 +630,7 @@ impl Kernel {
         self.attach_recognizer_with(recognize::RecognitionPurpose::Ocr, recognizer, resolver);
     }
 
-    /// Attach (or swap) the recognition service for a specific purpose (#485)
+    /// Attach (or swap) the recognition service for a specific purpose
     /// — OCR, ASR, or VLM describe, each routed to its own pending set /
     /// source / fingerprint / destination by the sweep.
     ///
@@ -669,7 +662,7 @@ impl Kernel {
         self.detach_recognizer_for(recognize::RecognitionPurpose::Ocr);
     }
 
-    /// Detach the recognition service for a specific purpose (#485).
+    /// Detach the recognition service for a specific purpose.
     ///
     /// # Panics
     ///
@@ -687,7 +680,7 @@ impl Kernel {
         self.recognize_service_for(recognize::RecognitionPurpose::Ocr)
     }
 
-    /// The recognition service for a specific purpose, if attached (#485).
+    /// The recognition service for a specific purpose, if attached.
     ///
     /// # Panics
     ///
@@ -728,7 +721,7 @@ impl Kernel {
         recognize::RecognitionPurpose::Asr,
     ];
 
-    /// The derived `source` strings whose rows are vector-minting (#485): the
+    /// The derived `source` strings whose rows are vector-minting: the
     /// union of every purpose's source (all recognition purposes mint
     /// vectors — only the LEXICAL surfaces differ). `compose_embed_inputs`
     /// reads OCR/ASR/VLM recognized text from these.
@@ -737,7 +730,7 @@ impl Kernel {
     }
 
     /// The derived `source` strings HIDDEN from the lexical (substring/fuzzy)
-    /// surfaces (#485) — every [`recognize::Destination::VectorOnly`]
+    /// surfaces — every [`recognize::Destination::VectorOnly`]
     /// purpose's source. Passed into the derived store so a VLM-describe row
     /// is stored (for provenance + reconcile) but never reachable via
     /// literal/typo search.
@@ -755,7 +748,7 @@ impl Kernel {
     }
 
     /// Recompute every tag centroid from the engine's current text vectors +
-    /// one membership pass (#179). Cheap (hundreds of tags, in-memory vector
+    /// one membership pass. Cheap (hundreds of tags, in-memory vector
     /// reads); runs at the tail of every index-changing op and is a no-op
     /// shortcut when no embedder is attached (no text vectors to mean).
     ///
@@ -776,7 +769,7 @@ impl Kernel {
             })
             .await??;
         // Tag centroids are a pure function of the PRIMARY text space's vectors
-        // (#232) — recompute against its engine, request its saver (tag.text
+        // — recompute against its engine, request its saver (tag.text
         // lives only in the primary; never fanned out).
         let tag_engine = self.index_set.tag_engine();
         let built =
@@ -795,7 +788,7 @@ impl Kernel {
 
     /// Attach an embedding service (embedding start / model swap) — the N=1
     /// convenience over [`attach_embedder_space`]. The space key is read from
-    /// the embedder's own fingerprint (the CONTENT fingerprint, #233), so a
+    /// the embedder's own fingerprint (the CONTENT fingerprint), so a
     /// re-attach of the same model replaces its space in place rather than
     /// stacking a duplicate. The orchestrator flips back to ready if it was
     /// only unavailable; the harness follows up with `reindex_if_needed` (a
@@ -810,7 +803,7 @@ impl Kernel {
         self.attach_embedder_space(key, embedder, images);
     }
 
-    /// Attach (or replace) the embedding space keyed by `key` (#233) — the
+    /// Attach (or replace) the embedding space keyed by `key` — the
     /// general by-space-key entry the harness fan-out and the bindings drive.
     /// A space whose key matches an already-attached one is replaced in place
     /// (a model swap that keeps the fingerprint, or a re-attach); a new key is
@@ -831,12 +824,12 @@ impl Kernel {
             .write()
             .expect("embed slot poisoned")
             .attach(key.clone(), Arc::new(EmbedService { embedder, images }));
-        // Lockstep with the index set (#232): bind this embedding space's key to
+        // Lockstep with the index set: bind this embedding space's key to
         // an index space. The FIRST keyed attach claims the un-keyed PRIMARY
         // index space (no new dir → in-place migration); a NEW key materializes
         // a secondary orchestrator. A keyless backend (`None`) leaves the index
         // set on the primary (the degenerate single-space path). The index/
-        // search path still consumes the primary this PR.
+        // search path consumes the primary.
         if let Some(key) = key.as_deref() {
             let modalities: Vec<String> = if has_images {
                 NOTE_MODALITIES.iter().map(|m| m.to_string()).collect()
@@ -860,14 +853,14 @@ impl Kernel {
     pub fn detach_embedder(&self) {
         self.embed.write().expect("embed slot poisoned").clear();
         // Flush every space's index, then mark the primary (the served index)
-        // unavailable (#232). Secondary on-disk vectors are likewise kept.
+        // unavailable. Secondary on-disk vectors are likewise kept.
         for orch in self.index_set.all_orchestrators() {
             let _ = orch.save();
         }
         self.index_set.primary().mark_unavailable();
     }
 
-    /// Detach a single embedding space by key (#233). Flushes + marks the
+    /// Detach a single embedding space by key. Flushes + marks the
     /// index unavailable only when the LAST space leaves (the index serves the
     /// primary space; while another space remains, it stays live). Returns
     /// whether a space was removed.
@@ -891,8 +884,8 @@ impl Kernel {
     }
 
     /// The PRIMARY text embedding space, if any — the one engine the
-    /// index/search paths consume this PR. With one declared embedder it is
-    /// the sole attached space (byte-identical to the pre-#233 single slot).
+    /// index/search paths consume. With one declared embedder it is
+    /// the sole attached space (byte-identical to the single slot).
     ///
     /// # Panics
     ///
@@ -901,8 +894,8 @@ impl Kernel {
         self.embed.read().expect("embed slot poisoned").primary()
     }
 
-    /// The number of attached embedding spaces (#233) — status surface; the
-    /// index path consumes only the primary this PR.
+    /// The number of attached embedding spaces — status surface; the
+    /// index path consumes only the primary.
     ///
     /// # Panics
     ///
@@ -911,9 +904,9 @@ impl Kernel {
         self.embed.read().expect("embed slot poisoned").len()
     }
 
-    /// Every attached embedding space's service in declaration order (#233) —
-    /// the carrier the query fan-out (PR-C) and status will read. The index
-    /// path does NOT consume this set this PR (it stays on the primary).
+    /// Every attached embedding space's service in declaration order —
+    /// the carrier the query fan-out and status read. The index
+    /// path does NOT consume this set (it stays on the primary).
     ///
     /// # Panics
     ///
@@ -923,7 +916,7 @@ impl Kernel {
     }
 
     /// The SECONDARY text-capable embedding spaces as `(key, service)` pairs
-    /// (#234) — the cross-space query fan-out embeds the query into each and
+    /// — the cross-space query fan-out embeds the query into each and
     /// searches its own index space. EMPTY in the N=1 / single-space case.
     ///
     /// # Panics
@@ -936,7 +929,7 @@ impl Kernel {
             .secondary_text_capable_keyed()
     }
 
-    /// The SEPARATE image-primary write route (#232), or `None`. Returns the
+    /// The SEPARATE image-primary write route, or `None`. Returns the
     /// image-primary's orchestrator + service ONLY when the per-modality-primary
     /// image space is a DISTINCT space from the text-primary — i.e. a dedicated
     /// text embedder + a separate CLIP (the no-omni deployment). When the
@@ -971,7 +964,7 @@ impl Kernel {
 
     /// Embed `source_texts` into every SECONDARY text-capable space and search
     /// each space's own index engine, producing the cross-space semantic inputs
-    /// `actions::search_notes` fuses (#234). Each secondary space embeds the
+    /// `actions::search_notes` fuses. Each secondary space embeds the
     /// query with ITS OWN model and searches ITS OWN engine (`search_by_modality`
     /// over the note-item modalities), and the per-source best query cosine is
     /// captured for the relative activation gate. EMPTY when there are no
@@ -1018,11 +1011,11 @@ impl Kernel {
                     }
                 })
                 .collect();
-            // This space's cross-space image floor (#576): the harness-driven
+            // This space's cross-space image floor: the harness-driven
             // calibration (CLIP-text pseudo-queries → image vectors), keyed by
             // space. A dedicated CLIP secondary is image-only, so the engine's
-            // own #201b stats (text→image) are empty there — `secondary_floors`
-            // is the replacement. `None` (uncalibrated, too few image samples)
+            // own intra-modal stats (text→image) are empty there —
+            // `secondary_floors` is the replacement. `None` (uncalibrated, too few image samples)
             // → the floor is a no-op and only the relative gate applies.
             let image_floor = self
                 .secondary_floors
@@ -1039,18 +1032,18 @@ impl Kernel {
         Ok(out)
     }
 
-    /// Recalibrate every SECONDARY cross-space's image activation floor (#576)
+    /// Recalibrate every SECONDARY cross-space's image activation floor
     /// and store it in `secondary_floors`. The harness drives this at every
     /// (re)build / model change (the embedder coupling lives here, where the
     /// CLIP backend Arcs are — engine.rs stays embedder-free).
     ///
-    /// The method is #201b's exactly, with the pseudo-queries sourced from the
-    /// LIVE CLIP-text encoder rather than stored text vectors (a dedicated CLIP
-    /// secondary indexes images only, so it has none): take a deterministic
-    /// sample of image-bearing notes, CLIP-text-embed each note's text through
-    /// the secondary's OWN backend, search it against that space's image
-    /// vectors, record the best NON-SELF cosine (exclude the note's own image,
-    /// like #201b), and set `floor = mean + margin·std` when ≥ `CALIB_MIN`
+    /// The method is the intra-modal one exactly, with the pseudo-queries
+    /// sourced from the LIVE CLIP-text encoder rather than stored text vectors
+    /// (a dedicated CLIP secondary indexes images only, so it has none): take a
+    /// deterministic sample of image-bearing notes, CLIP-text-embed each note's
+    /// text through the secondary's OWN backend, search it against that space's
+    /// image vectors, record the best NON-SELF cosine (exclude the note's own
+    /// image), and set `floor = mean + margin·std` when ≥ `CALIB_MIN`
     /// samples land. A space with too few image notes gets no floor (the gate
     /// then rides the relative comparison alone). Returns the per-space derived
     /// floor (`None` = uncalibrated) for the harness to log / surface.
@@ -1123,7 +1116,7 @@ impl Kernel {
     /// this space's backend, search its image vectors, collect best non-self
     /// cosines, return `mean + margin·std` (or `None` below `CALIB_MIN`). No-op
     /// (`None`) when the space has no image vectors. `margin` is the harness-
-    /// resolved `search.cross_space_fusion.margin` (#580) — the precision/recall
+    /// resolved `search.cross_space_fusion.margin` — the precision/recall
     /// dial; `ACTIVATION_MARGIN` (1.0) is its default.
     async fn calibrate_one_secondary_floor(
         &self,
@@ -1152,7 +1145,7 @@ impl Kernel {
         let texts: Vec<String> = sample.iter().map(|(_, t)| t.clone()).collect();
         let qvectors = svc.embedder.embed(texts).await?;
         // CALIB_K so a pseudo-query whose own image is the nearest hit still has
-        // a non-self hit to record (mirrors the engine's #201b sampling).
+        // a non-self hit to record (mirrors the engine's intra-modal sampling).
         let rows =
             engine.search_by_modality(&qvectors, index_orchestrator::CALIB_K, Some(note_spaces))?;
         let mut best_sims: Vec<f64> = Vec::with_capacity(sample.len());
@@ -1175,22 +1168,22 @@ impl Kernel {
             .map(|s| (s - mean) * (s - mean))
             .sum::<f64>()
             / n;
-        // The one floor formula (#201b's `mean + margin·std`), shared with the
+        // The one floor formula (`mean + margin·std`), shared with the
         // primary's via `actions::activation_floor`. The margin is the harness-
-        // resolved dial (#580); `ACTIVATION_MARGIN` is its 1.0 default.
+        // resolved dial; `ACTIVATION_MARGIN` is its 1.0 default.
         Ok(actions::activation_floor(Some((mean, var.sqrt())), margin))
     }
 
     /// The PRIMARY orchestrator (state, status, drift) — the harness's status
-    /// surface and the one engine the index/search paths consume this PR
-    /// (#232). With one declared embedder it is the sole space at the base dir,
-    /// so the wire status + persistence are byte-identical to pre-#232.
+    /// surface and the one engine the index/search paths consume.
+    /// With one declared embedder it is the sole space at the base dir,
+    /// so the wire status + persistence are byte-identical to the single space.
     pub fn index(&self) -> Arc<index_orchestrator::IndexOrchestrator> {
         self.index_set.primary()
     }
 
-    /// The N-space index coordinator (#232) — removal + the watermark advance
-    /// fan out across it; the search fan-out is PR-C.
+    /// The N-space index coordinator — removal + the watermark advance
+    /// fan out across it.
     pub fn index_set(&self) -> &index_set::IndexSet {
         &self.index_set
     }
@@ -1217,10 +1210,10 @@ impl Kernel {
         let Some(svc) = self.embed_service() else {
             return Ok(false); // no embedder → nothing to (re)index
         };
-        // PR-B: the index path consumes the PRIMARY space's orchestrator + the
-        // primary embedder (the per-space reconcile fan-out is PR-C). Per-space
-        // drift is keyed on the primary's own model_id, so a model swap on the
-        // primary drifts only it — byte-identical to the single-space path.
+        // The index path consumes the PRIMARY space's orchestrator + the
+        // primary embedder. Per-space drift is keyed on the primary's own
+        // model_id, so a model swap on the primary drifts only it —
+        // byte-identical to the single-space path.
         let orch = self.index_set.primary();
         let col_mod = self.col_mod().await?;
         let model_id = svc.embedder.fingerprint();
@@ -1239,7 +1232,7 @@ impl Kernel {
                 orch.materialize_empty(dim, col_mod, model_id.as_deref());
             }
             // A whole-collection (re)materialize re-certifies the index space →
-            // any earlier per-op index-tail failure is healed (#585).
+            // any earlier per-op index-tail failure is healed.
             self.watermarks.clear_index_poison();
             self.refresh_tags_best_effort().await;
             return Ok(true);
@@ -1256,9 +1249,9 @@ impl Kernel {
         // A successful whole-collection reconcile re-indexes every changed/new
         // note (and drops deleted) and stamps its own snapshot col_mod, so every
         // prior per-op index-tail failure is now healed — clear the poison floor
-        // that was holding the watermark back (#585).
+        // that was holding the watermark back.
         self.watermarks.clear_index_poison();
-        // The SEPARATE image-primary space (#232), if any: reconcile its
+        // The SEPARATE image-primary space, if any: reconcile its
         // ImageOnly index against its OWN drift (keyed on its own model_id /
         // image fingerprints). None at N=1 / for an omni primary.
         self.reconcile_image_route(&inputs, col_mod).await?;
@@ -1266,7 +1259,7 @@ impl Kernel {
         Ok(true)
     }
 
-    /// Reconcile the separate image-primary space's ImageOnly index (#232), if
+    /// Reconcile the separate image-primary space's ImageOnly index, if
     /// one exists. Drift is the image space's own (its model_id is the image
     /// embedder's fingerprint, its hashes fold image refs only), so a pure-text
     /// edit is a no-op here. No-op when there is no separate image route.
@@ -1334,7 +1327,7 @@ impl Kernel {
                 svc.images_pair(),
             )
             .await?;
-        // The SEPARATE image-primary space (#232): a full rebuild re-embeds its
+        // The SEPARATE image-primary space: a full rebuild re-embeds its
         // ImageOnly index too. None at N=1 / for an omni primary.
         if let Some((iorch, isvc)) = self.image_only_route() {
             if let Some((ie, r)) = isvc.images_pair() {
@@ -1351,7 +1344,7 @@ impl Kernel {
             }
         }
         // A full rebuild re-certifies the whole index space → clear any poison
-        // floor from earlier per-op index-tail failures (#585).
+        // floor from earlier per-op index-tail failures.
         self.watermarks.clear_index_poison();
         self.refresh_tags_best_effort().await;
         Ok(total)
@@ -1374,8 +1367,8 @@ impl Kernel {
     }
 
     /// Compose orchestrator inputs from collection rows + the derived
-    /// store's recognized texts across EVERY vector-minting source
-    /// (#199/#228/#485): the index derives from collection text + OCR + ASR +
+    /// store's recognized texts across EVERY vector-minting source:
+    /// the index derives from collection text + OCR + ASR +
     /// VLM-describe, so reconcile == rebuild keeps holding after recognition,
     /// and a note's recognized text mints vectors on any (re-)embed path.
     /// Vector-worthiness re-judges from the stored text (confidence already
@@ -1390,7 +1383,7 @@ impl Kernel {
         let mut recognized_map: std::collections::HashMap<i64, Vec<String>> =
             std::collections::HashMap::new();
         // Union every recognition source's vector-worthy text under the note
-        // key. Per-op callers scope the read to the written notes (#445); the
+        // key. Per-op callers scope the read to the written notes; the
         // full-set read is for rebuild/reconcile, which consume everything.
         // One query per source (a small fixed set — ocr/vlm/asr), each bounded
         // by rows that EXIST for that source (most notes have none), so this
@@ -1427,7 +1420,7 @@ impl Kernel {
             .collect()
     }
 
-    /// Full derived-text (FTS5) rebuild, entirely kernel-side (#445): one
+    /// Full derived-text (FTS5) rebuild, entirely kernel-side: one
     /// collection job collects the field rows, the build runs on the blocking
     /// pool against the kernel's own engine — the rows never cross the FFI.
     /// (The Python path round-tripped the whole collection's text
@@ -1441,7 +1434,7 @@ impl Kernel {
     ///
     /// Returns an error if the collection read or the derived-store build fails.
     pub async fn rebuild_derived(&self) -> NativeResult<(usize, i64)> {
-        // Commit-then-verify (#471): the collect runs in one actor job but
+        // Commit-then-verify: the collect runs in one actor job but
         // the build commits OFF the actor, so concurrent jobs (an upsert's
         // ingest, a sweep's OCR store for a new note) can land in the window
         // — and the build's field-replace + dead-note prune would erase
@@ -1459,8 +1452,8 @@ impl Kernel {
             if now == dmod {
                 // A clean whole-collection derived rebuild re-ingests every note
                 // and stamps its own snapshot col_mod → prior per-op derived
-                // ingest failures are healed; clear the derived poison floor
-                // (#585). (The capped/raced fallback below deliberately does
+                // ingest failures are healed; clear the derived poison floor.
+                // (The capped/raced fallback below deliberately does
                 // NOT — its watermark is knowingly behind.)
                 self.watermarks.clear_derived_poison();
                 return Ok(last);
@@ -1498,8 +1491,8 @@ impl Kernel {
         Ok((n, dmod, now))
     }
 
-    /// One bounded recognition sweep across EVERY attached purpose
-    /// (#228/#485): for each of OCR / ASR / VLM-describe that has a recognizer
+    /// One bounded recognition sweep across EVERY attached purpose:
+    /// for each of OCR / ASR / VLM-describe that has a recognizer
     /// attached, recognize up to `max_items` of ITS pending media, persist
     /// gated text + segments per its destination, and re-embed the affected
     /// notes so recognition vectors mint. Each purpose sweeps independently
@@ -1523,7 +1516,7 @@ impl Kernel {
         if purposes.is_empty() {
             return Ok(recognize::SweepReport::Unavailable);
         }
-        // Enumerate each NEEDED media kind ONCE (#445: no per-purpose
+        // Enumerate each NEEDED media kind ONCE (no per-purpose
         // collection re-scan — OCR and describe are both Image, so a single
         // `note_image_refs` pass over the 100k-note collection serves both).
         // The shared Arc'd refs are handed to every purpose's sweep.
@@ -1570,10 +1563,10 @@ impl Kernel {
         }
     }
 
-    /// One bounded recognition sweep for a SINGLE purpose (#485) — the
-    /// per-engine routing of the original #228 sweep. Pending = a resolvable
+    /// One bounded recognition sweep for a SINGLE purpose — the
+    /// per-engine routing of the sweep. Pending = a resolvable
     /// media ref of this purpose's media kind with no row for THIS source AND
-    /// no below-gate marker (#416) — or all of them after this purpose's
+    /// no below-gate marker — or all of them after this purpose's
     /// recognizer-fingerprint changes (its own meta key, so an OCR upgrade
     /// never re-derives ASR/VLM and vice versa). Persists per the purpose's
     /// destination: a VectorOnly (VLM) row is still stored (for provenance +
@@ -1595,7 +1588,7 @@ impl Kernel {
     ) -> NativeResult<recognize::SweepReport> {
         // Enumerate this purpose's media kind once, then delegate. The
         // multi-purpose driver shares one enumeration across same-kind
-        // purposes (#445); this single-purpose entry point is the
+        // purposes; this single-purpose entry point is the
         // test/binding convenience.
         if self.recognize_service_for(purpose).is_none() {
             return Ok(recognize::SweepReport::Unavailable);
@@ -1605,7 +1598,7 @@ impl Kernel {
             .await
     }
 
-    /// [`recognize_pending_for`] over a PRE-ENUMERATED media-ref set (#445):
+    /// [`recognize_pending_for`] over a PRE-ENUMERATED media-ref set:
     /// the multi-purpose driver enumerates each media kind once and shares the
     /// Arc'd refs across same-kind purposes, so a sweep never re-scans the
     /// collection per purpose.
@@ -1641,21 +1634,21 @@ impl Kernel {
                 );
                 self.derived.remove(&stale, Some(source))?;
             }
-            // Below-gate markers ride the same invalidation (#416): the new
+            // Below-gate markers ride the same invalidation: the new
             // engine may read what the old one couldn't, so gated items
             // re-enter the pending set exactly like stored rows re-derive.
             self.derived.clear_gated(source)?;
         }
 
         // Pending set: resolvable media of this purpose's kind without a row
-        // for THIS source — and without a below-gate marker (#416): an item
+        // for THIS source — and without a below-gate marker: an item
         // the gate dropped is DONE (its outcome can't change until the
         // fingerprint does), not pending, so it is never re-recognized and an
         // all-gated window converges instead of re-taking itself forever.
         // `raw` is the pre-enumerated (note_id, names) set shared across
-        // same-kind purposes (#445): the pending diff needs only the names.
+        // same-kind purposes: the pending diff needs only the names.
         //
-        // Done-set keyed `note_id -> {name}` (#601): the per-pair probe no
+        // Done-set keyed `note_id -> {name}`: the per-pair probe no
         // longer clones the name for a `(i64, String)` lookup — it borrows
         // `name` against the note's set. Built ONCE here, then this call DRAINS
         // the whole pending set in bounded chunks below, so the O(collection)
@@ -1687,7 +1680,7 @@ impl Kernel {
             return Ok(recognize::SweepReport::Idle);
         }
 
-        // Drain the whole pending set in bounded chunks within THIS call (#601):
+        // Drain the whole pending set in bounded chunks within THIS call:
         // each chunk dispatches at most `max_items` to the recognizer (the
         // load-bearing bounded-batch property — a chunk parks one blocking-pool
         // thread; the slow-recognition permit still bounds concurrency), and we
@@ -1720,7 +1713,7 @@ impl Kernel {
     }
 
     /// Recognize + persist ONE bounded chunk of pending `(note_id, name)` pairs
-    /// for a purpose (#601, the inner step of the drain loop). Returns
+    /// for a purpose (the inner step of the drain loop). Returns
     /// `(recognized, stored)`. A recognizer `Err` propagates BEFORE any persist
     /// (the down-endpoint contract); the fingerprint meta is advanced by the
     /// caller once the drain completes.
@@ -1735,7 +1728,7 @@ impl Kernel {
         // One pass, many consumers: recognize the batch, keep text AND
         // segments. A read that fails after the exists() check (TOCTOU
         // delete, transient error, resolver bug) SKIPS the item rather than
-        // recognizing empty bytes (#386) — nothing is stored for it, so the
+        // recognizing empty bytes — nothing is stored for it, so the
         // next sweep re-offers it. `sent` and `items` are built together so
         // the recognizer's output stays aligned with what was actually sent.
         let mut sent: Vec<(i64, String)> = Vec::with_capacity(pending.len());
@@ -1759,7 +1752,7 @@ impl Kernel {
         // The chunk-Err propagates HERE — before any persist or fingerprint
         // advance below — so a down endpoint leaves the backlog intact.
         // A long-running purpose (describe/ASR) holds a concurrency permit
-        // ONLY across the recognize() call (#485): the call parks a
+        // ONLY across the recognize() call: the call parks a
         // blocking-pool thread for its whole duration while holding model
         // residency, so the kernel bounds how many run at once. The permit is
         // released the instant recognition returns (before the cheap persist),
@@ -1791,11 +1784,11 @@ impl Kernel {
         // Persist per note: ingest REPLACES a note's rows for the source, so
         // merge with what already exists. A gated-out item stores no text row
         // (a zero-text row would index "" — FTS5 pollution) but DOES persist
-        // a below-gate marker (#416), so the next sweep's pending diff counts
+        // a below-gate marker, so the next sweep's pending diff counts
         // it done instead of re-recognizing it forever. Markers are cleared
         // with the rows on a fingerprint change (above), so an engine upgrade
         // re-judges them like everything else.
-        // Scoped to the batch's notes (#445): the merge previously read the
+        // Scoped to the batch's notes: the merge previously read the
         // whole table per sweep.
         let sent_ids: Vec<i64> = sent
             .iter()
@@ -1817,7 +1810,7 @@ impl Kernel {
             match self.recognition_gate.judge(recognition) {
                 recognize::GateOutcome::Drop => {
                     // The below-gate marker is ALSO the negative cache for a
-                    // per-item PERMANENT failure (#485): an engine converts a
+                    // per-item PERMANENT failure: an engine converts a
                     // 4xx-class rejection (this image is oversized/unsupported)
                     // into the empty recognition (`text="", confidence=0.0`),
                     // which gates as Drop here — so a permanently-failed item is
@@ -1856,7 +1849,7 @@ impl Kernel {
         }
         self.derived.mark_gated(source, &gated)?;
         // NB the fingerprint meta is advanced by the DRAIN CALLER once the whole
-        // drain completes (#601) — not here per chunk — so a mid-drain abort
+        // drain completes — not here per chunk — so a mid-drain abort
         // never marks this purpose's recognition as up-to-date.
 
         // Re-embed the affected notes: their hash now folds the recognized
@@ -1875,9 +1868,9 @@ impl Kernel {
     }
 
     /// `(note_id, media_names)` for every note referencing media of `kind` —
-    /// the sweep's pending-set source, routed by media kind (#485). Image refs
+    /// the sweep's pending-set source, routed by media kind. Image refs
     /// come from `note_image_refs` (the `<img src>` extractor); audio refs from
-    /// `note_sound_refs` (the `[sound:…]` extractor) — both scoped reads (#445).
+    /// `note_sound_refs` (the `[sound:…]` extractor) — both scoped reads.
     async fn note_media_refs(
         &self,
         kind: recognize::MediaKind,
@@ -1893,7 +1886,7 @@ impl Kernel {
     }
 
     /// Read `col.mod` AND register a watermark token in ONE collection-actor
-    /// job (#585). For paths with no own `col.mod`-bumping write (the
+    /// job. For paths with no own `col.mod`-bumping write (the
     /// recognition sweep, `reindex_notes`, `forget_notes`, `metadata_changed`):
     /// reading and registering in the same job is what keeps registration
     /// FIFO-ordered with every concurrent write. By the actor's FIFO, any write
@@ -1919,8 +1912,8 @@ impl Kernel {
         self.index_written_tracked(written, tokens).await
     }
 
-    /// The maintained index/derived tail, best-effort (#590) and
-    /// over-certification-safe (#585). `tokens` carries the `col.mod` captured
+    /// The maintained index/derived tail, best-effort and
+    /// over-certification-safe. `tokens` carries the `col.mod` captured
     /// (and registered as in-flight) with this op's collection write, so the
     /// watermark advance is bounded to a value whose writes this op actually
     /// indexed.
@@ -1944,7 +1937,7 @@ impl Kernel {
             self.advance_watermarks(tokens, true, true).await;
             return Ok(());
         }
-        // First-occurrence dedupe (#445): a batch that wrote the same note
+        // First-occurrence dedupe: a batch that wrote the same note
         // twice must not index it twice — and the collection readers' move-
         // out assembly hands a repeated id its content on the first
         // occurrence only.
@@ -1958,7 +1951,7 @@ impl Kernel {
         let ids = written.to_vec();
         // The read is the input to BOTH tails; a read failure means neither tail
         // ran, so both watermarks stay behind (best-effort) and the next drift
-        // heals. (Pre-#590 this `?`-propagated and failed the whole call.)
+        // heals. (This previously `?`-propagated and failed the whole call.)
         let read = self
             .collection
             .run(move |core| -> NativeResult<_> {
@@ -2003,7 +1996,7 @@ impl Kernel {
             false
         };
         // The derived (lexical) half, independent of the index half — it runs
-        // even with embeddings off (#98).
+        // even with embeddings off.
         let derived_ok = match self.ingest_derived(&rows, written) {
             Ok(()) => true,
             Err(e) => {
@@ -2017,7 +2010,7 @@ impl Kernel {
             }
         };
         self.advance_watermarks(tokens, index_ok, derived_ok).await;
-        // Tag centroids derive from the text vectors just written (#179) —
+        // Tag centroids derive from the text vectors just written —
         // refreshed off the op tail, and only when the op could have changed
         // membership AND the index half actually landed (a failed embed wrote no
         // vectors to derive a centroid from).
@@ -2027,7 +2020,7 @@ impl Kernel {
         Ok(())
     }
 
-    /// The index-add half of the maintained tail (#232): the text-primary write
+    /// The index-add half of the maintained tail: the text-primary write
     /// plus the separate image-primary write when one exists.
     async fn write_index(
         &self,
@@ -2036,14 +2029,14 @@ impl Kernel {
         svc: &EmbedService,
     ) -> NativeResult<()> {
         let inputs = self.compose_embed_inputs(raw_inputs.to_vec(), Some(written));
-        // The TEXT-primary write (#232): text (+ image when the primary is
+        // The TEXT-primary write: text (+ image when the primary is
         // omni — `images_pair()` is None for a dedicated text embedder).
         // Byte-identical for N=1.
         self.index_set
             .primary()
             .add(&inputs, &*svc.embedder, svc.images_pair())
             .await?;
-        // The SEPARATE image-primary write (#232): the note's images land in
+        // The SEPARATE image-primary write: the note's images land in
         // the image-primary's own ImageOnly index. None at N=1 / omni.
         if let Some((iorch, isvc)) = self.image_only_route() {
             if let Some((ie, r)) = isvc.images_pair() {
@@ -2061,7 +2054,7 @@ impl Kernel {
     }
 
     /// The derived-ingest half of the maintained tail: group the rows per note
-    /// and ingest in ONE transaction for the whole batch (#445).
+    /// and ingest in ONE transaction for the whole batch.
     fn ingest_derived(
         &self,
         rows: &[(i64, String, String, String)],
@@ -2080,11 +2073,11 @@ impl Kernel {
         self.derived.ingest_many(&batch, FIELD_SOURCE)
     }
 
-    /// The wire-shaped bulk upsert (#77): the collection core's NAMED upsert
+    /// The wire-shaped bulk upsert: the collection core's NAMED upsert
     /// — `id`?/`note_type`/`deck`/`fields` map/`tags`, create AND update,
     /// `dry_run`, typed per-item results — run as ONE collection job, then
     /// the kernel-internal index/derived maintenance over everything written.
-    /// This is the op the MCP `upsert_notes` action rides (S3d-2).
+    /// This is the op the MCP `upsert_notes` action rides.
     ///
     /// # Errors
     ///
@@ -2100,7 +2093,7 @@ impl Kernel {
         let span = tracing::debug_span!("kernel.upsert_notes_wire", dry_run);
         async move {
             // Read `col.mod` AND register the watermark token in the SAME write
-            // job (#585): the collection actor's FIFO then guarantees an
+            // job: the collection actor's FIFO then guarantees an
             // earlier-`col.mod` write registers before any later op's job runs,
             // so a later op can never complete-and-advance past an un-indexed
             // earlier write — even if this op's continuation is starved across
@@ -2120,7 +2113,7 @@ impl Kernel {
                 })
                 .await??;
             if let Some(tokens) = tokens {
-                // Typed outcomes (#391): written ids come straight off the
+                // Typed outcomes: written ids come straight off the
                 // variants — the parse-own-output round-trip is gone.
                 let written: Vec<i64> = results
                     .iter()
@@ -2130,7 +2123,7 @@ impl Kernel {
                         _ => None,
                     })
                     .collect();
-                // Best-effort tail (#590): the note is committed; a failed
+                // Best-effort tail: the note is committed; a failed
                 // embed/index/ingest logs a warning and returns the successful
                 // per-item results rather than failing the whole call.
                 self.index_written_tracked(&written, tokens).await?;
@@ -2143,7 +2136,7 @@ impl Kernel {
 
     /// Complete this op's watermark tokens and advance each space's watermark to
     /// the captured `col.mod` — but ONLY to a value whose writes this op (and
-    /// every still-in-flight earlier write) actually indexed/ingested (#585).
+    /// every still-in-flight earlier write) actually indexed/ingested.
     ///
     /// `index_ok`/`derived_ok` say whether THIS op's respective tail succeeded;
     /// the [`watermark::WatermarkTracker`] additionally blocks an advance that
@@ -2151,7 +2144,7 @@ impl Kernel {
     /// failure. A blocked or failed advance leaves the watermark behind — the
     /// lagging op's completion or the next boot/reload drift heals it.
     ///
-    /// Never reads the live `col.mod` (the pre-#585 bug): the value comes from
+    /// Never reads the live `col.mod`: the value comes from
     /// the token captured in the op's own collection write job, so an
     /// interleaved concurrent write can't be silently certified here.
     async fn advance_watermarks(
@@ -2166,10 +2159,10 @@ impl Kernel {
             }
         }
         if let Some(col_mod) = self.watermarks.complete_index(tokens.index, index_ok) {
-            // Fan out the watermark + save request to EVERY index space (#232):
+            // Fan out the watermark + save request to EVERY index space:
             // a maintained write advances each space's own col_mod and arms its
             // saver. With one space this is the single set_col_mod + request,
-            // byte-identical to pre-#232.
+            // byte-identical.
             self.index_set.set_col_mod_all(col_mod);
             self.index_set.request_save_all();
         }
@@ -2223,7 +2216,7 @@ impl Kernel {
         results.remove(0)
     }
 
-    /// Create a batch of notes (the #77 duplicate policy applies per item) and
+    /// Create a batch of notes (the duplicate policy applies per item) and
     /// index them — batch-shaped end to end: ONE collection job runs every
     /// create (per-item results, so one bad note never sinks the batch), ONE
     /// read job renders embed text + derived rows for everything created, ONE
@@ -2247,10 +2240,10 @@ impl Kernel {
         let span = tracing::debug_span!("kernel.upsert_notes", batch = notes.len());
         async move {
             // One serialized job for the whole batch of writes — and it reads
-            // `col.mod` AND registers the watermark token in the SAME job (#585),
+            // `col.mod` AND registers the watermark token in the SAME job,
             // so the actor's FIFO orders this op's registration with its write
             // ahead of any later op's job (closing the post-await-continuation
-            // race the lead flagged), and the watermark it may advance to is the
+            // race), and the watermark it may advance to is the
             // one its OWN write produced.
             let watermarks = Arc::clone(&self.watermarks);
             let (outcomes, tokens): (Vec<NativeResult<CreateOutcome>>, watermark::WriteTokens) =
@@ -2289,7 +2282,7 @@ impl Kernel {
     /// Drop already-deleted notes from the index + derived store (the prune
     /// path: the collection op removed them internally; this is the sidecar
     /// half of `delete_notes`). No own collection write precedes it, so it
-    /// reads `col.mod` + registers the watermark token in one actor job (#585).
+    /// reads `col.mod` + registers the watermark token in one actor job.
     ///
     /// # Errors
     ///
@@ -2301,17 +2294,17 @@ impl Kernel {
         self.drop_note_sidecars(&note_ids, tokens).await
     }
 
-    /// The sidecar tail shared by every note-deletion shape (#382): drop the
+    /// The sidecar tail shared by every note-deletion shape: drop the
     /// notes' vectors + derived rows, advance the watermarks, refresh tags.
-    /// `tokens` carries the `col.mod` captured with the deleting write (#585);
-    /// the removals are best-effort (#590) — a failed removal leaves the
+    /// `tokens` carries the `col.mod` captured with the deleting write;
+    /// the removals are best-effort — a failed removal leaves the
     /// watermark behind so the next drift reconciles the now-deleted note out.
     async fn drop_note_sidecars(
         &self,
         note_ids: &[i64],
         tokens: watermark::WriteTokens,
     ) -> NativeResult<()> {
-        // Removal fans out to EVERY index space (#232): a deleted note leaves
+        // Removal fans out to EVERY index space: a deleted note leaves
         // all indexes. With one space this is the single remove, byte-identical.
         let index_ok = match self.index_set.remove_all(note_ids) {
             Ok(_) => self.embed_service().is_some(),
@@ -2330,7 +2323,7 @@ impl Kernel {
         self.advance_watermarks(tokens, index_ok, derived_ok).await;
         // A deletion changes membership only if a deleted note was IN it —
         // the in-memory probe alone decides (the rows are already gone), and
-        // the refresh runs off the op tail (#445).
+        // the refresh runs off the op tail.
         if self.tag_keys.any_member_of(note_ids) {
             self.tag_refresh.request();
         }
@@ -2342,25 +2335,22 @@ impl Kernel {
     /// watermarks so the col_mod bump doesn't read as drift on next boot.
     /// There is no index/derived tail that could fail (the vectors/rows are
     /// unchanged), so both watermark sides complete as success — but still only
-    /// advance past concurrent in-flight writes the tracker certifies (#585).
-    /// A metadata-only collection change (tags/decks/templates/field metadata —
-    /// nothing that feeds embedding text or derived rows): advance the
-    /// watermarks so the col_mod bump doesn't read as drift on next boot.
+    /// advance past concurrent in-flight writes the tracker certifies.
     ///
-    /// `membership_may_have_changed` is the tag-centroid relevance probe (#600):
+    /// `membership_may_have_changed` is the tag-centroid relevance probe:
     /// only a TAG-membership change (a note gained/lost a tag, a tag was
     /// renamed/cleared) can move a centroid, so only those ops request the
     /// refresh. Deck rename/reparent, template/CSS find-replace, and field
     /// metadata bump col_mod but touch NO centroid input — requesting a refresh
     /// there is pure O(collection) waste (`note_tag_rows` + `note_count` +
-    /// a whole-collection recompute) behind no relevance signal (#445: per-op
+    /// a whole-collection recompute) behind no relevance signal (per-op
     /// tails do no O(collection) work; the refresh runs only when relevant).
     ///
     /// # Errors
     ///
     /// Returns an error if reading `col.mod` to register the watermark fails.
     pub async fn metadata_changed(&self, membership_may_have_changed: bool) -> NativeResult<()> {
-        // Read `col.mod` + register in one actor job (#585) — the metadata write
+        // Read `col.mod` + register in one actor job — the metadata write
         // already committed in its own prior job, so FIFO orders this read after
         // it; registering in-job keeps it ordered with any concurrent upsert too.
         let tokens = self.read_col_mod_and_register().await?;
@@ -2371,7 +2361,7 @@ impl Kernel {
         // Tag-only ops (update_note_tags / rename_tag / clear-unused-tags) ride
         // this path and change MEMBERSHIP without an index op — centroids would
         // otherwise go stale until the next upsert/delete or reboot. The
-        // coalescing refresher caps a burst to ~1 recompute (#445); request it
+        // coalescing refresher caps a burst to ~1 recompute; request it
         // ONLY when tag membership could actually have moved.
         if membership_may_have_changed {
             self.tag_refresh.request();
@@ -2379,7 +2369,7 @@ impl Kernel {
         Ok(())
     }
 
-    /// Delete notes and drop their sidecars in ONE maintained op (#604): the
+    /// Delete notes and drop their sidecars in ONE maintained op: the
     /// existence partition (`deleted`/`not_found`), the anki delete, and the
     /// `col.mod`+watermark capture all run in the SAME collection write job,
     /// then the shared sidecar tail drops vectors/derived rows. This is the op
@@ -2400,7 +2390,7 @@ impl Kernel {
     ) -> NativeResult<shrike_schemas::DeleteNotesResponse> {
         let ids = note_ids.clone();
         // Existence partition + delete + `col.mod`/watermark capture in ONE job
-        // (#604 single-op; #585 in-job register so the actor's FIFO orders
+        // (single-op; in-job register so the actor's FIFO orders
         // registration with the write). The `nid:` find scopes the existence
         // check to the requested ids (no full scan) — same partition the host's
         // wrapper.delete_notes computed, now without the extra round trip.
@@ -2437,14 +2427,14 @@ impl Kernel {
             .copied()
             .filter(|i| !deleted.contains(i))
             .collect();
-        // Sidecar tail over exactly the notes that were deleted (#382): drop
+        // Sidecar tail over exactly the notes that were deleted: drop
         // their vectors + derived rows, advance the watermarks. Best-effort —
         // a failed sidecar leaves the watermark behind so next-boot drift heals.
         self.drop_note_sidecars(&deleted, tokens).await?;
         Ok(shrike_schemas::DeleteNotesResponse { deleted, not_found })
     }
 
-    /// Import an `.apkg`/`.colpkg` package, then bring the index in line (#72).
+    /// Import an `.apkg`/`.colpkg` package, then bring the index in line.
     ///
     /// Import is an OPAQUE bulk mutation: anki's importer adds/updates/remaps an
     /// unknown set of notes and bumps `col.mod`. So the tail is the boot/reload
@@ -2477,10 +2467,9 @@ impl Kernel {
             )
             .await??;
         // Import bumps col.mod, so BOTH derived caches drift — bring each in
-        // line in one op, exactly as `harness.reload` does (the host coordination
-        // the old `derived is the harness's job` comment hand-waved but never
-        // wired). The col.mod bump is the drift signal for both; we never advance
-        // a watermark before reconciling (that would suppress it).
+        // line in one op, exactly as `harness.reload` does. The col.mod bump is
+        // the drift signal for both; we never advance a watermark before
+        // reconciling (that would suppress it).
         //
         // 1) Vector index: reconcile (fingerprint-diffed — only changed/new
         //    notes re-embed; no-op without an embedder attached).
@@ -2498,8 +2487,8 @@ impl Kernel {
         Ok((summary.to_json().to_string(), reindexed))
     }
 
-    // ── media + maintenance ops (#391 re-home, decision 3) ──────────────────
-    // The #70 media tools and the #89 prune as maintained kernel ops: the
+    // ── media + maintenance ops ──────────────────
+    // The media tools and the prune as maintained kernel ops: the
     // host keeps only the tool signatures (and the serving-URL fill, which is
     // host config). Media never touches embedding text, so none of these do
     // index work — except prune, whose deletions carry their own sidecar
@@ -2507,7 +2496,7 @@ impl Kernel {
 
     /// The full store_media batch: each item's byte source (base64 decode /
     /// SSRF-guarded URL download) prepares CONCURRENTLY — each item is a
-    /// `tokio::spawn`'d task on the runtime (#721 S2: the prepare is async now —
+    /// `tokio::spawn`'d task on the runtime (the prepare is async now —
     /// the URL fetch rides the async IP-pinned client, so no blocking-pool
     /// thread parks on a network wait) — then the batch writes as ONE collection
     /// job (`path` items run their containment gates under that job; they carry
@@ -2601,7 +2590,7 @@ impl Kernel {
         self.collection.run(move |core| core.media_check()).await?
     }
 
-    /// Export the collection (or a scope of it) to an Anki package (#71).
+    /// Export the collection (or a scope of it) to an Anki package.
     ///
     /// Read-only on the collection's data, but it holds the collection for the
     /// whole package write — so it rides the collection task-actor (serializing
@@ -2642,8 +2631,8 @@ impl Kernel {
         })
     }
 
-    /// The #89 prune with its maintenance tail (the host's old post-apply
-    /// block, re-homed): deletions drop their sidecars like `delete_notes`;
+    /// The prune with its maintenance tail: deletions drop their sidecars
+    /// like `delete_notes`;
     /// a tags-only prune is a metadata-only watermark advance. The tail is
     /// best-effort — a failure logs and the response still returns (the next
     /// boot's drift check repairs).
@@ -2673,7 +2662,7 @@ impl Kernel {
             } else if tags_removed {
                 // clear_unused_tags removes only tags on NO notes → no note's
                 // membership moves and no centroid (min_members > 0) changes →
-                // watermark bump only, no refresh (#600).
+                // watermark bump only, no refresh.
                 self.metadata_changed(false).await
             } else {
                 Ok(())
@@ -2685,7 +2674,7 @@ impl Kernel {
         Ok(response)
     }
 
-    // ── tag + deck ops (#391 re-home, long-tail group 2) ────────────────────
+    // ── tag + deck ops ────────────────────
     // Tags and deck names are not embedding text: each op is one collection
     // job plus the best-effort metadata watermark tail when anything changed
     // (mirroring the host's _bump_col_mod_after_metadata_change, whose
@@ -2695,7 +2684,7 @@ impl Kernel {
     /// unchanged col_mod bump doesn't read as drift on next boot. Best-effort
     /// — cache bookkeeping never fails an op already committed.
     ///
-    /// `membership_may_have_changed` gates the tag-centroid refresh (#600): a
+    /// `membership_may_have_changed` gates the tag-centroid refresh: a
     /// deck/template/field-metadata edit passes `false` (no centroid input
     /// moved); a tag-membership edit passes `true`.
     async fn metadata_tail(&self, changed: bool, membership_may_have_changed: bool) {
@@ -2725,7 +2714,7 @@ impl Kernel {
             .collection
             .run(move |core| core.update_note_tags(&note_ids, set_tags.as_deref(), &add, &remove))
             .await??;
-        // Tag membership changed → refresh centroids (#600).
+        // Tag membership changed → refresh centroids.
         self.metadata_tail(response.notes_modified > 0, true).await;
         Ok(response)
     }
@@ -2746,7 +2735,7 @@ impl Kernel {
             .collection
             .run(move |core| core.rename_tag(&old, &new, &note_ids))
             .await??;
-        // A rename remaps a centroid's tag key → refresh centroids (#600).
+        // A rename remaps a centroid's tag key → refresh centroids.
         self.metadata_tail(response.notes_modified > 0, true).await;
         Ok(response)
     }
@@ -2772,7 +2761,7 @@ impl Kernel {
                     | shrike_schemas::UpsertDeckResult::Updated { .. }
             )
         });
-        // Deck names are not centroid inputs → watermark bump only, no refresh (#600).
+        // Deck names are not centroid inputs → watermark bump only, no refresh.
         self.metadata_tail(changed, false).await;
         Ok(results)
     }
@@ -2792,14 +2781,14 @@ impl Kernel {
             .run(move |core| core.delete_decks(&refs))
             .await??;
         // delete_decks is empty-only (never deletes a note) → no membership
-        // change; watermark bump only, no centroid refresh (#600).
+        // change; watermark bump only, no centroid refresh.
         self.metadata_tail(!response.deleted.is_empty(), false)
             .await;
         Ok(response)
     }
 
-    // ── note-type ops (#391 re-home, long-tail group 3) ─────────────────────
-    // The #76/#119/#75 note-type tools as maintained kernel ops. The
+    // ── note-type ops ─────────────────────
+    // The note-type tools as maintained kernel ops. The
     // structural edits (upsert/fields/templates/delete) carry NO tail: a
     // field-list change can alter embedding text, so their col.mod bump
     // deliberately reads as drift on the next boot (a removed field makes a
@@ -2809,7 +2798,7 @@ impl Kernel {
     // so an apply re-embeds the changed notes.
 
     /// Create/update note-type definitions in bulk (the position-keyed
-    /// replace with the #76 unsound-move rejection), per-item results.
+    /// replace with the unsound-move rejection), per-item results.
     ///
     /// # Errors
     ///
@@ -2893,7 +2882,7 @@ impl Kernel {
             })
             .await??;
         if response.replacements > 0 {
-            // Template/CSS text is not a centroid input → no refresh (#600).
+            // Template/CSS text is not a centroid input → no refresh.
             if let Err(e) = self.metadata_changed(false).await {
                 tracing::warn!(error = %e, "watermark advance after find_replace_note_types failed");
             }
@@ -2920,14 +2909,14 @@ impl Kernel {
             .run(move |core| core.update_note_type_field_metadata(&note_type_name, &updates))
             .await??;
         // Field editor metadata (font/size/description) is not a centroid input
-        // → watermark bump only, no refresh (#600).
+        // → watermark bump only, no refresh.
         if let Err(e) = self.metadata_changed(false).await {
             tracing::warn!(error = %e, "watermark advance after field-metadata update failed");
         }
         Ok(response)
     }
 
-    /// Change notes' note type via name maps (#75). Migration moves field
+    /// Change notes' note type via name maps. Migration moves field
     /// content — embedding text — under unchanged ids, so an apply re-embeds
     /// and re-ingests the changed notes (best-effort: the migration is
     /// committed either way; the next boot's drift check repairs). Dry-run
@@ -2980,7 +2969,7 @@ impl Kernel {
     }
 
     /// Fused search with the kernel's default arguments — a thin delegate to
-    /// [`actions::search_notes`], the ONE fused-search spine (#388): no
+    /// [`actions::search_notes`], the ONE fused-search spine: no
     /// scope, no threshold, no image floor, the canonical `fusion` weights.
     /// The query embeds here when an embedder is attached; otherwise the
     /// action degrades to the lexical signals. `score` carries the wire
@@ -3008,10 +2997,10 @@ impl Kernel {
                 is_query: true,
             }];
             // The PRIMARY space's engine carries the host-supplied query
-            // vectors + the lexical/tag signals; cross-space fusion (#234) adds
+            // vectors + the lexical/tag signals; cross-space fusion adds
             // each SECONDARY text-capable space's gated image ranking. With one
             // space `cross_space` is empty → byte-identical to the single-space
-            // path. `index_size` sums across every space (#234).
+            // path. `index_size` sums across every space.
             let primary = self.index_set.primary();
             let cross_space = if semantic {
                 self.build_cross_space(&[query.to_string()], top_k).await?
@@ -3075,7 +3064,7 @@ impl Kernel {
         .await
     }
 
-    /// Cooperative idle-release (#64): close the collection, keeping the
+    /// Cooperative idle-release: close the collection, keeping the
     /// kernel reusable via [`reopen`]. WHEN to release is harness policy (an
     /// idle timer on its runtime); the kernel only provides the ops.
     ///
@@ -3099,10 +3088,10 @@ impl Kernel {
     }
 
     /// Close the collection and drain the actor — close returns with nothing
-    /// in flight (the interpreter-teardown guard, #374 design 7). Works
+    /// in flight (the interpreter-teardown guard). Works
     /// through `&self` so shared handles (the binding's `Arc<Kernel>`) can
     /// close; idempotent (`SerializedCollection::close` treats a drained
-    /// actor as already-closed, #382).
+    /// actor as already-closed).
     ///
     /// # Errors
     ///
@@ -3110,7 +3099,7 @@ impl Kernel {
     /// already-closed success, not an error.
     pub async fn close(&self) -> NativeResult<()> {
         // A sleeping coalesced tag refresh has nothing to read once the
-        // actor drains — abort it first (#445).
+        // actor drains — abort it first.
         self.tag_refresh.shutdown();
         let result = self.collection.close().await;
         self.collection.shutdown().await;
@@ -3120,7 +3109,7 @@ impl Kernel {
 
 #[cfg(test)]
 mod no_cpython_smoke {
-    //! The #279 acceptance smoke: link the kernel WITHOUT Python and run one
+    //! The acceptance smoke: link the kernel WITHOUT Python and run one
     //! flow end to end — open → upsert (duplicate policy live) → search with a
     //! semantic AND a lexical signal contributing → delete → close. The
     //! layering check guarantees no pyo3 is below us; this test guarantees the
@@ -3167,7 +3156,7 @@ mod no_cpython_smoke {
         }
     }
 
-    /// Test shim (#391): the wire-shaped upsert with the pre-typed-seam call
+    /// Test shim: the wire-shaped upsert with the pre-typed-seam call
     /// shape — JSON in, serialized results out.
     async fn upsert_wire(
         kernel: &Kernel,
@@ -3196,7 +3185,7 @@ mod no_cpython_smoke {
         dir
     }
 
-    /// The op-tail tag refresh is a coalesced background task since #445 —
+    /// The op-tail tag refresh is a coalesced background task —
     /// poll until the tag state reaches the expected shape (an isolated
     /// op's first fire runs immediately, so this resolves in milliseconds).
     async fn wait_for_tags(kernel: &Kernel, pred: impl Fn(&tag_centroids::TagKeyMap) -> bool) {
@@ -3210,10 +3199,10 @@ mod no_cpython_smoke {
     }
 
     /// Compile-time pin: every kernel future is Send, so a harness may spawn
-    /// kernel ops on any multithreaded runtime (the #310 contract — a !Send
+    /// kernel ops on any multithreaded runtime (a !Send
     /// regression, e.g. an entered span guard held across an await, fails
     /// here instead of downstream).
-    /// #374 design 2: dropping the edge wrapper DETACHES observation — the
+    /// Dropping the edge wrapper DETACHES observation — the
     /// spawned op runs to completion (never an abort; a half-applied
     /// collection write would be corruption). The regression guard against
     /// a JoinHandle-shaped wrapper.
@@ -3282,7 +3271,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn detach_degrades_and_reattach_recovers() {
-        // The embed slot is runtime-swappable (#342): detached, the kernel
+        // The embed slot is runtime-swappable: detached, the kernel
         // still creates notes and serves lexical search; re-attached, the
         // stale index watermark makes reindex catch up on what it missed.
         crate::runtime::block_on(async {
@@ -3324,7 +3313,7 @@ mod no_cpython_smoke {
             assert!(hits[0].signals.iter().any(|(s, _)| s == "text"));
 
             kernel.close().await.unwrap();
-            // Idempotent (#382): a second close after the actor drained is
+            // Idempotent: a second close after the actor drained is
             // already-closed, not an actor-gone error.
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();
@@ -3332,7 +3321,7 @@ mod no_cpython_smoke {
     }
 
     /// A second deterministic embedder with a DISTINCT fingerprint, so the
-    /// embed set keys it as a separate space from `HashEmbedder` (#233).
+    /// embed set keys it as a separate space from `HashEmbedder`.
     struct HashEmbedder2;
 
     impl Embedder for HashEmbedder2 {
@@ -3351,10 +3340,10 @@ mod no_cpython_smoke {
 
     #[test]
     fn embed_set_holds_ordered_spaces_primary_is_first_text_space() {
-        // #233: the embed slot is an ordered SET keyed by CONTENT fingerprint.
+        // The embed slot is an ordered SET keyed by CONTENT fingerprint.
         // Attaching two distinct fingerprints yields a 2-element embed_spaces()
         // while embed_service() still returns the PRIMARY (first text) space —
-        // the index/search paths consume exactly one engine this PR, so N=1
+        // the index/search paths consume exactly one engine, so N=1
         // stays byte-identical.
         crate::runtime::block_on(async {
             let dir = temp_dir();
@@ -3432,11 +3421,11 @@ mod no_cpython_smoke {
 
     #[test]
     fn index_set_binds_spaces_in_lockstep_primary_in_place() {
-        // #232: attaching two distinct-fingerprint embedders materializes TWO
+        // Attaching two distinct-fingerprint embedders materializes TWO
         // index spaces in lockstep with the embed set. The PRIMARY index space
         // lives at the base index dir DIRECTLY (the in-place-no-subdir migration
         // rule → zero rebuild for existing users); the secondary gets a subdir.
-        // The index/search path still consumes the primary this PR.
+        // The index/search path consumes the primary.
         crate::runtime::block_on(async {
             let dir = temp_dir();
             let cache = dir.join("cache");
@@ -3448,7 +3437,7 @@ mod no_cpython_smoke {
             .unwrap();
 
             // Before any embedder: the index set holds exactly the PRIMARY,
-            // un-bound, at the base dir (byte-identical to pre-#232).
+            // un-bound, at the base dir (byte-identical to the single space).
             assert_eq!(kernel.index_set().len(), 1);
             let primary_dir = kernel.index().dir.clone();
             // The base index dir is the per-collection namespaced dir, NOT a
@@ -3480,7 +3469,7 @@ mod no_cpython_smoke {
             // The primary stays the served index (the v1 space).
             assert_eq!(kernel.index().dir, primary_dir);
 
-            // The end-to-end index path still works (primary-only this PR): a
+            // The end-to-end index path still works (primary-only): a
             // note created with both spaces attached embeds + is searchable.
             kernel.reindex_if_needed().await.unwrap();
             let basic = kernel.notetype_id("Basic").await.unwrap();
@@ -3506,7 +3495,7 @@ mod no_cpython_smoke {
             // The primary index holds the note.
             assert!(kernel.index().engine().contains(nid));
 
-            // Removal fans out to EVERY space (#232) — no error on the empty
+            // Removal fans out to EVERY space — no error on the empty
             // secondary, and the primary drops the note.
             kernel.delete_notes(vec![nid]).await.unwrap();
             assert!(!kernel.index().engine().contains(nid));
@@ -3520,7 +3509,7 @@ mod no_cpython_smoke {
         });
     }
 
-    // ── Per-space per-modality write fan-out + hashing (#232) ────────────────
+    // ── Per-space per-modality write fan-out + hashing ────────────────
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3542,7 +3531,7 @@ mod no_cpython_smoke {
         }
     }
 
-    /// An image-primary CLIP stand-in: a text tower (used for the QUERY in PR-C,
+    /// An image-primary CLIP stand-in: a text tower (used for the QUERY,
     /// and as the orchestrator's text embedder — but ImageOnly mode never calls
     /// it on the write path) plus an `embed_images` half with its own counter.
     struct CountingClip {
@@ -3628,7 +3617,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn per_space_write_routes_text_and_image_to_their_primaries() {
-        // #232: a dedicated text space + a separate CLIP image space. A note's
+        // A dedicated text space + a separate CLIP image space. A note's
         // text lands in the text space; its image lands in the CLIP space's
         // ImageOnly index. The CLIP text tower is NEVER called on the write path
         // (ImageOnly), and the image space holds the image vector.
@@ -3811,11 +3800,11 @@ mod no_cpython_smoke {
         });
     }
 
-    // ── 0 / 1 / N graceful degradation (#235) ───────────────────────────────
+    // ── 0 / 1 / N graceful degradation ───────────────────────────────
 
     #[test]
     fn delete_fans_out_to_every_space_at_n2() {
-        // A note's vectors leave EVERY space on delete (#232/#235): the text
+        // A note's vectors leave EVERY space on delete: the text
         // space drops its text vector, the CLIP space drops its image vector.
         crate::runtime::block_on(async {
             let dir = temp_dir();
@@ -3855,7 +3844,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn delete_notes_partitions_deleted_and_not_found_in_one_op() {
-        // #604: the maintained kernel delete_notes returns {deleted, not_found}
+        // The maintained kernel delete_notes returns {deleted, not_found}
         // in its single write job (existence partition + delete + sidecar drop),
         // so the action routes through it instead of wrapper.delete_notes +
         // a separate forget_notes. A requested id that doesn't exist is
@@ -3924,7 +3913,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn search_with_no_embedder_degrades_to_lexical_only() {
-        // 0-space search (#235): no text-capable space → semantic is off, the
+        // 0-space search: no text-capable space → semantic is off, the
         // cross-space fan-out is empty, and search serves the LEXICAL signals
         // only (no empty-index panic). The literal hit lands via `exact`.
         crate::runtime::block_on(async {
@@ -3980,7 +3969,7 @@ mod no_cpython_smoke {
     #[test]
     fn upsert_neighbors_pin_to_the_primary_text_space_across_n() {
         // The dedup neighbor path pins to the PRIMARY text space's engine across
-        // N spaces (#235): adding a separate CLIP space must not change which
+        // N spaces: adding a separate CLIP space must not change which
         // engine the text-neighbor query reads — it stays the primary text
         // engine, so the dedup signal is deterministic, never ambiguous across N.
         crate::runtime::block_on(async {
@@ -4016,7 +4005,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn composed_kernel_serves_ops_over_injected_stores() {
-        // The #389 injection seam: a kernel assembled from PRE-BUILT stores
+        // The injection seam: a kernel assembled from PRE-BUILT stores
         // (the deployment ladder's composition point) behaves like an opened
         // one — the actor wraps the injected collection, ops serve, and the
         // index/derived paths ride the injected trait objects.
@@ -4071,7 +4060,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn media_ops_and_prune_run_as_kernel_ops() {
-        // The #391 re-home: store_media's byte prepare rides the blocking
+        // store_media's byte prepare rides the blocking
         // pool with per-item errors, the read ops round-trip, and prune
         // carries its own maintenance tail (vectors leave with the notes,
         // the watermark advances — no host-side forget/metadata calls).
@@ -4171,11 +4160,10 @@ mod no_cpython_smoke {
 
     #[test]
     fn tag_deck_ops_carry_the_metadata_tail() {
-        // The #391 group-2 tail at its home: a real change advances the
+        // The metadata tail: a real change advances the
         // index watermark to the new col_mod (no drift on the next check);
         // a no-op batch leaves the watermark EXACTLY where it was — the
-        // `changed` guard skips the tail, not merely "no drift afterwards"
-        // (the host-side spies this replaces asserted the skip directly).
+        // `changed` guard skips the tail, not merely "no drift afterwards".
         crate::runtime::block_on(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
@@ -4255,17 +4243,15 @@ mod no_cpython_smoke {
         });
     }
 
-    /// #600: a METADATA-ONLY op (deck rename) must NOT fire a tag-centroid
+    /// A METADATA-ONLY op (deck rename) must NOT fire a tag-centroid
     /// recompute (no centroid input moved); a TAG-membership op must. The
-    /// GREEN-proof from the audit: mutate tags OUT OF BAND (straight through the
+    /// GREEN-proof: mutate tags OUT OF BAND (straight through the
     /// collection actor, so the mutation itself fires no `request()`), then —
     /// because `recompute` re-reads `note_tag_rows` from the live collection —
     /// a fresh out-of-band tag appears in the centroid key map ONLY IF a
     /// recompute actually ran. So a deck op leaving it ABSENT proves no
     /// recompute; a tag op making it APPEAR proves the relevant refresh still
-    /// fires. Pre-#600 (`metadata_changed` requested unconditionally) the deck
-    /// op fired a recompute → `beta` appeared → this test's "absent" assertion
-    /// is RED.
+    /// fires.
     #[test]
     fn metadata_only_op_does_not_recompute_tag_centroids() {
         crate::runtime::block_on(async {
@@ -4368,7 +4354,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn note_type_ops_run_as_kernel_ops() {
-        // The #391 re-home, long-tail group 3: the metadata-tail ops advance
+        // The metadata-tail ops advance
         // the watermark inside the kernel (field metadata unconditionally, a
         // template/CSS replace only when something matched), and an applied
         // migration re-embeds the changed notes — no host-side
@@ -4499,7 +4485,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn kernel_ops_reopen_after_cooperative_release() {
-        // The #64 open-on-demand, kernel-side: an idle release between ops
+        // Open-on-demand, kernel-side: an idle release between ops
         // (or between one op's jobs) self-heals on the next serialized job
         // instead of erroring CollectionNotOpen.
         crate::runtime::block_on(async {
@@ -4545,7 +4531,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn tag_centroids_build_and_never_leak_into_note_search() {
-        // The #178/#179 layer end to end: tagged upserts → centroids in the
+        // The tag-centroid layer end to end: tagged upserts → centroids in the
         // tag.text space (hygiene-filtered) → note searches structurally
         // blind to tag keys.
         crate::runtime::block_on(async {
@@ -4599,7 +4585,7 @@ mod no_cpython_smoke {
 
             // A tag-only edit (rename) rides metadata_changed, not an index
             // op — it must also schedule a refresh so the key map tracks
-            // the new name (#445).
+            // the new name.
             kernel
                 .collection()
                 .run(|core| core.rename_tag("bio::cell", "bio::organelle", &[]))
@@ -4616,7 +4602,7 @@ mod no_cpython_smoke {
             let cell_key = tag_centroids::tag_key("bio::organelle");
 
             // Deleting a member triggers the refresh through the delete
-            // tail's membership probe (#445): the tag falls below
+            // tail's membership probe: the tag falls below
             // min_members and its centroid retires.
             let victim = kernel.tag_keys().members(cell_key)[0];
             kernel.delete_notes(vec![victim]).await.unwrap();
@@ -4629,7 +4615,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn tag_signal_surfaces_off_topic_members() {
-        // The #179 payoff: a member whose own text doesn't match the query
+        // The tag-signal payoff: a member whose own text doesn't match the query
         // still surfaces because its TAG's centroid (dominated by on-topic
         // siblings) activates and expands.
         crate::runtime::block_on(async {
@@ -4725,7 +4711,7 @@ mod no_cpython_smoke {
     struct MapResolver {
         files: std::collections::HashMap<String, Vec<u8>>,
         /// Names whose `read` fails even though `exists` reports them
-        /// present — the #386 TOCTOU-delete / transient-read shape. A
+        /// present — the TOCTOU-delete / transient-read shape. A
         /// Mutex so a test can "heal" the read mid-flight.
         unreadable: std::sync::Mutex<std::collections::HashSet<String>>,
     }
@@ -4754,7 +4740,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn recognition_pipeline_mints_lexical_and_vector_consumers() {
-        // The #228 end-to-end: one recognition pass per image feeds the
+        // Recognition end-to-end: one recognition pass per image feeds the
         // lexical store (rows + segments) AND the text-space vector, so a
         // query matching only the text INSIDE an image surfaces the note.
         crate::runtime::block_on(async {
@@ -4851,14 +4837,12 @@ mod no_cpython_smoke {
 
     #[test]
     fn one_sweep_call_drains_a_multi_chunk_backlog_enumerating_once() {
-        // #601: a single recognize_pending(batch) call DRAINS the whole pending
+        // A single recognize_pending(batch) call DRAINS the whole pending
         // backlog in internal bounded chunks — so the O(collection) image-ref
         // enumeration + done-set load is paid ONCE per drain, not once per
         // batch. With 5 pending images and batch=2 the drain runs 3 internal
         // chunks (2+2+1) but ONE enumeration; the call returns
-        // recognized=5/remaining=0. PRE-#601 the same call processed only the
-        // first 2 (remaining=3) and the harness re-entered — re-enumerating the
-        // whole collection each time (~O(image-notes × backlog/batch)).
+        // recognized=5/remaining=0.
         crate::runtime::block_on(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
@@ -4915,7 +4899,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn recognition_skips_unreadable_media_and_keeps_it_pending() {
-        // #386: exists() says present but read() returns None (TOCTOU
+        // exists() says present but read() returns None (TOCTOU
         // delete, transient error) — the item must be SKIPPED, never
         // recognized over empty bytes, and must stay pending so a later
         // sweep (once the read heals) recognizes the real bytes.
@@ -5014,7 +4998,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn unreadable_prefix_reports_no_progress_for_the_driver() {
-        // #386 livelock shape: total_pending > max_items with a permanently
+        // Livelock shape: total_pending > max_items with a permanently
         // unreadable PREFIX of the pending order. Skipped items stay pending,
         // so each call re-takes the same window — the kernel can't drain it.
         // The report must let a driver detect the no-progress batch
@@ -5056,7 +5040,7 @@ mod no_cpython_smoke {
 
             // The FIRST drain chunk covers only the unreadable prefix [u1,u2]:
             // nothing is sent, nothing stored, so the internal drain STOPS on
-            // that no-progress chunk (#601 — the same halt the harness used to
+            // that no-progress chunk (the same halt the harness used to
             // apply between calls, now applied between chunks) and the readable
             // `ok.png` tail stays pending. The next call would re-take the
             // identical prefix, so the report signals no progress.
@@ -5074,7 +5058,7 @@ mod no_cpython_smoke {
             let again = kernel.recognize_pending(2).await.unwrap();
             assert_eq!(again, report);
 
-            // Healed reads: ONE call now drains the WHOLE backlog (#601) — the
+            // Healed reads: ONE call now drains the WHOLE backlog — the
             // [u1,u2] chunk (now readable) AND the `ok.png` chunk — instead of
             // one batch per call. recognized=3, nothing remaining.
             resolver.unreadable.lock().unwrap().clear();
@@ -5137,7 +5121,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn gated_items_are_judged_once_and_rederive_on_fingerprint_change() {
-        // #416: an item the gate drops gets a below-gate marker, so it is
+        // An item the gate drops gets a below-gate marker, so it is
         // recognized ONCE — not re-OCR'd every sweep — and only a recognizer
         // fingerprint change (engine upgrade) puts it back in the pending
         // set, exactly like stored rows re-derive.
@@ -5223,10 +5207,10 @@ mod no_cpython_smoke {
 
     #[test]
     fn all_gated_window_converges_across_batches() {
-        // The #416 residual livelock shape: a permanently-gated prefix wider
+        // The residual livelock shape: a permanently-gated prefix wider
         // than the batch window. Markers make each batch's gated items DONE,
         // so successive windows advance and the sweep converges to idle —
-        // instead of re-taking the identical window forever (which the #413
+        // instead of re-taking the identical window forever (which the
         // no-progress stop, keyed on recognized == 0, deliberately does not
         // terminate).
         crate::runtime::block_on(async {
@@ -5259,11 +5243,11 @@ mod no_cpython_smoke {
             let recognizer = Arc::new(CountingRecognizer::new("stub:v1"));
             kernel.attach_recognizer(recognizer.clone(), Arc::new(MapResolver::new(media)));
 
-            // ONE drain (#601): chunk [t1,t2] then chunk [t3] — each recognizes
+            // ONE drain: chunk [t1,t2] then chunk [t3] — each recognizes
             // (recognized > 0, so the drain does NOT stop on a no-progress halt)
             // but all gate out (stored=0). Markers make each item DONE, so the
             // chunks ADVANCE rather than re-taking the same window forever (the
-            // #416 convergence), and the whole gated backlog drains in this call.
+            // gated-window convergence), and the whole gated backlog drains in this call.
             let first = kernel.recognize_pending(2).await.unwrap();
             assert_eq!(
                 first,
@@ -5333,7 +5317,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn multi_engine_routing_keeps_describe_vector_only_and_ocr_unchanged() {
-        // #485: OCR and VLM-describe attach as INDEPENDENT purposes over one
+        // OCR and VLM-describe attach as INDEPENDENT purposes over one
         // image. OCR lands in source "ocr" (lexical + vector, bit-identical
         // to the single-slot sweep). Describe lands in source "vlm",
         // VECTOR-ONLY: a vector mints (a non-literal query surfaces the note)
@@ -5509,8 +5493,8 @@ mod no_cpython_smoke {
 
     #[test]
     fn asr_sweep_enumerates_sound_refs_and_mints_lexical_and_vector() {
-        // #485 PR2: the AUDIO path end-to-end. A note referencing [sound:…]
-        // audio is enumerated by note_sound_refs (the new audio twin), the ASR
+        // The AUDIO path end-to-end. A note referencing [sound:…]
+        // audio is enumerated by note_sound_refs (the audio twin), the ASR
         // purpose recognizes it (source "asr", LexicalAndVector like OCR), and
         // both consumers light up: the transcript is lexically searchable AND
         // mints a text-space vector. Span segments persist. OCR is untouched.
@@ -5606,7 +5590,7 @@ mod no_cpython_smoke {
 
     /// A recognizer that records the PEAK number of `recognize()` calls
     /// in-flight at once — the probe for the slow-recognition concurrency
-    /// bound (#485). Each call holds for a beat (so concurrent calls actually
+    /// bound. Each call holds for a beat (so concurrent calls actually
     /// overlap) and transcribes the bytes.
     struct ConcurrencyProbeRecognizer {
         in_flight: Arc<std::sync::atomic::AtomicUsize>,
@@ -5643,7 +5627,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn slow_recognition_concurrency_is_bounded() {
-        // #485 PR2: a long-running purpose's recognize() holds a concurrency
+        // A long-running purpose's recognize() holds a concurrency
         // permit, so no more than SLOW_RECOGNITION_CONCURRENCY run at once even
         // when several single-item sweeps are driven CONCURRENTLY. (One audio
         // note per item; max_items=1 makes each concurrent sweep one
@@ -5783,7 +5767,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn per_item_permanent_failure_is_negative_cached_and_retried_on_fingerprint_change() {
-        // #485 PR2 item 4: a per-item PERMANENT failure (a 4xx the engine turns
+        // A per-item PERMANENT failure (a 4xx the engine turns
         // into the empty recognition) is judged ONCE — gated under the vlm
         // source so it is not re-offered every sweep (expensive against a paid
         // endpoint) — and re-tried only after a describe fingerprint change
@@ -5913,7 +5897,7 @@ mod no_cpython_smoke {
 
     #[test]
     fn endpoint_level_failure_does_not_negative_cache_and_leaves_backlog_pending() {
-        // #485 PR2 item 4 boundary: an ENDPOINT-level failure (transport/auth/
+        // An ENDPOINT-level failure (transport/auth/
         // exhausted retries) must NOT gate the item — it Err's the chunk before
         // any persist or fingerprint advance, so the backlog stays pending and
         // a later sweep (once the endpoint is up) retries. The negative cache
@@ -6002,7 +5986,7 @@ mod no_cpython_smoke {
         let kernel = Kernel::open(col.to_str().unwrap(), cache.to_str().unwrap())
             .await
             .unwrap();
-        // The harness attaches the embedding service (#342's registry slot).
+        // The harness attaches the embedding service (the registry slot).
         kernel.attach_embedder(Arc::new(HashEmbedder), None);
 
         // Boot path: a fresh empty collection materializes a ready index, so
@@ -6112,7 +6096,7 @@ mod no_cpython_smoke {
         kernel2.close().await.unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
-    /// #471: the derived rebuild's collect→commit window vs concurrent
+    /// The derived rebuild's collect→commit window vs concurrent
     /// writes. The first half DEMONSTRATES the hazard mechanically (a build
     /// over a stale snapshot erases a newer note's derived rows — why the
     /// verify exists); the second half pins that `rebuild_derived` converges
@@ -6201,13 +6185,13 @@ mod no_cpython_smoke {
         });
     }
 
-    // ── #585 / #590: watermark over-certification + best-effort tail ──────────
+    // ── watermark over-certification + best-effort tail ──────────
 
     /// An embedder that, on the FIRST text containing "bravo", PARKS (so a
     /// concurrent op can interleave while it is in flight) and then FAILS that
     /// embed when released; EVERY LATER bravo embed succeeds (so a heal path —
     /// `reindex_if_needed` — can reconcile bravo in). All non-bravo texts embed
-    /// normally. The probe of #585/#590.
+    /// normally. The probe of the watermark guard + best-effort tail.
     struct GatedEmbedder {
         gate: tokio::sync::Notify,
         parked: tokio::sync::Notify,
@@ -6248,13 +6232,13 @@ mod no_cpython_smoke {
         }
     }
 
-    /// #585 (= S5-1, the keystone). A concurrent op B writes "bravo" and parks
+    /// The keystone. A concurrent op B writes "bravo" and parks
     /// in embed (in flight, its index tail not yet run); op A writes "alpha" and
-    /// runs its full tail. Pre-#585, op A's `advance_watermarks` read the LIVE
-    /// `col.mod` (already reflecting bravo) and stamped it → `check_drift` saw no
-    /// drift → bravo was PERMANENTLY missing from the index. Fixed: op A may not
-    /// certify a `col.mod` covering B's still-in-flight write, so the watermark
-    /// stays behind and drift heals bravo. RED at fa54f8c.
+    /// runs its full tail. With a naive advance, op A's `advance_watermarks` read
+    /// the LIVE `col.mod` (already reflecting bravo) and stamped it →
+    /// `check_drift` saw no drift → bravo was PERMANENTLY missing from the index.
+    /// Fixed: op A may not certify a `col.mod` covering B's still-in-flight write,
+    /// so the watermark stays behind and drift heals bravo.
     #[test]
     fn s5_interleaved_upsert_does_not_falsely_advance_the_index_watermark() {
         crate::runtime::block_on(async {
@@ -6349,17 +6333,17 @@ mod no_cpython_smoke {
         });
     }
 
-    /// #585 derived/FTS5 twin (= S6-2). The SAME interleave over the lexical
+    /// The derived/FTS5 twin. The SAME interleave over the lexical
     /// surface: while op B is in flight (parked in embed, its derived ingest not
-    /// yet run, so bravo is NOT in FTS5), op A completes its full tail. Pre-#585,
-    /// op A's `advance_watermarks` advanced the DERIVED watermark to the live
-    /// col.mod too (the UNCONDITIONAL `self.derived.set_col_mod` at the old
-    /// lib.rs:1773 — fired even with no embedder) → `rebuild_derived`'s drift
+    /// yet run, so bravo is NOT in FTS5), op A completes its full tail. With a
+    /// naive advance, op A's `advance_watermarks` advanced the DERIVED watermark
+    /// to the live col.mod too (an UNCONDITIONAL `self.derived.set_col_mod` that
+    /// fired even with no embedder) → `rebuild_derived`'s drift
     /// gate went quiet → bravo invisible to substring/fuzzy forever. Fixed: op A
     /// may not certify a derived watermark covering B's still-in-flight
     /// (un-ingested) write, so the derived watermark stays behind and the drift
     /// gate remains armed. Assert at the parked moment — that IS the
-    /// over-certification point. RED at fa54f8c.
+    /// over-certification point.
     #[test]
     fn s6_2_interleaved_upsert_does_not_falsely_advance_the_derived_watermark() {
         crate::runtime::block_on(async {
@@ -6453,7 +6437,7 @@ mod no_cpython_smoke {
         });
     }
 
-    /// #590 (= S6-1) in-crate companion to `tests/s6_repro.rs`: a single
+    /// The in-crate companion to `tests/s6_repro.rs`: a single
     /// upsert whose embed tail fails returns Ok with the per-item result (the
     /// committed note), AND leaves the index watermark behind so drift heals it.
     #[test]
@@ -6484,8 +6468,8 @@ mod no_cpython_smoke {
                 )
                 .await;
 
-            // FIX (#590): the committed write returns Ok despite the failed
-            // embed (RED at fa54f8c: the `?` propagated → Err).
+            // The committed write returns Ok despite the failed
+            // embed (a prior version `?`-propagated → Err).
             let CreateOutcome::Created(bravo_id) =
                 outcome.expect("committed write returns Ok despite a failed embed tail")
             else {
@@ -6517,7 +6501,7 @@ mod no_cpython_smoke {
         });
     }
 
-    /// #585 registration-ordering pin (the lead's must-fix on the keystone):
+    /// Registration-ordering pin:
     /// `register` runs INSIDE the collection-actor job, so the actor's FIFO
     /// orders an earlier-`col.mod` write's registration ahead of a later op's
     /// job — even when the later op's continuation (its tail + advance) runs

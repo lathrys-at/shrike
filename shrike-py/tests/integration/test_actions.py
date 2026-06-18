@@ -1,11 +1,11 @@
-"""Integration tests for the actions-over-HTTP edge (#505).
+"""Integration tests for the actions-over-HTTP edge.
 
 `POST /actions/{name}` is the UI edge of the action catalog — the *same* named
 ops the MCP tools bind, served through the *same* `_safe_tool`-wrapped impl,
 behind the *same* Host/Origin guard, but schema-first without the MCP JSON-RPC
 envelope. These tests pin the load-bearing property: **strict parity** — for the
 same input, the actions route's body equals the MCP tool's `structuredContent`
-(the dict FastMCP emits) — plus the #392 wire-version header round-trip.
+(the dict FastMCP emits) — plus the wire-version header round-trip.
 
 Guard coverage (forged-Host 421 / cross-origin 403 / GET-on-POST 405) lives in
 `test_security.py`, which parametrizes a concrete `/actions/collection_info`
@@ -135,8 +135,8 @@ class TestActionsInputErrorParity:
 
 
 class TestWireVersionHeader:
-    """#392: every /actions/* response echoes the server's wire version; a
-    request may assert it, and a mismatch is refused before the op runs."""
+    """Every /actions/* response echoes the server's wire version; a request may
+    assert it, and a mismatch is refused before the op runs."""
 
     def test_response_echoes_wire_version(self, server: ServerInfo) -> None:
         # Discover the server's version from /status (its canonical report).

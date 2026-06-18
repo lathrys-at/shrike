@@ -1,4 +1,4 @@
-"""Shared status-block renderers (#684 §B).
+"""Shared status-block renderers.
 
 The same Embedding / Index / Derived-text / Recognition blocks render in three
 places — ``shrike server status`` (the full report), ``shrike server embedding
@@ -6,7 +6,7 @@ status``, and ``shrike server index status`` — so they live here once, keyed o
 the typed wire models, rather than being duplicated across the three command
 modules (which is how they drifted before).
 
-The §B shape: the section header IS the identity (``Index``, ``Embedding
+The shape: the section header IS the identity (``Index``, ``Embedding
 [text]``), and ``Status:`` moves onto its own indented line with the rest of the
 per-block fields. Every renderer takes a model from ``shrike.schemas`` and writes
 to ``output.console`` — no JSON branch here (the ``--json`` callers emit the raw
@@ -24,7 +24,7 @@ from shrike.schemas import (
 
 
 def render_embedding_spaces(spaces: list[EmbeddingStatus]) -> None:
-    """One ``Embedding [<modalities>]`` block per configured space (#681).
+    """One ``Embedding [<modalities>]`` block per configured space.
 
     The modalities move up into the header to identify the space; the per-space
     status/model/provider/batching sit indented below. A space with no reported
@@ -70,7 +70,7 @@ def _render_embedding_fields(emb: EmbeddingStatus) -> None:
 
 def render_index(idx: IndexStatus) -> None:
     """The ``Index`` block — ``Status:`` on its own line, then the per-modality
-    sub-index breakdown (#684), then the shared col_mod/activation/path."""
+    sub-index breakdown, then the shared col_mod/activation/path."""
     output.console.print("[bold]Index[/bold]")
     if idx.state == "ready":
         output.kv("Status", "[green]ready[/green]", indent=2)
@@ -83,7 +83,7 @@ def render_index(idx: IndexStatus) -> None:
     else:
         output.kv("Status", "[dim]unavailable[/dim]", indent=2)
 
-    # Per-modality sub-index breakdown (#684): one row per sub-index with its
+    # Per-modality sub-index breakdown: one row per sub-index with its
     # own vectors/dimensions. Falls back to the aggregate size/ndim when the
     # server didn't report the breakdown (older payload, or no index built).
     if idx.modalities:
@@ -101,7 +101,7 @@ def render_index(idx: IndexStatus) -> None:
     if idx.col_mod is not None:
         output.kv("Collection mod", str(idx.col_mod), indent=2)
     if idx.activation:
-        # Per-modality activation-gate calibration (#201b): the typical best-match a query beats.
+        # Per-modality activation-gate calibration: the typical best-match a query beats.
         for modality, s in idx.activation.items():
             output.kv(
                 f"Activation ({modality})",
@@ -113,7 +113,7 @@ def render_index(idx: IndexStatus) -> None:
 
 
 def render_derived(der: DerivedStatus) -> None:
-    """The ``Derived text`` block (#98) — ``Status:`` on its own line."""
+    """The ``Derived text`` block — ``Status:`` on its own line."""
     output.console.print("[bold]Derived text[/bold]")
     if not der.fts5:
         output.kv("Status", "[dim]unavailable (no SQLite FTS5)[/dim]", indent=2)
@@ -132,7 +132,7 @@ def render_derived(der: DerivedStatus) -> None:
 
 
 def render_recognition(recognition: dict[str, RecognitionEngineStatus]) -> None:
-    """The ``Recognition`` block (#228/#485) — one entry per attached engine,
+    """The ``Recognition`` block — one entry per attached engine,
     keyed by source; ``Status:`` on its own line. An empty map renders a single
     ``Recognition`` header with a ``none`` status."""
     if not recognition:

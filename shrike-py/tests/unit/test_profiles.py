@@ -1,9 +1,8 @@
-"""Config model v2 (#498): parse, validate, migrate, and resolve profiles.
+"""Config model v2: parse, validate, migrate, and resolve profiles.
 
 Pure-module tests — build features are passed in, so every build/profile
 combination is exercised without needing that build. The serving shapes are
-pinned through `plan_to_runtime_params` (the slice-1 bridge onto today's
-runtime).
+pinned through `plan_to_runtime_params` (the bridge onto today's runtime).
 """
 
 from __future__ import annotations
@@ -83,8 +82,8 @@ class TestParse:
         assert caps.embedders[0].modalities == ("text", "image", "audio")
 
     def test_text_inclusive_modalities_accepted(self):
-        # #603 control: the floor only rejects entries MISSING text — every
-        # text-inclusive shape still parses (text, text+image, text+audio).
+        # The floor only rejects entries MISSING text — every text-inclusive
+        # shape still parses (text, text+image, text+audio).
         for mods in (["text"], ["text", "image"], ["text", "audio"]):
             caps = parse_capabilities(
                 {"embedders": [{"modalities": mods, "runtime": "remote", "model": "m"}]}
@@ -155,10 +154,10 @@ class TestParse:
                 {"embedders": [{"modalities": ["video"], "runtime": "onnx", "model": "m"}]},
                 "unknown modality",
             ),
-            # #603: every space must embed text (the EmbedderBackend contract is
-            # modalities ⊇ {text}). An image-only entry is currently a valid
-            # shape per the unknown-modality check but violates the protocol —
-            # reject it at parse time. (Same for an audio-only entry.)
+            # Every space must embed text (the EmbedderBackend contract is
+            # modalities ⊇ {text}). An image-only entry is a valid shape per the
+            # unknown-modality check but violates the protocol — reject it at
+            # parse time. (Same for an audio-only entry.)
             (
                 {"embedders": [{"modalities": ["image"], "runtime": "remote", "model": "m"}]},
                 "must include 'text'",
@@ -299,8 +298,8 @@ class TestLegacyMigration:
         assert e.runtime == "onnx" and e.modalities == ("text", "image")
 
     def test_legacy_ocr_warns_and_degrades(self):
-        # Legacy semantics preserved: warn + absent capability, never a
-        # boot-refusing error (the old flag degraded the same way).
+        # A legacy OCR config warns + leaves the capability absent, never a
+        # boot-refusing error.
         caps = parse_capabilities({"recognition": {"ocr": "apple"}})
         assert caps.recognizers == ()
         assert any("#502" in w for w in caps.warnings)
@@ -320,10 +319,9 @@ class TestLegacyMigration:
 
 class TestResolve:
     def test_multi_space_resolves_to_an_ordered_set_with_primary_roles(self):
-        # text + CLIP as TWO entries = two vector spaces (#233 — the multi-space
-        # substrate, no longer a #229 reject). Both resolve; the per-modality
-        # PRIMARY is the FIRST declaring entry (text → entry 0; image → entry 1,
-        # the first to carry it).
+        # text + CLIP as TWO entries = two vector spaces. Both resolve; the
+        # per-modality PRIMARY is the FIRST declaring entry (text → entry 0;
+        # image → entry 1, the first to carry it).
         config = {
             "embedders": [
                 {"modalities": ["text"], "runtime": "onnx", "model": "a"},
@@ -369,7 +367,7 @@ class TestResolve:
         assert plan.embedder is None
 
     def test_asr_recognizer_names_its_issue(self):
-        # asr is still PR2 — declared but not wired.
+        # asr is declared but not wired.
         config = {
             "embedders": [],
             "recognizers": {"asr": {"runtime": "remote", "endpoint": "http://x/v1"}},
@@ -378,8 +376,8 @@ class TestResolve:
             _resolve(config)
 
     def test_describe_remote_resolves_and_plans(self):
-        # #485 PR1: describe over a remote vision endpoint is attachable. It
-        # resolves (no reject) and maps onto a describe-remote RecognizerPlan.
+        # describe over a remote vision endpoint is attachable. It resolves (no
+        # reject) and maps onto a describe-remote RecognizerPlan.
         config = {
             "embedders": [],
             "recognizers": {
@@ -493,7 +491,7 @@ class TestResolve:
             _resolve(config, MOBILE)
 
 
-# ── The slice-1 bridge onto today's runtime ──────────────────────────────────
+# ── The bridge onto today's runtime ──────────────────────────────────────────
 
 
 class TestLegacyBridge:
@@ -594,8 +592,7 @@ class TestLegacyBridge:
         # the shapes it maps. (NOTE: production's legacy path short-circuits
         # to resolve_embedding and never bridges — that byte-equivalence is
         # pinned in test_config.py::test_legacy_config_runs_the_old_cascade.
-        # This test pins the MAPPING itself, which becomes the live path when
-        # the slice-2 facade rework consumes the plan natively.)
+        # This test pins the MAPPING itself.)
         legacy_section = {
             "embedding": {
                 "model": "~/m.gguf",
@@ -648,7 +645,7 @@ class TestManagedConsumption:
 
 
 class TestMultimodalRemote:
-    """#501: a [text, image] remote entry routes images; mmprojs ride the
+    """A [text, image] remote entry routes images; mmprojs ride the
     managed server and fold into the fingerprint."""
 
     def test_managed_omni_carries_modalities_and_mmprojs(self):
@@ -687,11 +684,11 @@ class TestMultimodalRemote:
             _resolve(config)
 
     def test_mmprojs_rejected_when_image_is_on_a_separate_endpoint(self):
-        # #609: the managed llama-server's CONSUMER is the text-only
+        # The managed llama-server's CONSUMER is the text-only
         # remote/no-endpoint entry; image lives on a SEPARATE remote endpoint.
         # The projectors would load onto the text-only server that never embeds
         # images (silent no-op + a needless TEXT rebuild) — so reject, even
-        # though *some* space declares image. Was wrongly ACCEPTED before #609.
+        # though *some* space declares image.
         config = {
             "embedders": [
                 # The managed-llama consumer: remote, no endpoint, text-only.
@@ -710,8 +707,8 @@ class TestMultimodalRemote:
             _resolve(config)
 
     def test_mmprojs_accepted_when_the_consumer_declares_image(self):
-        # #609 control: the SEPARATE-endpoint shape is fine when the managed
-        # server's own consumer (remote, no endpoint) is the image-capable one.
+        # The SEPARATE-endpoint shape is fine when the managed server's own
+        # consumer (remote, no endpoint) is the image-capable one.
         config = {
             "embedders": [
                 # The managed-llama consumer is image-capable — projectors apply.
@@ -747,7 +744,7 @@ class TestMultimodalRemote:
         assert params["modalities"] == frozenset({"text", "image"})
 
     def test_jina_omni_profile_shape_resolves_with_last_pooling(self):
-        # #668: the committed `scripts/profiles/jina-omni.yml` shape — ONE
+        # The committed `scripts/profiles/jina-omni.yml` shape — ONE
         # text+image space on a managed (manage: auto, operator-patched binary)
         # llama-server with `pooling: last`. This pins the resolution contract
         # the profile relies on (the YAML file itself is structurally pinned by
@@ -814,7 +811,7 @@ class TestMultimodalRemote:
 
 
 class TestJinaTextClip:
-    """#669: the committed `scripts/profiles/jina-text-clip.yml` shape — a HYBRID
+    """The committed `scripts/profiles/jina-text-clip.yml` shape — a HYBRID
     of TWO embedding spaces: a dedicated TEXT space (jina-v5-text-nano on a
     managed, single-model llama-server with `pooling: last`) PLUS a separate
     in-process ONNX CLIP (text+image) image leg. This pins the resolution
@@ -823,10 +820,10 @@ class TestJinaTextClip:
     profiles.py, paths substituted as the operator would via envsubst)."""
 
     def test_jina_text_clip_shape_resolves_to_two_spaces(self):
-        # Single-managed (NOT #567's router): the managed server serves ONLY the
+        # Single-managed (NOT the router): the managed server serves ONLY the
         # jina-text leg; MobileCLIP2 is off-server ONNX. The set resolves to two
         # backend dicts: managed `llama` (text, pooling: last) + `clip`
-        # (text+image, the single image space, #580).
+        # (text+image, the single image space).
         config = {
             "embedders": [
                 {
@@ -896,7 +893,7 @@ class TestJinaTextClip:
         assert _resolve_text(None)["pooling"] is None
 
     def test_jina_text_clip_keeps_one_image_space(self):
-        # #580: MobileCLIP2 is the single image leg; jina-text is text-only. The
+        # MobileCLIP2 is the single image leg; jina-text is text-only. The
         # shape resolves without the one-image-space ProfileError. (A second
         # image space would be rejected — guarded elsewhere; this is the control
         # that the hybrid's single image space is accepted.)
@@ -912,7 +909,7 @@ class TestJinaTextClip:
         assert len(image_spaces) == 1
 
     def test_mmprojs_on_the_text_only_managed_leg_is_rejected(self):
-        # #609: the managed llama_server's OWN consumer is the jina-text leg
+        # The managed llama_server's OWN consumer is the jina-text leg
         # (remote, no endpoint), which is TEXT-ONLY — images ride the off-server
         # ONNX CLIP leg, not the managed server. So a projector on the managed
         # server would load onto a text-only server that never embeds an image (a
@@ -937,15 +934,15 @@ class TestJinaTextClip:
             _resolve(config)
 
 
-# ── Multi-space embedding (#233 — the substrate's config half) ────────────────
+# ── Multi-space embedding ─────────────────────────────────────────────────────
 
 
 class TestMultiSpace:
     def test_text_onnx_plus_clip_resolves_to_two_spaces(self):
         # The eval's canonical config (MiniLM text + a CLIP fixture) — a
         # dedicated text space PLUS a separate joint text↔image space. It
-        # resolves WITHOUT a ProfileError (the #229 reject is gone), and
-        # plan_to_runtime_params_set emits the two backend dicts.
+        # resolves WITHOUT a ProfileError, and plan_to_runtime_params_set
+        # emits the two backend dicts.
         config = {
             "embedders": [
                 {"modalities": ["text"], "runtime": "onnx", "model": "~/minilm"},
@@ -980,7 +977,7 @@ class TestMultiSpace:
         # The first space claims text+image; a second TEXT space declares text
         # too but is primary for NOTHING (its modality is already claimed). The
         # role mirrors the kernel's insertion-order primary. (The duplicate is
-        # text, not image: at most one image space is allowed since #580 — the
+        # text, not image: at most one image space is allowed — the
         # primary-role logic is modality-agnostic, so text exercises it.)
         config = {
             "embedders": [
@@ -994,12 +991,12 @@ class TestMultiSpace:
         assert b.primary_modalities == frozenset()
 
     def test_two_image_spaces_are_rejected(self):
-        # #580: at most ONE image-embedding space. Floor-admission (the cross-
-        # space mechanism since #580) admits a single image space on its own
-        # calibrated floor; two would reintroduce the N≥2 flood the retired
-        # relative gate guarded against, with no mechanism left to bound it → a
-        # named config error, not a silent degrade.
-        # Both spaces are valid text+image entries (each satisfies the #603
+        # At most ONE image-embedding space. Floor-admission (the cross-space
+        # mechanism) admits a single image space on its own calibrated floor;
+        # two would reintroduce the N≥2 flood the retired relative gate guarded
+        # against, with no mechanism left to bound it → a named config error,
+        # not a silent degrade.
+        # Both spaces are valid text+image entries (each satisfies the
         # modalities ⊇ {text} floor); the ceiling rejects the SECOND image space.
         config = {
             "embedders": [
@@ -1026,8 +1023,8 @@ class TestMultiSpace:
     def test_two_managed_remote_no_endpoint_entries_are_rejected(self):
         # In SINGLE-model mode (no managed.llama_server.models_dir) at most one
         # entry may bind the single managed llama-server (a remote entry with no
-        # endpoint). Two is ambiguous → a named error that now points at router
-        # mode (models_dir) as the way to share ONE server (#567).
+        # endpoint). Two is ambiguous → a named error that points at router
+        # mode (models_dir) as the way to share ONE server.
         config = {
             "embedders": [
                 {"modalities": ["text"], "runtime": "remote", "model": "a.gguf"},
@@ -1042,8 +1039,8 @@ class TestMultiSpace:
 
     def test_text_onnx_plus_remote_endpoint_space_resolves(self):
         # A dedicated local text space + a separate remote (endpoint) space —
-        # the no-omni deployment shape the epic targets. Both resolve; the set
-        # carries both backend dicts.
+        # the no-omni deployment shape. Both resolve; the set carries both
+        # backend dicts.
         config = {
             "embedders": [
                 {"modalities": ["text"], "runtime": "onnx", "model": "~/minilm"},
@@ -1063,7 +1060,7 @@ class TestMultiSpace:
 
 
 class TestRouterMode:
-    """Shared managed llama-server router (#567): N remote/no-endpoint spaces
+    """Shared managed llama-server router: N remote/no-endpoint spaces
     collapse onto ONE spawn + N model-pinned clients, driven by
     managed.llama_server.models_dir. The N=1 single-managed path is unchanged
     (its own dedicated test below proves byte-equality)."""
@@ -1173,7 +1170,7 @@ class TestRouterMode:
         assert params["port"] == 8474
         assert params["pooling"] == "last"
         # The new keys are ABSENT on the single-managed shape (not None) — the
-        # dict is the pre-#567 shape verbatim.
+        # dict is the pre-router shape verbatim.
         assert "router" not in params
         assert "router_model" not in params
 
@@ -1233,9 +1230,9 @@ class TestRouterMode:
             _resolve(config)
 
     def test_router_with_image_or_mmprojs_is_rejected(self):
-        # Router mode does NOT support image embedding (#567): a multimodal
+        # Router mode does NOT support image embedding: a multimodal
         # projector is per-model, but a router serves MANY models, so no single
-        # mmproj applies (the native router suppresses them, #663). Accepting an
+        # mmproj applies (the native router suppresses them). Accepting an
         # image consumer (or a non-empty mmprojs) would spawn a projector-less
         # server that fails the image-embed start — the "registry that didn't get
         # the new entry" shape. Reject at resolve time so the illegal state is

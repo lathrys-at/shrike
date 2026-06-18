@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the Shrike native extension via Bazel and install it into the active
-# venv (#269) — the fast inner loop for the pip lane:
+# venv — the fast inner loop for the pip lane:
 #
 #   source .venv/bin/activate && scripts/build-native.sh
 #   pytest shrike-py/tests/unit -q     # facades now see the real extension
@@ -16,7 +16,7 @@
 # Flags:
 #   --release   optimized build (bazel `-c opt`; default: fastbuild)
 #
-# The system-SQLite linkage check (#300) is gone from here: the hermetic Bazel
+# There is no system-SQLite linkage check here: the hermetic Bazel
 # build always bundles SQLite (FTS5 + trigram guaranteed, no system-linkage
 # config), and platform linkage is by definition a non-hermetic cargo concern.
 # For that rare local check run cargo directly:
@@ -63,7 +63,7 @@ import shrike_native
 print(f"shrike_native {shrike_native.version()} — {shrike_native.build_info()}")
 PY
 
-# Record the staleness stamp keyed to this venv (#573), so scripts/native-stale.sh
+# Record the staleness stamp keyed to this venv, so scripts/native-stale.sh
 # (and the .envrc / pytest backstop) can tell a fresh extension from a stale one.
 # Reuse scripts/native-stamp.sh — the single source of truth, never inlined here.
 if [[ -n "${VIRTUAL_ENV:-}" ]]; then

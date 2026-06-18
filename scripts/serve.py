@@ -1,14 +1,12 @@
 #!/usr/bin/env python
-"""The consolidated dogfooding launcher behind ``//scripts:serve_<profile>`` (#565/#656/#699).
+"""The consolidated dogfooding launcher behind ``//scripts:serve_<profile>``.
 
 Boots a real Shrike server against a **fresh** collection using a checked-in,
 path-free capability *profile* (``scripts/profiles/<name>.yml``). Under Bazel each
 profile has its OWN launcher target (``//scripts:serve_text_onnx``,
 ``//scripts:serve_onnx_multispace``) whose ``data`` carries just that profile's
 models, assembled from the pinned externals into per-model dirs AT BUILD TIME by
-``scripts/serve.bzl`` (zero new download code, no URL re-spelling). It is the spine
-the offline-integration milestone layers on; it retired
-``scripts/launch-qa-server.sh`` (whose job is now ``serve … --seed qa``).
+``scripts/serve.bzl`` (zero new download code, no URL re-spelling).
 
 Usage (under Bazel — the per-profile target supplies ``--profile`` as a default arg):
 
@@ -63,7 +61,7 @@ _SCRIPT_RUN_ROOT = _REPO_ROOT / "scripts" / ".run"
 # the per-profile target's `data` — so resolution is a runfiles LOOKUP, not a copy.
 # Off Bazel (a plain checkout) the matching model_cache.cached_*_model_dir fetches
 # it (the single Python download source). The dir-name → fetch-fn map below is the
-# ONLY model table serve.py still owns; the bazel runfiles file-map moved to
+# ONLY model table serve.py owns; the bazel runfiles file-map lives in
 # serve.bzl's _MODEL_FILES (one source of truth — no hand-sync between the two).
 
 
@@ -161,7 +159,7 @@ def resolve_model_dir(dir_name: str, models_root: Path) -> Path:
     return Path(fetched)
 
 
-# -- ONNX execution-provider auto-detect (#569) --------------------------------
+# -- ONNX execution-provider auto-detect -----------------------------------------
 #
 # Profiles are provider-FREE (portable, one file per capability shape — provider
 # is orthogonal to a profile's identity). The launcher detects the providers at
@@ -324,7 +322,7 @@ def compose_effective_config(
     resolves every name from :func:`_model_names_in_profile`).
 
     *providers* (when not ``None``) is the launcher-resolved ONNX execution
-    provider list (#569), overlaid onto every **onnx** entry that does not
+    provider list, overlaid onto every **onnx** entry that does not
     already declare its own ``providers:`` — an explicit profile choice wins over
     detection. Remote/platform entries are untouched (``providers:`` is onnx-only,
     mirroring the guard at ``profiles.py:291``).
@@ -379,7 +377,7 @@ def seed_qa_collection(collection_path: Path) -> None:
     """Generate the ``tests/manual/skill_quality`` synthetic fixture into *collection_path*.
 
     Reuses ``tests/manual/skill_quality/build_collection.py``'s ``build`` — the same
-    write path ``launch-qa-server.sh`` drove, now a launcher seed.
+    write path the server uses.
     """
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
@@ -547,7 +545,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.import_path is not None:
-        # MVP stub: real .apkg import is a later-wave seam (epic #565). Refuse
+        # MVP stub: real .apkg import is a later-wave seam. Refuse
         # loudly rather than silently start an empty collection.
         raise SystemExit(
             "--import is not wired yet (the .apkg seed seam lands in a later wave); "
@@ -575,7 +573,7 @@ def main(argv: list[str] | None = None) -> int:
             resolved_models[name] = str(resolve_model_dir(name, models_root))
 
     # Resolve ONNX execution providers for this host (auto-detect, or the
-    # --providers/--cpu override) and overlay them onto onnx entries (#569). The
+    # --providers/--cpu override) and overlay them onto onnx entries. The
     # BEFORE readout: print what we'll request, so the after-readback from
     # /status makes "did the GPU engage?" unambiguous.
     providers = resolve_providers(args)

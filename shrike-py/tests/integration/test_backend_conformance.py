@@ -1,10 +1,10 @@
-"""Parameterized conformance + parity suite over EmbedderBackend implementations (#268).
+"""Parameterized conformance + parity suite over EmbedderBackend implementations.
 
 Every registered backend configuration (``backend_cases.py``) runs through the same
 checks: protocol conformance, lifecycle, health shape, fingerprint stability,
-dimension consistency, the #174 batch-safety contract, and vector parity. Adding a
-backend implementation — including the native ones (#270/#271) — is one
-``BackendCase`` entry; its acceptance gate is this suite.
+dimension consistency, the batch-safety contract, and vector parity. Adding a
+backend implementation — including the native ones — is one ``BackendCase``
+entry; its acceptance gate is this suite.
 
 Direct in-process backends, no server (the end-to-end server paths stay in
 ``test_backends.py``). Embedding-gated like the existing lanes.
@@ -135,9 +135,9 @@ def _onnx_available() -> bool:
 
 
 class TestBatchSafety:
-    """The #174 contract, generic over implementations: what the probe proved is
-    how the backend behaves — serial models are batch-independent, batch-safe
-    models produce the same vector batched as serial."""
+    """The batch-safety contract, generic over implementations: what the probe
+    proved is how the backend behaves — serial models are batch-independent,
+    batch-safe models produce the same vector batched as serial."""
 
     def test_probe_ran_and_batching_is_consistent(
         self, case_backend: tuple[BackendCase, EmbedderBackend]
@@ -158,9 +158,9 @@ class TestBatchSafety:
 
 
 class TestParity:
-    """Golden parity (epic convention 7): a case is compared against its reference
-    implementation — itself (a fresh instance) when ``parity_ref`` is None, the
-    Python implementation it replaces otherwise. Byte-equal vectors + identical
+    """Golden parity: a case is compared against its reference implementation —
+    itself (a fresh instance) when ``parity_ref`` is None, the Python
+    implementation it replaces otherwise. Byte-equal vectors + identical
     fingerprint is what justifies keeping a fingerprint namespace on a runtime
     swap; anything less must namespace itself."""
 
@@ -174,9 +174,9 @@ class TestParity:
         fingerprint = backend.model_fingerprint()
 
         if case.parity_ref is None and not case.restart_parity:
-            # Single-instance form (#441): no second instantiation — embed the
-            # corpus again on the SAME instance and re-read the fingerprint.
-            # Covers determinism within the runtime; the cross-instance form is
+            # Single-instance form: no second instantiation — embed the corpus
+            # again on the SAME instance and re-read the fingerprint. Covers
+            # determinism within the runtime; the cross-instance form is
             # tautological for these cases (see BackendCase.restart_parity).
             again = _embed(backend, PARITY_TEXTS)
             if case.restart_exact:

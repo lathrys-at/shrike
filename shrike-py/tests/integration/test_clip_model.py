@@ -4,8 +4,7 @@ Mocked mechanics live in ``tests/unit/test_embedding_clip.py``; here we run ``Cl
 against the actual ``Xenova/clip-vit-base-patch32`` ONNX graphs so the preprocessing, I/O, and
 the shared-space property are exercised for real. The semantic assertion uses solid-colour
 images (deterministic, no network beyond the cached model): a colour image lands nearer its own
-colour word than unrelated concepts, proving a text query retrieves by image content. (Richer
-image-by-text quality was measured in the Phase-3a eval, #193.)
+colour word than unrelated concepts, proving a text query retrieves by image content.
 """
 
 from __future__ import annotations
@@ -30,14 +29,13 @@ _CLIP_DIM = 512
 # Unrelated query texts: a solid-colour image must land nearer *its own colour word* than any of
 # these. (Deterministic, no network. NOTE: the comparison is colour-vs-*unrelated-concept*, not
 # colour-vs-other-colour — the latter gap is ~0.05 and flips across int8 onnxruntime builds, the
-# former is ~0.09 and robust. Richer real-image quality was measured in the Phase-3a eval, #193.)
+# former is ~0.09 and robust.)
 _UNRELATED = ["a photograph of a cat", "a circuit diagram schematic", "a page of printed text"]
 
 
-# ONE started backend for the whole module (#441 — this file previously loaded
-# the ~147 MB text+vision model once per class, and test_clip_native.py loaded a
-# third identical copy): every consumer exercises the same default quantized
-# graphs read-only, and the target runs serially (xdist=None in BUILD.bazel).
+# ONE started backend for the whole module: every consumer exercises the same
+# default quantized graphs read-only, and the target runs serially (xdist=None in
+# BUILD.bazel).
 @pytest.fixture(scope="module")
 def be(clip_model: Path) -> Iterator[ClipBackend]:
     backend = ClipBackend(model=str(clip_model))  # auto-discovers the quantized graphs
@@ -46,12 +44,12 @@ def be(clip_model: Path) -> Iterator[ClipBackend]:
     backend.stop()
 
 
-# 224x224 == the CLIP preprocess crop size (#441 fixture eval): the native
-# preprocess runs a CatmullRom resize UNCONDITIONALLY, and that resize — not
-# decode or inference — dominates per-image cost (53ms from 256², 37ms from
-# 96², 16.7ms at crop size). Solid-colour vectors are bit-identical across
-# source sizes, so the contracts are unaffected; the one deliberately non-224
-# image below (300x200) stays as the resize+crop path canary.
+# 224x224 == the CLIP preprocess crop size: the native preprocess runs a
+# CatmullRom resize UNCONDITIONALLY, and that resize — not decode or inference —
+# dominates per-image cost (53ms from 256², 37ms from 96², 16.7ms at crop size).
+# Solid-colour vectors are bit-identical across source sizes, so the contracts are
+# unaffected; the one deliberately non-224 image below (300x200) stays as the
+# resize+crop path canary.
 def _png_bytes(color: tuple[int, int, int], size: tuple[int, int] = (224, 224)) -> bytes:
     from PIL import Image
 
@@ -102,10 +100,9 @@ class TestClipModel:
 @requires_clip
 @requires_shrike_native
 class TestClipImageIndex:
-    """End-to-end per-modality index (#162 Phase 3c → search #201a), over the kernel since the
-    #355 facade retirement: a text query retrieves a note by its image, and the per-modality
-    image ranker surfaces it at rank-1 across the gap. Uses the shared module backend; each
-    test opens its own (cheap) kernel + collection against it."""
+    """End-to-end per-modality index over the kernel: a text query retrieves a note by its
+    image, and the per-modality image ranker surfaces it at rank-1 across the gap. Uses the
+    shared module backend; each test opens its own (cheap) kernel + collection against it."""
 
     @staticmethod
     async def _open_kernel(tmp_path: Path, be: ClipBackend):
@@ -158,7 +155,7 @@ class TestClipImageIndex:
             assert engine.size() == 3
             assert engine.modality_keys("image") == [red]
 
-            # Per-modality retrieval (#201a): the image ranking is a separate signal, so the
+            # Per-modality retrieval: the image ranking is a separate signal, so the
             # image-bearing note surfaces at rank-1 *in that ranking* regardless of CLIP's
             # modality gap (text-text cos ~0.72 vs text-image ~0.32) — which a single deduped
             # cosine ranking could not deliver (the red note's own TEXT names no colour).
@@ -221,15 +218,15 @@ class TestClipImageIndex:
                 Image.new("RGB", (224, 224), rgb).save(os.path.join(media_dir, fn))
                 notes.append(self._note(f'study card number {i} <img src="{fn}">'))
             await self._seed(kernel, notes)
-            await kernel.rebuild_index()  # full rebuild calibrates the gate (#201b)
+            await kernel.rebuild_index()  # full rebuild calibrates the gate
 
-            # Offline calibration (#201b) ran on the real model and produced image stats.
+            # Offline calibration ran on the real model and produced image stats.
             raw = json.loads(kernel.index_status_json())
             stats = raw["activation"]
             assert stats["image"]["n"] >= CALIB_MIN
             assert stats["image"]["std"] > 0.0
-            # Per-modality breakdown (#684): the two-space CLIP index reports a
-            # text AND an image sub-index, each with its own size/ndim.
+            # Per-modality breakdown: the two-space CLIP index reports a text AND
+            # an image sub-index, each with its own size/ndim.
             mods = {m["modality"]: m for m in raw["modalities"]}
             assert {"text", "image"} <= set(mods)
             assert mods["text"]["size"] == n and mods["image"]["size"] == n
@@ -274,10 +271,7 @@ class TestClipImageIndex:
 @requires_clip
 @requires_shrike_native
 class TestClipNativeSeam:
-    """The native CLIP engine's binding seams (absorbed from test_clip_native.py,
-    #441 — since the #278 cutover ClipBackend IS the native engine, so the
-    file split documented a distinction that no longer exists; its fingerprint
-    and retrieval tests duplicated conformance / TestClipModel)."""
+    """The native CLIP engine's binding seams. ClipBackend IS the native engine."""
 
     def test_image_input_forms_agree(self, be, tmp_path: Path) -> None:
         # bytes / path / PIL image all land on the same vector (the facade
@@ -296,9 +290,9 @@ class TestClipNativeSeam:
         np.testing.assert_allclose(v_bytes, v_pil, atol=1e-5)
 
     def test_kernel_native_attach_embeds_images(self, be, tmp_path: Path) -> None:
-        """#342 P2: the CLIP composition attaches native — ONE adapted engine
-        serves both kernel halves, and neither text nor image embeds re-enter
-        the facade (the counter pin)."""
+        """The CLIP composition attaches native — ONE adapted engine serves both
+        kernel halves, and neither text nor image embeds re-enter the facade (the
+        counter pin)."""
         import shrike_native
 
         media = {"red.png": _png_bytes((200, 30, 30))}

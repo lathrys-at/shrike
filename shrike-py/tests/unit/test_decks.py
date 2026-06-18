@@ -1,4 +1,4 @@
-"""Collection-layer deck lifecycle (#74): upsert create/rename, empty-only delete."""
+"""Collection-layer deck lifecycle: upsert create/rename, empty-only delete."""
 
 from __future__ import annotations
 
@@ -79,9 +79,9 @@ class TestUpsertDecks:
         assert "index" in results[0]
 
     async def test_missing_name_is_error_item(self, wrapper):
-        # Typed input (#391): a name-LESS item rejects at the binding parse
-        # (never legal — the tool layer's Pydantic DeckInput requires name);
-        # an EMPTY name stays the per-item error.
+        # Typed input: a name-LESS item rejects at the binding parse (never
+        # legal — the tool layer's Pydantic DeckInput requires name); an EMPTY
+        # name stays the per-item error.
         with pytest.raises(shrike_native.NativeInputError, match="decks must be a JSON list"):
             await wrapper.upsert_decks([{}])
         results = await wrapper.upsert_decks([{"name": ""}])

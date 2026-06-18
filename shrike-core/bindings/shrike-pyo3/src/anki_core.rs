@@ -1,4 +1,4 @@
-//! The anki collection-core binding (#278 series, step 1) — `anki-core`
+//! The anki collection-core binding — `anki-core`
 //! feature builds only.
 //!
 //! Binds `shrike_collection::CollectionCore` (anki consumed exclusively via
@@ -25,13 +25,13 @@ type FieldMapRow = (i64, Vec<String>, Vec<String>);
 /// lifecycle; `close()` is explicit, like the facade it will eventually back).
 #[pyclass(frozen)]
 pub(crate) struct CollectionCore {
-    /// `Arc`-shared since #332 (S3d): the kernel and the harness's direct ops
+    /// `Arc`-shared: the kernel and the harness's direct ops
     /// hold ONE open collection (serialization is the executor's discipline).
     inner: std::sync::Arc<dyn Collection>,
 }
 
 impl CollectionCore {
-    /// The wrapped core, for the per-action bindings (#331) that compose
+    /// The wrapped core, for the per-action bindings that compose
     /// kernel action bodies over the live handle.
     pub(crate) fn core_ref(&self) -> &dyn Collection {
         &*self.inner
@@ -60,7 +60,7 @@ impl CollectionCore {
         py.detach(|| self.inner.close()).map_err(to_py_err)
     }
 
-    /// Cooperative idle-release (#64): close, keeping the instance reusable.
+    /// Cooperative idle-release: close, keeping the instance reusable.
     fn release(&self, py: Python<'_>) -> PyResult<()> {
         py.detach(|| self.inner.release()).map_err(to_py_err)
     }
@@ -99,7 +99,7 @@ impl CollectionCore {
             .map_err(to_py_err)
     }
 
-    /// Create a note under the #77 duplicate policy. Returns the new note id,
+    /// Create a note under the duplicate policy. Returns the new note id,
     /// or None when a first-field duplicate was skipped (`on_duplicate="skip"`);
     /// structural problems and policy `"error"` duplicates raise
     /// NativeInputError, exactly like the Rust core.
@@ -146,7 +146,7 @@ impl CollectionCore {
     }
 
     /// The raw Anki search escape hatch — list_notes-shaped JSON (the core
-    /// returns the typed response since #391 phase 2; this binding is its
+    /// returns the typed response; this binding is its
     /// serialization edge — plain serde, explicit nulls).
     #[pyo3(signature = (search, with_fields=true, limit=50))]
     fn query(
@@ -177,7 +177,7 @@ impl CollectionCore {
             .map_err(to_py_err)
     }
 
-    // ── write surface (#278 step 3) ──────────────────────────────────────────
+    // ── write surface ──────────────────────────────────────────
 
     /// The bulk named-fields upsert: wrapper-shaped note dicts as JSON in,
     /// per-item results JSON out (`created`/`updated`/`ok`/`skipped`/`error`
@@ -309,7 +309,7 @@ impl CollectionCore {
         .map_err(to_py_err)
     }
 
-    // ── media + maintenance (#278 step 5a) ───────────────────────────────────
+    // ── media + maintenance ───────────────────────────────────
 
     /// Store one media item from prepared bytes (full result shape: mime,
     /// deduped, extension-from-content-type); use the RETURNED filename.
@@ -375,7 +375,7 @@ impl CollectionCore {
         .map_err(to_py_err)
     }
 
-    /// The #89 prune: four cleanups, dry-run previews. Returns the response
+    /// The prune: four cleanups, dry-run previews. Returns the response
     /// JSON plus `removed_note_ids` out of band (kernel-internal — the host's
     /// index maintenance, never the wire).
     #[pyo3(signature = (unused_tags=true, empty_notes=true, empty_cards=true, unused_media=true, dry_run=true))]
@@ -397,7 +397,7 @@ impl CollectionCore {
         .map_err(to_py_err)
     }
 
-    // ── media URL/path sources (#278 step 5b — security-review gated) ────────
+    // ── media URL/path sources (security-review gated) ────────
 
     /// The full store_media batch: items of `data` (base64) / `url`
     /// (SSRF-guarded download with IP pinning) / server-local `path` (honored
@@ -418,9 +418,8 @@ impl CollectionCore {
                     ))
                 })?;
             // The sequential per-item prepare over the kernel's ONE prepare
-            // fn (#389 B2 — the core's byte-source branches retired with the
-            // network half), then the batch write under the collection. The
-            // prepare is async now (#721 S2 — the url path awaits the IP-pinned
+            // fn, then the batch write under the collection. The
+            // prepare is async now (the url path awaits the IP-pinned
             // client); this standalone path is off the runtime (under
             // `py.detach`), so it drives each prepare to completion via the
             // kernel runtime's `block_on` (a legal block_on site — not a runtime
@@ -452,10 +451,10 @@ impl CollectionCore {
         Ok(shrike_media::ip_is_allowed(addr))
     }
 
-    // ── note types (#278 step 4) ─────────────────────────────────────────────
+    // ── note types ─────────────────────────────────────────────
 
     /// Create/update note-type definitions in bulk (the position-keyed
-    /// replace with the #76 unsound-move rejection). JSON at this edge only:
+    /// replace with the unsound-move rejection). JSON at this edge only:
     /// typed inputs in, typed per-item results serialized once on the way out.
     fn upsert_note_types(&self, py: Python<'_>, note_types_json: String) -> PyResult<String> {
         py.detach(|| -> shrike_error::NativeResult<String> {
@@ -621,7 +620,7 @@ impl CollectionCore {
             .map_err(to_py_err)
     }
 
-    // ── read surface (#278 step 2) ───────────────────────────────────────────
+    // ── read surface ───────────────────────────────────────────
 
     /// Normalized embedding text per note id ("" for a missing id).
     fn note_texts(&self, py: Python<'_>, note_ids: Vec<i64>) -> PyResult<Vec<String>> {

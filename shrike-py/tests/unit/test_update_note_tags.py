@@ -1,4 +1,4 @@
-"""Collection-layer tag operations (#73): set/add/remove and rename."""
+"""Collection-layer tag operations: set/add/remove and rename."""
 
 from __future__ import annotations
 

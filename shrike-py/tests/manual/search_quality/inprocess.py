@@ -1,4 +1,4 @@
-"""In-process search-quality harness for the deterministic CI classes (#559).
+"""In-process search-quality harness for the deterministic CI classes.
 
 The deterministic classes need exactly-controlled cosines (to pin the RRF
 fused order, the exact-override tier, and the activation gate), with NO model
@@ -177,7 +177,7 @@ class InProcessSearch:
         vector index to rebuild."""
         if self.backend is not None:
             await self.harness.kernel.rebuild_index()
-            # Recalibrate the secondary cross-space image floors (#576/#580) —
+            # Recalibrate the secondary cross-space image floors —
             # the production harness drives this after every rebuild; the
             # in-process finalize mirrors it (with the harness's resolved floor
             # margin) so the real-model suite exercises the floor.
@@ -302,12 +302,12 @@ async def build_harness_real(
     clip_space_key: str = "clip",
     media: Mapping[str, bytes] | None = None,
 ) -> InProcessSearch:
-    """Assemble a harness with REAL backends for the manual suite (#559 PR2).
+    """Assemble a harness with REAL backends for the manual suite.
 
     Attaches ``text_backend`` as the primary (query-embedding) space and, when
     given, ``clip_backend`` as a SEPARATE CLIP space (its own key + the image
     resolver, so a note's images land in the CLIP space's ImageOnly index). This
-    is the real 2-space loop #229 enables: the production ``search_notes`` action
+    is the real 2-space loop: the production ``search_notes`` action
     auto-threads ``build_cross_space_json`` so the secondary CLIP space is
     searched and gated end-to-end — no manual cross-space wiring.
 

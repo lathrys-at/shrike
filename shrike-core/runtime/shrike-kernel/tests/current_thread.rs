@@ -1,4 +1,4 @@
-//! The degenerate single-thread proof (#374 design 3): install a
+//! The degenerate single-thread proof: install a
 //! `current_thread` runtime through the init seam and run a full
 //! open → upsert → search → close flow — the entire kernel (ops, the
 //! collection actor, completions) on ONE thread driving its own asynchrony,

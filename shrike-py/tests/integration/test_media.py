@@ -2,14 +2,13 @@
 
 Media is collection-wide and *not* covered by the shared-collection reset
 tracker, so these run against a dedicated, un-reset collection — but they
-don't need isolation from EACH OTHER (#477): one MODULE-scoped server
-replaces the ~12 per-test boots that dominated this file's runtime. Every
-test uses its own filenames and pattern-scoped assertions, so shared media
-state never leaks into an assert (the prune test trashes whatever unused
-media earlier tests left — by design, nothing reads another test's files).
-Under xdist each worker gets its own module server, so cross-worker
-interference is structural, not conventional. Only the tests needing
-special startup args (`server_factory`) keep dedicated boots.
+don't need isolation from EACH OTHER: one MODULE-scoped server serves the
+whole file. Every test uses its own filenames and pattern-scoped assertions,
+so shared media state never leaks into an assert (the prune test trashes
+whatever unused media earlier tests left — by design, nothing reads another
+test's files). Under xdist each worker gets its own module server, so
+cross-worker interference is structural, not conventional. Only the tests
+needing special startup args (`server_factory`) keep dedicated boots.
 """
 
 from __future__ import annotations
@@ -133,8 +132,8 @@ class TestMediaTools:
 
 
 class TestServerLocalPath:
-    """store_media `path` source (#164/#170): off by default; enabled only by an
-    explicit --media-path-root on a purely-local daemon, and confined to that root."""
+    """store_media `path` source: off by default; enabled only by an explicit
+    --media-path-root on a purely-local daemon, and confined to that root."""
 
     def test_path_off_by_default(self, media_mcp, tmp_path):
         # The module server is purely-local but sets NO --media-path-root → off.
@@ -255,8 +254,8 @@ class TestMediaCLI:
 
     def test_store_server_path_disabled_by_default(self, media_runner, tmp_path):
         # The CLI sends a {path} item; the default daemon has no --media-path-root,
-        # so the server refuses it (off by default, #170). Exercises the CLI
-        # plumbing + the default-off behavior end-to-end.
+        # so the server refuses it (off by default). Exercises the CLI plumbing +
+        # the default-off behavior end-to-end.
         src = tmp_path / "on-server.png"
         src.write_bytes(b"\x89PNG\r\n\x1a\nserver-side")
         result = media_runner.invoke(["collection", "media", "store", "--server-path", str(src)])
@@ -264,9 +263,8 @@ class TestMediaCLI:
         assert "not enabled" in result.output
 
 
-# NOTE (#278 cutover): the live-httpx redirect-guard and real-TLS SNI tests
-# retired with the Python fetch implementation. The native fetch's per-hop
-# re-vetting + IP pinning are covered by shrike-media's unit tests (#711) and the
-# loopback-server cases in tests/native/test_media_url_fetch.py; a LIVE
-# TLS-SNI validation test has no native equivalent yet (the Rust resolver
-# can't be monkeypatched) — flagged as a residual for the security review.
+# NOTE: the native fetch's per-hop re-vetting + IP pinning are covered by
+# shrike-media's unit tests and the loopback-server cases in
+# tests/native/test_media_url_fetch.py; a LIVE TLS-SNI validation test has no
+# native equivalent yet (the Rust resolver can't be monkeypatched) — flagged as a
+# residual for the security review.

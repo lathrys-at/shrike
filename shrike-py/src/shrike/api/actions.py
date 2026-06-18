@@ -1,4 +1,4 @@
-"""The transport-neutral action core (#276, implements #225).
+"""The transport-neutral action core.
 
 Every tool the server exposes is defined here as an :class:`ActionDef` —
 ``(name, JSON-schema'd input, JSON-schema'd output, coarse impl)`` — with no
@@ -12,9 +12,8 @@ and raise the transport-neutral error contract: :class:`ToolInputError`
 
 The MCP binding lives in ``mcp_adapter.py`` (registration + the ``_safe_tool``
 policy); ``tools.py`` is the composition shim that keeps ``register_tools``'s
-signature. A future agent-runtime adapter (#225's on-device function-calling
-bindings) iterates the same registry; at stretch slice 2 (#279) the registry
-re-homes in Rust.
+signature. A future agent-runtime adapter (on-device function-calling bindings)
+iterates the same registry.
 """
 
 from __future__ import annotations
@@ -81,10 +80,10 @@ from shrike.schemas import (
 
 logger = logging.getLogger("shrike.tools")
 
-# The per-call outcome fragment for the single completion log line (#328): an
-# action records what happened ("3/3 notes", "2 created, 1 error"); the adapter
-# folds it — with the call's params and duration — into the ONE INFO line each
-# served call emits. Adapter-agnostic (a contextvar, not an MCP coupling).
+# The per-call outcome fragment for the single completion log line: an action
+# records what happened ("3/3 notes", "2 created, 1 error"); the adapter folds
+# it — with the call's params and duration — into the ONE INFO line each served
+# call emits. Adapter-agnostic (a contextvar, not an MCP coupling).
 _call_outcome: ContextVar[str | None] = ContextVar("shrike_call_outcome", default=None)
 
 
@@ -93,17 +92,17 @@ def note_outcome(message: str) -> None:
     _call_outcome.set(message)
 
 
-# The per-signal RRF weights live kernel-side now (#388): `shrike_kernel::fusion::search_weights`
+# The per-signal RRF weights live kernel-side: `shrike_kernel::fusion::search_weights`
 # is the single source of truth, applied when the host passes none. The action below passes no
 # weights; a future config/`--search-*` knob re-enters through the same parameter as an override.
 
-# The live-search min-query gate (#181): query strings shorter than this skip
-# the embedding-bearing tier even on tier="full" — single letters and typing
+# The live-search min-query gate: query strings shorter than this skip the
+# embedding-bearing tier even on tier="full" — single letters and typing
 # fragments must not burn an embedding call. Ids-anchored searches are never
 # gated (no typing-fragment problem).
 MIN_SEMANTIC_QUERY_CHARS = 3
 
-# `limit` == 0 means "return all" (#685): no upper cap. Used only on the paths
+# `limit` == 0 means "return all": no upper cap. Used only on the paths
 # whose native cap is a plain `.take()`/`.truncate()`/SQLite `LIMIT` — list_notes,
 # collection_query, list_media (None there) — where a large sentinel just reads as
 # "all" for any real collection. The SEMANTIC search path does NOT use this: it
@@ -112,21 +111,20 @@ MIN_SEMANTIC_QUERY_CHARS = 3
 # (the true result ceiling). 1e9 is orders of magnitude past any Anki collection.
 _UNBOUNDED_LIMIT = 1_000_000_000
 
-# The semantic floor for neighbor search (#531) — the search pipeline's own
+# The semantic floor for neighbor search — the search pipeline's own
 # default (0.5). Upsert neighbors ARE search results: a draft's neighbors are a
 # `search_notes` of the draft's content (see `_attach_neighbors`), so they use
 # the same semantic floor a real search does. There is no bespoke
-# `neighbor_threshold` any more — an absolute cosine cutoff doesn't map onto the
-# RRF pipeline and was the cause of #531 (a borderline cosine flipped the gate
-# to empty on aarch64). Relevance is the holistic similarity gate in
-# `_attach_neighbors` (a neighbor must be semantic- or exact-backed), not a
-# magic threshold number.
+# `neighbor_threshold` — an absolute cosine cutoff doesn't map onto the RRF
+# pipeline and once flipped the gate to empty on aarch64 (a borderline cosine).
+# Relevance is the holistic similarity gate in `_attach_neighbors` (a neighbor
+# must be semantic- or exact-backed), not a magic threshold number.
 SEARCH_SEMANTIC_THRESHOLD = 0.5
 
-# The per-call collection selector (#68 routing). Every routable tool carries
-# this optional param; it names a registered profile to operate on, defaulting
-# to the active profile (and, with none set, the daemon's boot collection). The
-# shared description keeps the wire contract uniform across the 24 tools.
+# The per-call collection selector. Every routable tool carries this optional
+# param; it names a registered profile to operate on, defaulting to the active
+# profile (and, with none set, the daemon's boot collection). The shared
+# description keeps the wire contract uniform across the tools.
 COLLECTION_SELECTOR_DESCRIPTION = (
     "Which collection to operate on, by registered profile name (see "
     "list_profiles). Omit to use the active default collection. On a "
@@ -145,7 +143,7 @@ class ToolInputError(Exception):
 
 @dataclass(frozen=True)
 class CollectionBundle:
-    """The per-collection handles an action operates on (#68 routing).
+    """The per-collection handles an action operates on.
 
     A selector resolves to exactly one of these — the right collection's
     wrapper + kernel + search-index view + derived store + dedup recorder. In
@@ -170,7 +168,7 @@ class CollectionBundle:
         kernel is required — ``build_actions`` rejects a None context kernel),
         and ``index``/``derived``/``dedup_stats`` are duck-typed handles the
         bodies guard with explicit ``is None`` checks at runtime — exactly the
-        ``Any`` shape the pre-#68 closure locals had."""
+        ``Any`` shape the closure locals had."""
         return (self.wrapper, self.index, self.kernel, self.derived, self.dedup_stats)
 
 
@@ -178,10 +176,10 @@ class CollectionBundle:
 class ActionContext:
     """What action implementations see of the server — the kernel's surface.
 
-    One context object instead of loose closures over wrapper/index/kernel
-    (#225): the registry can be built against any host that assembles these.
+    One context object instead of loose closures over wrapper/index/kernel:
+    the registry can be built against any host that assembles these.
 
-    Routing (#68): an action resolves its per-call :class:`CollectionBundle`
+    Routing: an action resolves its per-call :class:`CollectionBundle`
     from the ``collection`` selector via :attr:`resolver` (async — lazy
     assembly may await). When no resolver is set (standalone / tests /
     single-collection), the fixed ``wrapper``/``index``/``kernel``/``derived``/
@@ -195,24 +193,24 @@ class ActionContext:
     # duck-typed view (tests) can stand in.
     index: Any | None = None
     derived: DerivedTextStore | None = None
-    # The AsyncKernel — REQUIRED (#355): write actions route through its
-    # maintained ops (upsert_notes_json/delete_notes/reindex_notes/
-    # forget_notes/metadata_changed), which carry the index + derived +
-    # watermark bookkeeping kernel-side. ``build_actions`` rejects a None.
+    # The AsyncKernel — REQUIRED: write actions route through its maintained ops
+    # (upsert_notes_json/delete_notes/reindex_notes/forget_notes/
+    # metadata_changed), which carry the index + derived + watermark bookkeeping
+    # kernel-side. ``build_actions`` rejects a None.
     kernel: Any | None = None
-    # The dedup best-match recorder (#207) — harness-owned; None in
-    # standalone/test contexts that don't care.
+    # The dedup best-match recorder — harness-owned; None in standalone/test
+    # contexts that don't care.
     dedup_stats: Any | None = None
     allow_private_fetch: bool = False
     server_path_roots: list[str] | None = None
-    # Server-local roots an import `.apkg`/`.colpkg` path must be contained in
-    # (#72). DISTINCT from server_path_roots (media read) by design: import is a
+    # Server-local roots an import `.apkg`/`.colpkg` path must be contained in.
+    # DISTINCT from server_path_roots (media read) by design: import is a
     # whole-collection overwrite — a higher blast radius — so it gets its own
-    # `--import-path-root`, never inheriting a media-read root (the lead's root
-    # taxonomy). None/empty → import-by-server-path is disabled.
+    # `--import-path-root`, never inheriting a media-read root. None/empty →
+    # import-by-server-path is disabled.
     server_import_path_roots: list[str] | None = None
     media_base_url: str | None = None
-    # Export (#71): the operator-allowed server-local OUTPUT roots (the
+    # Export: the operator-allowed server-local OUTPUT roots (the
     # --export-path-root capability, write counterpart of server_path_roots),
     # the download store (server-named temp packages → tokens), and whether the
     # server is purely-local (the second gate on a server-local output_path,
@@ -222,11 +220,11 @@ class ActionContext:
     export_path_roots: list[str] | None = None
     export_store: Any | None = None
     server_purely_local: bool = False
-    # The collection/profile registry (#66) — a Registry snapshot for the
-    # read-only `list_profiles` enumeration. None disables the action's data
-    # (an empty registry) without removing the action.
+    # The collection/profile registry — a Registry snapshot for the read-only
+    # `list_profiles` enumeration. None disables the action's data (an empty
+    # registry) without removing the action.
     registry: Any | None = None
-    # The per-call collection router (#68): an async callable
+    # The per-call collection router: an async callable
     # ``selector -> CollectionBundle``. None → single-collection mode (the
     # fixed handles above are the only bundle; a non-None selector is an error).
     resolver: Any | None = None
@@ -251,21 +249,19 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
     from urllib.parse import quote
 
     if ctx.kernel is None:
-        # The standalone (facade) mode retired with #355: every write action
-        # routes through a maintained kernel op now. Tests drive a real
-        # AsyncKernel via the unit harness (tests/unit/conftest.py).
+        # No standalone (facade) mode: every write action routes through a
+        # maintained kernel op. Tests drive a real AsyncKernel via the unit
+        # harness (tests/unit/conftest.py).
         raise ValueError(
             "actions require kernel mode (#355): pass kernel=<AsyncKernel> "
             "to register_tools/ActionContext"
         )
 
-    # Unpack once: the action bodies below read these exactly as the old
-    # closure-over-params register_tools did, so they move here verbatim.
-    # In single-collection mode these ARE the one bundle; in multi-collection
-    # mode each routable action rebinds wrapper/index/kernel/derived/dedup_stats
-    # PER CALL from the resolved bundle (`wrapper, index, kernel, derived,
-    # dedup_stats = (await _route(collection)).unpack()`) — the rest of each
-    # body is unchanged.
+    # Unpack once: the action bodies below close over these. In
+    # single-collection mode these ARE the one bundle; in multi-collection mode
+    # each routable action rebinds wrapper/index/kernel/derived/dedup_stats PER
+    # CALL from the resolved bundle (`wrapper, index, kernel, derived,
+    # dedup_stats = (await _route(collection)).unpack()`).
     wrapper = ctx.wrapper
     index = ctx.index
     derived = ctx.derived
@@ -289,7 +285,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
     )
 
     async def _route(selector: str | None) -> CollectionBundle:
-        """Resolve the per-call collection bundle (#68).
+        """Resolve the per-call collection bundle.
 
         No resolver → single-collection mode: a selector is a caller error
         (there is nothing to route to); None yields the one fixed bundle. With
@@ -317,8 +313,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         actions.append(ActionDef(name=fn.__name__, impl=fn, doc=fn.__doc__))
         return fn
 
-    # Since the cutover the note-type ops run in the native core; its input
-    # error is a ValueError and plays the old NoteTypeOpError's role verbatim.
+    # The note-type ops run in the native core; its input error is a ValueError
+    # and plays the NoteTypeOpError role.
     from shrike_native import NativeInputError as NoteTypeOpError
 
     def _media_url(filename: str) -> str | None:
@@ -376,8 +372,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         include_list: list[str] = [str(s) for s in include] if include else []
         logger.debug("collection_info sections=%s", ",".join(include_list or ["summary"]))
-        # Re-homed (#331): the whole body runs in shrike_kernel::actions, on
-        # the collection worker (the same serialization every op rides).
+        # The whole body runs in shrike_kernel::actions, on the collection
+        # worker (the same serialization every op rides).
         raw = await wrapper.run(
             lambda c: shrike_native.action_collection_info(c, include_list, note_type_details)
         )
@@ -511,7 +507,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                     scope_notes,
                     with_scheduling=include_scheduling,
                     with_media=include_media,
-                    legacy=False,  # always the modern format (#71 decision)
+                    legacy=False,  # always the modern format
                 )
             )
 
@@ -661,17 +657,17 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             except ValueError as e:
                 # Caller-supplied bad input, not a server bug: a clean rejection
                 # (WARNING, no traceback) rather than the catch-all's "Unhandled
-                # error" + traceback + leaked isoformat detail (#599).
+                # error" + traceback + leaked isoformat detail.
                 raise ToolInputError(
                     f"`modified_since` is not a valid ISO 8601 datetime: {modified_since!r}"
                 ) from e
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=UTC)
             cutoff = int(dt.timestamp())
-        # limit==0 means "return all" (#685): the native cap is `.truncate()`, so
+        # limit==0 means "return all": the native cap is `.truncate()`, so
         # a large sentinel reads as "all".
         effective_limit = limit if limit > 0 else _UNBOUNDED_LIMIT
-        # Re-homed (#331): the whole body runs in shrike_kernel::actions.
+        # The whole body runs in shrike_kernel::actions.
         raw = await wrapper.run(
             lambda c: shrike_native.action_list_notes(
                 c,
@@ -737,9 +733,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("collection_query %r fields=%s limit=%d", query, fields, limit)
         try:
-            # limit==0 means "return all" (#685): a large sentinel reads as "all".
+            # limit==0 means "return all": a large sentinel reads as "all".
             effective_limit = limit if limit > 0 else _UNBOUNDED_LIMIT
-            # Re-homed (#331): the whole body runs in shrike_kernel::actions.
+            # The whole body runs in shrike_kernel::actions.
             raw = await wrapper.run(
                 lambda c: shrike_native.action_collection_query(
                     c, query, with_fields=fields == "full", limit=effective_limit
@@ -877,8 +873,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         # Substring matching needs no embeddings; semantic ranking does.
         semantic_ok = index is not None and index.available and index.state == IndexState.READY
         message: str | None = None
-        # The live tier (#181): the caller wants the cheap signals only —
-        # "partial" promises a fuller answer on a tier="full" re-request.
+        # The live tier: the caller wants the cheap signals only — "partial"
+        # promises a fuller answer on a tier="full" re-request.
         completeness: Literal["partial", "full"] = (
             "partial" if (tier == "live" and semantic_ok) else "full"
         )
@@ -955,27 +951,27 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 version=version,
             )
 
-        # Query vectors (host-side embedding — the recorded #331 design point);
-        # the assembly itself is re-homed in shrike_kernel::actions.
+        # Query vectors (host-side embedding); the assembly itself runs in
+        # shrike_kernel::actions.
         vectors: list[list[float]] = []
         if semantic_ok:
             assert index is not None
-            # Off the event loop (#445): embed_queries blocks on backend
-            # inference / HTTP; inline it froze every concurrent request.
+            # Off the event loop: embed_queries blocks on backend inference /
+            # HTTP; inline it froze every concurrent request.
             embedded = await asyncio.to_thread(index.embed_queries, [t for (_, t, _) in sources])
             if embedded is None:
                 semantic_ok = False
             else:
                 vectors = embedded
 
-        # Cross-space inputs (#234): the PRIMARY space stays host-embedded above
-        # (#331/#181 LRU). Each SECONDARY text-capable space embeds the query
-        # with its own model + searches its own engine on the KERNEL runtime
-        # (where embed is legal — action_search_notes runs on the collection-
-        # actor thread and can't await embed, #503), returning the per-space
-        # SpaceSemantic rows the kernel fuses with the gate. EMPTY ("[]") when
-        # there are no secondary spaces — the N=1 case stays byte-identical.
-        # limit==0 means "return all" (#685). The native search applies the cap
+        # Cross-space inputs: the PRIMARY space stays host-embedded above (the
+        # query LRU). Each SECONDARY text-capable space embeds the query with
+        # its own model + searches its own engine on the KERNEL runtime (where
+        # embed is legal — action_search_notes runs on the collection-actor
+        # thread and can't await embed), returning the per-space SpaceSemantic
+        # rows the kernel fuses with the gate. EMPTY ("[]") when there are no
+        # secondary spaces — the N=1 case stays byte-identical.
+        # limit==0 means "return all". The native search applies the cap
         # lazily (`.take()`), so a large sentinel reads as "all" for the lexical
         # signals. The semantic path is the exception: the per-modality engine
         # over-fetches `k * SEARCH_OVERFETCH` and hands that to USearch's
@@ -996,8 +992,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             source_texts = [t for (_, t, _) in sources]
             cross_space_json = await kernel.build_cross_space_json(source_texts, fetch_k)
 
-        # Orchestrator state the kernel will own after S3 (#332): the #201b
-        # image activation floor and the index size for the over-fetch clamp.
+        # Orchestrator state: the image activation floor and the index size for
+        # the over-fetch clamp.
         image_floor = (
             activation_floor(index.activation_stats.get("image"), ACTIVATION_MARGIN)
             if index is not None
@@ -1188,7 +1184,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 # neighbors_ok is the explicit signal that the attach never
                 # ran (it assigns all-or-nothing) — the typed kernel results
                 # carry `neighbors: []` even before the attach, so key
-                # absence stopped being a usable sentinel (#391).
+                # absence is not a usable sentinel.
                 pending = [r["id"] for r in results if r.get("status") in ("created", "updated")]
                 for r in results:
                     if r.get("id") in pending:
@@ -1221,7 +1217,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         texts: list[str],
         top_k: int,
     ) -> bool:
-        """Attach similar-note neighbors to each upsert result (#204/#531).
+        """Attach similar-note neighbors to each upsert result.
 
         Neighbors ARE search results: a draft's neighbors are the top-``top_k``
         results of a ``search_notes`` of the draft's own content (self + batch
@@ -1229,10 +1225,10 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         tool uses (``action_search_notes`` — per-modality semantic +
         exact/substring + fuzzy + tag-centroid + cross-space, fused with the
         exact-match priority tier). There is no bespoke cosine cutoff: that is
-        what makes the feature platform-robust (#531). The old absolute-cosine
-        gate (0.6) emptied the whole list when one borderline cosine dipped
-        under it — a cross-platform (NEON vs AVX) embedding delta flipped it on
-        aarch64 while ranked search stayed green. RRF doesn't break-empty on a
+        what makes the feature platform-robust. An absolute-cosine gate (0.6)
+        emptied the whole list when one borderline cosine dipped under it — a
+        cross-platform (NEON vs AVX) embedding delta flipped it on aarch64
+        while ranked search stayed green. RRF doesn't break-empty on a
         borderline cosine (a ~0.59 match clears the search's 0.5 semantic floor
         easily — no cliff to flip), so neighbors inherit search's green
         behaviour on every platform.
@@ -1247,7 +1243,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         note in a topical collection returns no neighbors, while a true
         semantic/near-duplicate is kept.
 
-        The ``best`` calibration sample (#207) stays semantic-cosine-only: the
+        The ``best`` calibration sample stays semantic-cosine-only: the
         max semantic ``score`` among a draft's neighbors (a lexical hit has
         ``score=None`` and never pollutes it).
 
@@ -1257,17 +1253,17 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         """
         assert index is not None
         try:
-            # Off the event loop (#445): embed blocks on backend inference.
+            # Off the event loop: embed blocks on backend inference.
             vectors = await asyncio.to_thread(index.embed_queries, texts)
             if vectors is None:
                 return False  # backend vanished mid-call — retryable
-            # Build the SAME search state a real search_notes call assembles
-            # (#531): one query SOURCE per draft (its content, is_query=True so
-            # the lexical signals fire too), the secondary cross-space rows, the
-            # #201b image activation floor, the index size — and the kernel
-            # handle that carries the tag-centroid state. Neighbors = a self
-            # search, so nothing is disabled. The semantic floor is the search
-            # default (0.5) — no per-call neighbor threshold (#531).
+            # Build the SAME search state a real search_notes call assembles:
+            # one query SOURCE per draft (its content, is_query=True so the
+            # lexical signals fire too), the secondary cross-space rows, the
+            # image activation floor, the index size — and the kernel handle
+            # that carries the tag-centroid state. Neighbors = a self search, so
+            # nothing is disabled. The semantic floor is the search default
+            # (0.5) — no per-call neighbor threshold.
             sources: list[tuple[str, str, bool]] = [(t, t, True) for t in texts]
             cross_space_json = None
             if kernel is not None:
@@ -1309,7 +1305,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 # The similarity gate: keep only similarity-backed matches — a
                 # semantic hit (non-null score) or an exact/substring overlap.
                 # Drop fuzzy-only / tag-only coincidences (the holistic
-                # relevance read, #531).
+                # relevance read).
                 qualified = [
                     m for m in group.matches if m.score is not None or m.substring is not None
                 ]
@@ -1318,7 +1314,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                     for m in qualified
                 ]
                 if dedup_stats is not None:
-                    # The #207 calibration sample stays semantic-cosine-only:
+                    # The calibration sample stays semantic-cosine-only:
                     # the best semantic score, ignoring lexical-only hits.
                     sem_scores = [m.score for m in qualified if m.score is not None]
                     dedup_stats.record(max(sem_scores) if sem_scores else None)
@@ -1556,8 +1552,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             css,
             regex,
         )
-        # Re-homed (#391): the kernel op carries the watermark tail (a real
-        # replace bumps col.mod without touching vectors; a no-op bumps nothing).
+        # The kernel op carries the watermark tail (a real replace bumps
+        # col.mod without touching vectors; a no-op bumps nothing).
         try:
             result = json.loads(
                 await kernel.find_replace_note_types(
@@ -1611,8 +1607,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("update_note_type_field_metadata %r fields=%d", note_type, len(fields))
         updates = [f.model_dump(exclude_none=True) for f in fields]
-        # Re-homed (#391): the kernel op carries the watermark tail (editor
-        # metadata isn't embedding text — col_mod advances, no re-embed).
+        # The kernel op carries the watermark tail (editor metadata isn't
+        # embedding text — col_mod advances, no re-embed).
         try:
             result = json.loads(
                 await kernel.update_note_type_field_metadata(note_type, json.dumps(updates))
@@ -1642,14 +1638,12 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         verify which notes will be deleted."""
         wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("delete_notes requested=%d", len(ids))
-        # ONE maintained kernel op (#604): the existence partition, the anki
-        # delete, and the sidecar drop (vectors + fingerprints + derived rows +
-        # watermark advance) run in a single op. This replaces the old
-        # wrapper.delete_notes (its own `nid:` existence pre-check, a separate
-        # round trip) + a separate kernel.forget_notes (the sidecar tail, two
-        # more) — the maintained-write-path invariant. Best-effort tail is
-        # internal to the op: the notes are gone from the collection either way,
-        # and a failed sidecar leaves the watermark behind for next-boot drift.
+        # ONE maintained kernel op: the existence partition, the anki delete,
+        # and the sidecar drop (vectors + fingerprints + derived rows +
+        # watermark advance) run in a single op — the maintained-write-path
+        # invariant. Best-effort tail is internal to the op: the notes are gone
+        # from the collection either way, and a failed sidecar leaves the
+        # watermark behind for next-boot drift.
         result = json.loads(await kernel.delete_notes(ids))
         note_outcome(f"{len(result['deleted'])} deleted, {len(result['not_found'])} not found")
         return DeleteNotesResponse.model_validate(result)
@@ -1742,7 +1736,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         except re.error as e:
             # A malformed pattern/backref is caller-supplied bad input, not a
             # server bug — and the preview loop compiles it on EVERY call,
-            # including a real apply (#599). Raise a clean rejection (WARNING, no
+            # including a real apply. Raise a clean rejection (WARNING, no
             # traceback) instead of the catch-all's "Unhandled error" + traceback.
             raise ToolInputError(f"Invalid regular expression: {e}") from e
         changed_ids = result.pop("changed_ids", [])
@@ -1831,8 +1825,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             new_note_type,
             dry_run,
         )
-        # Re-homed (#391): the kernel op migrates and, on apply, re-embeds +
-        # re-ingests the changed notes (empty template_map = map by ordinal).
+        # The kernel op migrates and, on apply, re-embeds + re-ingests the
+        # changed notes (empty template_map = map by ordinal).
         try:
             result = json.loads(
                 await kernel.migrate_note_type(
@@ -1940,7 +1934,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         else:
             logger.debug("update_note_tags notes=%d add=%s remove=%s", len(note_ids), add, remove)
 
-        # Re-homed (#391): the kernel op carries the watermark tail.
+        # The kernel op carries the watermark tail.
         result = UpdateNoteTagsResponse.model_validate_json(
             await kernel.update_note_tags(note_ids, set_tags=set, add=add, remove=remove)
         )
@@ -1977,7 +1971,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         if old == new:
             raise ToolInputError("`old` and `new` tags are identical — nothing to rename.")
         logger.debug("rename_tag %r -> %r (scope=%d notes)", old, new, len(note_ids))
-        # Re-homed (#391): the kernel op carries the watermark tail.
+        # The kernel op carries the watermark tail.
         result = RenameTagResponse.model_validate_json(await kernel.rename_tag(old, new, note_ids))
         note_outcome(f"modified {result.notes_modified} note(s)")
         return result
@@ -2063,9 +2057,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             unused_media,
             dry_run,
         )
-        # Re-homed (#391): the kernel op runs the cleanups AND the index
-        # maintenance tail (deletions drop their sidecars; a tags-only prune
-        # advances the watermarks). Removed note ids stay kernel-internal.
+        # The kernel op runs the cleanups AND the index maintenance tail
+        # (deletions drop their sidecars; a tags-only prune advances the
+        # watermarks). Removed note ids stay kernel-internal.
         result = CollectionPruneResponse.model_validate_json(
             await kernel.collection_prune(
                 unused_tags, empty_notes, empty_cards, unused_media, dry_run
@@ -2120,8 +2114,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         or out-of-root path, oversize) are reported per item and don't sink the batch."""
         wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("store_media count=%d", len(items))
-        # Re-homed (#391): the kernel prepares byte sources concurrently on
-        # its blocking pool and writes the batch as one collection job.
+        # The kernel prepares byte sources concurrently on its blocking pool
+        # and writes the batch as one collection job.
         item_dicts = [i.model_dump(exclude_none=True) for i in items]
         results = json.loads(
             await kernel.store_media(
@@ -2198,7 +2192,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         file's bytes by GETting its `url` (the server's `GET /media/<name>`)."""
         wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("list_media pattern=%s limit=%d", pattern, limit)
-        # limit==0 means "return all" (#685): the native list_media treats a None
+        # limit==0 means "return all": the native list_media treats a None
         # limit as unbounded.
         result = json.loads(await kernel.list_media(pattern, limit if limit > 0 else None))
         for f in result["files"]:
@@ -2316,8 +2310,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("import_package path=%s", path)
 
-        # Server-local-path safety gate (#72), gated exactly like store_media's
-        # `path` and export's `output_path` (#71's shared mechanism): the server
+        # Server-local-path safety gate, gated exactly like store_media's
+        # `path` and export's `output_path` (the shared mechanism): the server
         # must be purely-local AND the package must resolve inside an
         # operator-allowed --import-path-root. `path_within_any_root` is the READ
         # gate — the package must already exist — with commonpath on realpath'd
@@ -2373,7 +2367,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         creates = sum(1 for d in decks if d.id is None)
         logger.debug("upsert_decks count=%d (renames=%d)", len(decks), len(decks) - creates)
 
-        # Re-homed (#391): the kernel op carries the watermark tail.
+        # The kernel op carries the watermark tail.
         deck_dicts = [d.model_dump(exclude_none=True) for d in decks]
         results = json.loads(await kernel.upsert_decks(json.dumps(deck_dicts)))
 
@@ -2413,7 +2407,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         or missing deck is skipped, not an error."""
         wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         logger.debug("delete_decks requested=%d", len(decks))
-        # Re-homed (#391): the kernel op carries the watermark tail.
+        # The kernel op carries the watermark tail.
         result = DeleteDecksResponse.model_validate_json(await kernel.delete_decks(decks))
         note_outcome(
             f"{len(result.deleted)} deleted, {len(result.not_found)} not found, "

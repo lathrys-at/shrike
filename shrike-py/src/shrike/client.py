@@ -1,7 +1,7 @@
 """Standalone Shrike client.
 
 A reusable, dependency-light client for a Shrike server: action calls over the
-schema-first `POST /actions/{name}` edge (#505/#687), the custom HTTP endpoints
+schema-first `POST /actions/{name}` edge, the custom HTTP endpoints
 (`/status`, `/index/rebuild`, `/embedding/*`, `/shutdown`), and daemon lifecycle
 (start/stop/liveness).
 
@@ -99,9 +99,9 @@ _STOP_ADAPTER: TypeAdapter[StopResponse] = TypeAdapter(StopResponse)
 _EXPORT_ADAPTER: TypeAdapter[ExportPackageResponse] = TypeAdapter(ExportPackageResponse)
 
 # Re-exported so ``from shrike.client import ShrikeError`` (and the subclasses)
-# keeps working now that the hierarchy lives in the dependency-light
-# ``shrike.errors`` — ``__all__`` marks them exported (some aren't referenced in
-# this module's own code).
+# keeps working: the hierarchy lives in the dependency-light ``shrike.errors`` —
+# ``__all__`` marks them exported (some aren't referenced in this module's own
+# code).
 __all__ = [
     "CollectionBusyError",
     "ServerError",
@@ -113,9 +113,9 @@ __all__ = [
     "ShrikeError",
 ]
 
-# The exception hierarchy now lives in the dependency-light ``shrike.errors``
+# The exception hierarchy lives in the dependency-light ``shrike.errors``
 # (imported above) so the CLI can catch ``ShrikeError`` without pulling httpx;
-# they stay importable as ``shrike.client.ShrikeError`` for the historical path.
+# they stay importable as ``shrike.client.ShrikeError``.
 
 
 # -- Launch spec -------------------------------------------------------------
@@ -147,7 +147,7 @@ class ServerSpec:
     embedding_args: list[str] = field(default_factory=list)
     index_args: list[str] = field(default_factory=list)
     locking_args: list[str] = field(default_factory=list)
-    # Set for a config declaring the v2 capability sections (#498): the daemon
+    # Set for a config declaring the v2 capability sections: the daemon
     # resolves embedders:/managed: from this file itself (structured entries
     # have no flag spelling), and embedding_args stays empty.
     config_path: str | None = None
@@ -157,7 +157,7 @@ class ServerSpec:
         return f"http://{self.host}:{self.port}/mcp"
 
 
-# The #392 wire-version handshake header. The server (server.py) echoes its
+# The wire-version handshake header. The server (server.py) echoes its
 # WIRE_PROTOCOL_VERSION here on every /actions/* response and refuses a request
 # whose header doesn't match. The client sends it so a future skew between a
 # separately-shipped client and daemon fails fast instead of mis-decoding. The
@@ -190,7 +190,7 @@ class ShrikeClient:
         self.autostart = autostart and spec is not None
         self._autostarted = False
         self._http = httpx.Client()
-        # The per-call collection selector (#68): injected into every tool
+        # The per-call collection selector: injected into every tool
         # call's arguments (as `collection`) when set, so the CLI's
         # --collection/--profile routes without each typed method carrying the
         # param. None → the server's active default. An explicit `collection`
@@ -228,7 +228,7 @@ class ShrikeClient:
     def _action(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         """Invoke an action via ``POST /actions/{name}`` and return its body.
 
-        The schema-first edge (#505/#687): the args are the JSON request body,
+        The schema-first edge: the args are the JSON request body,
         the response is the action's response-model JSON dict directly (no MCP
         JSON-RPC / ``isError`` / ``structuredContent`` envelope). This is the
         untyped escape hatch — the typed convenience methods (``list_notes``,
@@ -238,17 +238,17 @@ class ShrikeClient:
 
         Raises:
             CollectionBusyError: the collection couldn't be acquired (another
-                process holds it under cooperative locking — #65) — the op never
+                process holds it under cooperative locking) — the op never
                 ran, so the caller may retry.
             ServerError: the action failed — a bad input (``input_error``), an
                 unknown action (``unknown_action``), an internal server error,
-                or a wire-version mismatch (#392).
+                or a wire-version mismatch.
             ServerHTTPError: the server returned a non-2xx status with no
                 recognizable ``ActionError`` envelope.
             ServerUnreachableError: the server could not be reached.
         """
         args = dict(arguments or {})
-        # Inject the client-wide collection selector (#68) unless the call
+        # Inject the client-wide collection selector unless the call
         # already specified one. `list_profiles` is registry-level (no routing)
         # so it takes no selector — skip it.
         if self.collection is not None and name != "list_profiles":
@@ -271,7 +271,7 @@ class ShrikeClient:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            # #392: assert the wire version so a client/daemon skew fails fast.
+            # Assert the wire version so a client/daemon skew fails fast.
             WIRE_VERSION_HEADER: str(WIRE_PROTOCOL_VERSION),
         }
         try:
@@ -296,7 +296,7 @@ class ShrikeClient:
 
         The actions edge returns a typed ``{code, message}`` body with an HTTP
         status. The ``code`` is the authority (it replaces the old fragile
-        mid-string ``collection_busy:`` text-sentinel parsing, #598). A response
+        mid-string ``collection_busy:`` text-sentinel parsing). A response
         without a decodable envelope falls back to a plain ``ServerHTTPError``.
         """
         try:
@@ -584,7 +584,7 @@ class ShrikeClient:
             )
         )
 
-    # -- media (#70) --------------------------------------------------------
+    # -- media --------------------------------------------------------------
 
     def store_media(self, items: Sequence[StoreMediaItem | dict[str, Any]]) -> StoreMediaResponse:
         """Store media files, transparently batching if over the server limit."""
@@ -705,7 +705,7 @@ class ShrikeClient:
         with_scheduling: bool = False,
         merge_notetypes: bool = False,
     ) -> ImportPackageResponse:
-        """Import an .apkg/.colpkg from a server-local path (#72)."""
+        """Import an .apkg/.colpkg from a server-local path."""
         return ImportPackageResponse.model_validate(
             self._action(
                 "import_package",
@@ -979,7 +979,7 @@ class ShrikeClient:
         # The state dir is created by whoever writes into it (ServerLock, the
         # daemon meta/pid writers) — creating it here too touched the real
         # platformdirs path from unit tests, which the darwin Bazel sandbox
-        # forbids (#424). Only the log destination is client-made.
+        # forbids. Only the log destination is client-made.
         log_dir = Path(spec.log_dir) if spec.log_dir else daemon.STATE_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
 

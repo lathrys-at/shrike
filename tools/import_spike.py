@@ -1,4 +1,4 @@
-"""Phase 0 make-or-break spike (#242).
+"""Native-wheel import spike.
 
 The whole Bazel approach rests on one assumption: the native-dependency wheels
 import and *run* on Bazel's hermetic CPython (python-build-standalone), on every

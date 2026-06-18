@@ -1,6 +1,5 @@
-//! Native CLIP dual-encoder engine (#271): two ort graphs + image preprocessing
-//! via the `shrike-image` utility crate (the byte→pixels→CHW pipeline, #707;
-//! replacing PIL/numpy in the Python engine).
+//! Native CLIP dual-encoder engine: two ort graphs + image preprocessing
+//! via the `shrike-image` utility crate (the byte→pixels→CHW pipeline).
 //!
 //! Mirrors `shrike/embedding_clip.py`: text graph (`input_ids` → `text_embeds`)
 //! and vision graph (`pixel_values` → `image_embeds`) projecting into one shared
@@ -10,7 +9,7 @@
 //! the `image` crate's Catmull-Rom bicubic differs from PIL's bicubic (different
 //! cubic coefficient), so image vectors are semantically equivalent but not
 //! bit-identical to the Python engine's — the facade namespaces the fingerprint
-//! (`clip-rs:`) accordingly (epic #265 convention 7).
+//! (`clip-rs:`) accordingly.
 
 use std::sync::Mutex;
 
@@ -23,7 +22,7 @@ use super::session::GraphInput;
 use super::session::{build_session, extract_2d, graph_inputs, int_tensor, l2_normalize_rows};
 
 /// The pixel-math version of the CLIP preprocessing pipeline, re-exported from
-/// `shrike-image` (its owner since #707) so the facade's fingerprint and the
+/// `shrike-image` (its owner) so the facade's fingerprint and the
 /// Python binding keep reading `IMAGE_PREP_VERSION_RS` from this crate.
 pub use shrike_image::IMAGE_PREP_VERSION_RS;
 
@@ -226,7 +225,7 @@ impl ClipEmbedder {
     }
 }
 
-/// The engine contract (#342, route 1): the dual encoder is one engine
+/// The engine contract (route 1): the dual encoder is one engine
 /// implementing BOTH compute traits — text and image chunks project into the
 /// shared CLIP space. Identity/batch policy come from the host (`WithPolicy`),
 /// execution from an adapter lane; `safe_batch` stays the probed-by-host

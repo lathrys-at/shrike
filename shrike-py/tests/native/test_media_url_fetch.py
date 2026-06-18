@@ -1,4 +1,4 @@
-"""SSRF-guard parity (#278 step 5b — trust-boundary code, security-review gated).
+"""SSRF-guard parity (trust-boundary code, security-review gated).
 
 Three layers, none touching the real network:
 
@@ -87,7 +87,7 @@ IP_CORPUS = [
     "2001:db8::1",
     "2001:1::1",
     "2001:1::2",
-    # 6to4 (2002::/16): non-global, fail-open to internal IPv4 if permitted (#591)
+    # 6to4 (2002::/16): non-global, fail-open to internal IPv4 if permitted
     "2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff",  # just below 2002::/16 (global)
     "2002::",  # 2002::/16 start (non-global)
     "2002:7f00:1::1",  # 6to4 of 127.0.0.1 (non-global)
@@ -95,7 +95,7 @@ IP_CORPUS = [
     "2002:c0a8:1::1",  # 6to4 of 192.168.0.1 (non-global)
     "2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff",  # 2002::/16 end (non-global)
     "2003::1",  # just above 2002::/16 (global)
-    # 3fff::/20 reserved-by-IANA: non-global (#591). The /20 ends at
+    # 3fff::/20 reserved-by-IANA: non-global. The /20 ends at
     # 3fff:0fff:..., so an address with the 13th-16th bits set is OUTSIDE it.
     "3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff",  # just below 3fff::/20 (global)
     "3fff::",  # 3fff::/20 start (non-global)
@@ -236,7 +236,7 @@ def test_b64_oversize_and_bad_input(native_core):
     assert bad[0]["status"] == "error"
     assert "base64" in bad[0]["error"]
     # A sourceless item fails StoreMediaItem.validate (the typed-input port
-    # of the Pydantic model_validator; #391) per item, not the batch.
+    # of the Pydantic model_validator) per item, not the batch.
     missing = json.loads(native_core.store_media_items(json.dumps([{}])))
     assert missing[0]["status"] == "error"
     assert "exactly one of" in missing[0]["error"]

@@ -1,4 +1,4 @@
-//! Per-action bindings for the kernel's action core (#331, S2).
+//! Per-action bindings for the kernel's action core.
 //!
 //! Each function is one re-homed action: it takes the live `CollectionCore`
 //! handle (the Python harness invokes it *on the collection worker thread*,
@@ -7,7 +7,7 @@
 //! canonical response as JSON for the Pydantic binding to validate. The GIL is
 //! released for the duration (`py.detach`).
 //!
-//! THIS is the host edge where a typed response becomes JSON (#391 phase 2) —
+//! THIS is the host edge where a typed response becomes JSON —
 //! plain serde of the schema type. One wire convention: an unset `Option` is
 //! an explicit `null` (the Pydantic shape the schema contract test pins);
 //! every consumer revalidates through the `schemas.py` models, so the wire is
@@ -96,10 +96,10 @@ pub(crate) fn action_collection_query(
     .map_err(to_py_err)
 }
 
-/// `search_notes` (#331): the whole fused-search assembly in the kernel. The
+/// `search_notes`: the whole fused-search assembly in the kernel. The
 /// harness passes the live engine handles, one query vector per source when
 /// semantic ranking is on, and the orchestrator state (image floor, index
-/// size) the kernel will own after S3 (#332).
+/// size).
 #[pyfunction]
 #[pyo3(signature = (core, index_engine, derived_engine, sources, vectors, top_k, threshold, deck=None, tags=None, exclude=None, image_floor=None, weights=None, semantic=false, index_size=0, kernel=None, cross_space=None))]
 #[allow(clippy::too_many_arguments)]
@@ -122,7 +122,7 @@ pub(crate) fn action_search_notes(
     kernel: Option<PyRef<'_, crate::async_kernel::AsyncKernel>>,
     cross_space: Option<String>,
 ) -> PyResult<String> {
-    // The tag-centroid state (#179) rides the kernel handle; cloned out so
+    // The tag-centroid state rides the kernel handle; cloned out so
     // the GIL-bound PyRef never crosses the detach.
     let tag_kernel = kernel.as_ref().map(|k| k.kernel_arc());
     let inner = core.core_ref();
@@ -142,20 +142,19 @@ pub(crate) fn action_search_notes(
             },
         )
         .collect();
-    // Cross-space inputs (#234): the host pre-built these via
+    // Cross-space inputs: the host pre-built these via
     // `build_cross_space_json` (embed on the kernel runtime) and threads the
-    // JSON in here. `None`/empty (the N=1 case) → no secondary spaces, so the
-    // args are byte-identical to today.
+    // JSON in here. `None`/empty (the N=1 case) → no secondary spaces.
     let cross_space: Vec<shrike_kernel::actions::SpaceSemantic> = match cross_space {
         Some(s) if !s.is_empty() => serde_json::from_str(&s)
             .map_err(|e| shrike_error::NativeError::invalid_input(format!("cross_space: {e}")))
             .map_err(to_py_err)?,
         _ => Vec::new(),
     };
-    // #576/#580 experiment knobs (TEST-ONLY, like `disable_cross_space_gate`):
-    // the eval harness selects a cross-space fusion variant + τ + the #580
+    // Experiment knobs (TEST-ONLY, like `disable_cross_space_gate`):
+    // the eval harness selects a cross-space fusion variant + τ + the
     // vision-weight budget via env vars so the MCP tool schema is unchanged and
-    // production stays on the `FloorAdmit` default (#580). Unset → production
+    // production stays on the `FloorAdmit` default. Unset → production
     // floor-admission exactly.
     let (cross_space_fusion_mode, cross_space_tau, cross_space_budget) =
         cross_space_fusion_from_env();
@@ -195,9 +194,9 @@ pub(crate) fn action_search_notes(
 /// soft_relative, soft_calibrated, floor_admit_budget, soft_floor_admit,
 /// soft_floor_admit_budget}; `SHRIKE_CROSS_SPACE_TAU` a float;
 /// `SHRIKE_CROSS_SPACE_BUDGET` a float). The PRODUCTION default (unset) is
-/// `FloorAdmit` (#580); the env seam is the EVAL escape hatch the search-quality
+/// `FloorAdmit`; the env seam is the EVAL escape hatch the search-quality
 /// sweep uses to reproduce the historical decision tables (e.g. `relative_floor`
-/// for the pre-#580 production gate, `relative` for the pre-#576 leak). An
+/// for the earlier production gate, `relative` for the earlier leak). An
 /// unrecognized value falls back to the production default (floor-admit) so a
 /// typo can never silently weaken the path. The MCP tool schema is unchanged.
 fn cross_space_fusion_from_env() -> (shrike_kernel::actions::CrossSpaceFusionMode, f64, f64) {
@@ -207,26 +206,26 @@ fn cross_space_fusion_from_env() -> (shrike_kernel::actions::CrossSpaceFusionMod
         .as_deref()
         .map(str::trim)
     {
-        // The historical (pre-#580) eval modes — reproduce the decision tables.
+        // The historical eval modes — reproduce the decision tables.
         Some("relative") => M::Relative,
         Some("relative_floor") => M::RelativeFloor,
         Some("soft_relative") => M::SoftRelative,
         Some("soft_calibrated") => M::SoftCalibrated,
-        // #580 floor-admission family (production + the dominated/measurement
+        // Floor-admission family (production + the dominated/measurement
         // siblings).
         Some("floor_admit") => M::FloorAdmit,
         Some("floor_admit_budget") => M::FloorAdmitBudget,
         Some("soft_floor_admit") => M::SoftFloorAdmit,
         Some("soft_floor_admit_budget") => M::SoftFloorAdmitBudget,
         // "", unset, or anything unrecognized → the shipped production default
-        // (#580 floor-admit).
+        // (floor-admit).
         _ => M::default(),
     };
     let tau = std::env::var("SHRIKE_CROSS_SPACE_TAU")
         .ok()
         .and_then(|s| s.trim().parse::<f64>().ok())
         .unwrap_or(0.05);
-    // The #580 vision-weight budget B; `<= 0` / unset reads as the canonical 1.0
+    // The vision-weight budget B; `<= 0` / unset reads as the canonical 1.0
     // (`SearchArgs::effective_budget`), so a single fired space keeps full weight.
     let budget = std::env::var("SHRIKE_CROSS_SPACE_BUDGET")
         .ok()

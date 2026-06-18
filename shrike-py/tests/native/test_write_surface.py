@@ -1,4 +1,4 @@
-"""Write-surface parity (#278 series, step 3).
+"""Write-surface parity.
 
 The native upsert/tags/decks/find-replace/delete-note-types ops against their
 CollectionWrapper result shapes: the cross-core case runs the same batch
@@ -112,7 +112,7 @@ def test_cross_core_write_parity(tmp_path, native_core):
     assert _strip_ids(native_update) == _strip_ids(pip["update"])
     assert native_core.get_note(nid)[2][1] == "new back"
 
-    # Tags / rename: same counts + not_found echo (typed wire since #391 —
+    # Tags / rename: same counts + not_found echo (typed wire —
     # both routes ride the same binding, so the dicts match whole).
     native_tags = json.loads(native_core.update_note_tags([nid, 999], add=["x1"], remove=["t2"]))
     assert native_tags == pip["tags"]
@@ -126,7 +126,7 @@ def test_cross_core_write_parity(tmp_path, native_core):
     assert native_del == pip["delete_decks"]
 
     # find_replace: same changed count; changed_ids echo the native note
-    # (a typed tuple since #513 — the id set never rides a wire).
+    # (a typed tuple — the id set never rides a wire).
     notes_changed, changed_ids = native_core.find_replace_notes(
         [nid], "alpha", "omega", False, True, None
     )
@@ -136,7 +136,7 @@ def test_cross_core_write_parity(tmp_path, native_core):
 
 
 def test_set_note_tags_bulk_replaces_tags_and_preserves_fields(native_core):
-    """The set_tags (replace) path rides set_note_tags_bulk, which (since #716)
+    """The set_tags (replace) path rides set_note_tags_bulk, which
     rebuilds each UpdateNotes row from one batched DB read instead of a GetNote
     per note. Pin the behavior that read must preserve: tags are replaced
     exactly across the whole set, and every note's fields/notetype survive."""
@@ -162,7 +162,7 @@ def test_set_note_tags_bulk_replaces_tags_and_preserves_fields(native_core):
 
 
 def test_set_note_tags_bulk_tags_never_reach_sql(native_core):
-    """#716 guard: the batched read interpolates only integer ids into the SQL
+    """The batched read interpolates only integer ids into the SQL
     (ids_sql_list); tag strings ride the UpdateNotes proto, never the query. So
     SQL metacharacters in a tag are stored as data, not parsed as syntax, and
     the collection stays intact. (Anki may canonify a tag; the load-bearing
@@ -189,7 +189,7 @@ def test_set_note_tags_bulk_tags_never_reach_sql(native_core):
 
 
 def test_set_note_tags_bulk_preserves_unicode_and_empty_trailing_field(native_core):
-    """#716 guard: the DB-read reconstruction splits anki's 0x1f field blob the
+    """The DB-read reconstruction splits anki's 0x1f field blob the
     same way anki's split_fields does, so multibyte text and an empty trailing
     field survive a tag-set exactly (an empty trailing field is the classic
     split/join round-trip trap)."""
@@ -203,7 +203,7 @@ def test_set_note_tags_bulk_preserves_unicode_and_empty_trailing_field(native_co
 
 
 def test_set_note_tags_bulk_at_the_1000_note_cap(native_core):
-    """#716 guard: a cap-scale tag-set rides ONE batched read + ONE UpdateNotes
+    """A cap-scale tag-set rides ONE batched read + ONE UpdateNotes
     write; assert tags + fields are correct across the whole range (the read is
     one `IN (…)` round trip, not 1000 GetNote RPCs)."""
     basic = native_core.notetype_id("Basic")

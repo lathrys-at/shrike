@@ -1,4 +1,4 @@
-"""``shrike export`` — export the collection (or a deck/selection) to a package (#71)."""
+"""``shrike export`` — export the collection (or a deck/selection) to a package."""
 
 from __future__ import annotations
 

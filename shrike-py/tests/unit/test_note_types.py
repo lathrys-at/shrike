@@ -326,11 +326,11 @@ class TestUpsertFieldReplaceRejectsUnsound:
 
 
 class TestUpdateNoteTypeFieldsPreserveData:
-    """Regression: a whole-list field/template replace must not destroy note data.
+    """A whole-list field/template replace must not destroy note data.
 
-    Previously `_update_note_type` rebuilt `flds`/`tmpls` from fresh objects, so
-    any update carrying a `fields` key blanked every note's content and any
-    `templates` key deleted every card (#76).
+    A `_update_note_type` that rebuilt `flds`/`tmpls` from fresh objects would
+    blank every note's content on any update carrying a `fields` key and delete
+    every card on a `templates` key — this guards against that.
     """
 
     async def test_identical_fields_preserve_data(self, wrapper):
@@ -392,7 +392,7 @@ def _apply_ops(wrapper, name, ops):
 
 
 class TestUpdateNoteTypeFields:
-    """Explicit, identity-based field operations (#76) preserve note data."""
+    """Explicit, identity-based field operations preserve note data."""
 
     async def test_rename_carries_data(self, wrapper):
         mid, nid = _type_with_note(wrapper, ["Front", "Back"], {"Front": "Q", "Back": "A"})
@@ -532,7 +532,7 @@ def _name_of(c, mid):
 
 
 class TestUpdateNoteTypeTemplates:
-    """Identity-based template operations (#76) preserve cards by template."""
+    """Identity-based template operations preserve cards by template."""
 
     async def test_rename_keeps_cards(self, wrapper):
         mid, nid = _type_with_cards(wrapper, ["Ta", "Tb"])

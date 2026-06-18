@@ -4,12 +4,12 @@ package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
-# The shared SSRF-safety crate (#592): the is_global classifier, the
+# The shared SSRF-safety crate: the is_global classifier, the
 # resolve-and-vet helper, the IP-pinned async reqwest client builders, and the
-# centralized per-hop re-vet loops (#721 S2). Depended on by BOTH shrike-media
+# centralized per-hop re-vet loops. Depended on by BOTH shrike-media
 # (the inbound-media fetch) and the remote engine crates — kernel-unaware and
 # engine-unaware, so it sits below both (//shrike-core:layering_check stays
-# green). The transport is async reqwest only (ureq removed in #721 S2);
+# green). The transport is async reqwest only;
 # futures-util's StreamExt size-caps the body while streaming.
 rust_library(
     name = "shrike_network",
@@ -30,7 +30,7 @@ rust_test(
     crate = ":shrike_network",
 )
 
-# Live-socket SSRF integration tests for the async client (#721 S1): the IP-pin
+# Live-socket SSRF integration tests for the async client: the IP-pin
 # (Host/SNI on the name while the socket goes to the vetted IP), redirects-OFF +
 # per-hop re-vet, size-cap-while-streaming. Needs a tokio runtime + a local
 # canned server, so it's a separate test crate (tests/async_client.rs).

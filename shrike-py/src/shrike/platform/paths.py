@@ -47,7 +47,7 @@ def cache_dir() -> Path:
     return Path(_dirs.user_cache_dir)
 
 
-# -- Anki base-dir discovery (#66) -------------------------------------------
+# -- Anki base-dir discovery -------------------------------------------
 # These are Shrike's *own* directories above; the functions below locate
 # *Anki's* base directory and read its profile registry, so `shrike profile
 # list --discover` can surface a machine's Anki profiles without the user

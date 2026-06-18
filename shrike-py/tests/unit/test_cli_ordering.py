@@ -1,8 +1,8 @@
-"""Canonical subcommand ordering + the command-surface rehome (#683 / #682 §A,§G).
+"""Canonical subcommand ordering + the command-surface rehome.
 
 `OrderedGroup.list_commands` drives both `--help` and shell completions, so these
-pin the §G order for the root group and every subgroup, that the rehomed paths
-resolve, and that the old top-level commands are a clean break (removed).
+pin the canonical order for the root group and every subgroup, that the rehomed
+paths resolve, and that the old top-level commands are a clean break (removed).
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ from click.testing import CliRunner
 
 from shrike.cli import cli
 
-# The canonical per-group order from epic #682 §G (post-rehome). `profile` uses
-# the #686 create/rename/delete/list/default verbs.
+# The canonical per-group order. `profile` uses the
+# create/rename/delete/list/default verbs.
 EXPECTED_ORDER = {
     (): ["collection", "search", "server", "note", "deck", "type", "profile", "completion"],
     ("note",): ["create", "update", "delete", "list", "show", "tag", "replace", "migrate-type"],
@@ -49,7 +49,7 @@ def test_canonical_order(group, expected):
     assert _help_commands(*group) == expected
 
 
-# The old top-level commands are a clean break — removed, must error (#683 §A).
+# The old top-level commands are a clean break — removed, must error.
 REMOVED_TOP_LEVEL = [
     ["note", "search"],
     ["info"],

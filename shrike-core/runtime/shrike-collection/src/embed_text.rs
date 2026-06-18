@@ -1,5 +1,5 @@
 //! Stable note-text normalization for embedding — the Rust port of
-//! `shrike/embed_text.py` (#278 series, step 2).
+//! `shrike/embed_text.py`.
 //!
 //! The contract is **byte-identity with the Python normalizer**: the output is
 //! part of the vector space (`EMBED_TEXT_VERSION` is folded into the index
@@ -44,7 +44,7 @@ static MATHJAX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\[()\[\]]|\$
 static BLOCK_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)<\s*/?\s*(?:br|div|p|li|ul|ol|tr|td|h[1-6]|blockquote)\b[^>]*>").unwrap()
 });
-// Whitespace collapse. NOTE (#612): Rust's `\s` is Unicode `White_Space`,
+// Whitespace collapse. NOTE: Rust's `\s` is Unicode `White_Space`,
 // which EXCLUDES the C0 separators U+001C–U+001F; Python `re`'s `\s` INCLUDES
 // them. So the byte-identity contract with the Python oracle holds over
 // **anki-sanitized field text** (the only thing on this path): anki's
@@ -61,9 +61,7 @@ static WS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
 /// Replace cloze deletions with their answer text (wrapper + hint dropped).
 /// Iterates to flatten shallow nesting; bounded like the Python original.
-/// Borrowed pass-through for the overwhelmingly common cloze-free field
-/// (#445: the old unconditional `to_string` copied every field of every
-/// note on the rebuild path).
+/// Borrowed pass-through for the overwhelmingly common cloze-free field.
 fn fill_clozes(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.contains("{{c") {
         return std::borrow::Cow::Borrowed(text);
@@ -109,7 +107,7 @@ pub fn normalize_for_embedding(
     let text = BLOCK_TAG_RE.replace_all(&text, " ");
     // Skip the strip service call when it provably can't change anything:
     // with no tag ('<') and no entity ('&') the pinned anki stripper is
-    // byte-identity (#445 — verified against the real backend; on the
+    // byte-identity (verified against the real backend; on the
     // rebuild path this drops a per-field RPC for every plain-text field).
     let text: std::borrow::Cow<'_, str> = if text.contains('<') || text.contains('&') {
         std::borrow::Cow::Owned(strip_html(&text)?)
@@ -149,7 +147,7 @@ pub fn render_embed_text(
     Ok(parts.join("\n"))
 }
 
-// Media references that make a field non-empty even with no text (the #89
+// Media references that make a field non-empty even with no text (the
 // empty-note rule) — mirrors Python's _MEDIA_RE.
 static MEDIA_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)<\s*(?:img|audio|video|object|embed|source)\b|\[sound:").unwrap()
@@ -182,9 +180,9 @@ pub fn field_is_blank(
 /// property: attributes are tokenized, so a `data-src=` or a `src=` inside
 /// another attribute's quoted value can't be mistaken for the tag's own src.
 pub fn extract_image_refs(value: &str) -> Vec<String> {
-    // Same ASCII-case-insensitive byte probe `img_src_values` uses — the
-    // old `to_lowercase()` allocated a full copy of every field value of
-    // every note just to answer "any <img here?" (#445).
+    // Same ASCII-case-insensitive byte probe `img_src_values` uses — avoids
+    // allocating a full lowercased copy of every field value just to answer
+    // "any <img here?".
     let has_img = value
         .as_bytes()
         .windows(4)
@@ -210,7 +208,7 @@ pub fn extract_image_refs(value: &str) -> Vec<String> {
 
 /// Audio filenames referenced by a field's `[sound:…]` markers — in order,
 /// de-duplicated; basenames only; remote (`scheme://`) refs skipped. The audio
-/// counterpart of [`extract_image_refs`] (#485): `[sound:foo.mp3]` is Anki's
+/// counterpart of [`extract_image_refs`]: `[sound:foo.mp3]` is Anki's
 /// own audio/video reference syntax (the same marker `normalize_for_embedding`
 /// strips from embedding text), so the inner token IS the media filename. A
 /// cheap ASCII byte probe gates the regex pass, mirroring the `<img` probe.
@@ -413,7 +411,7 @@ mod tests {
 
     #[test]
     fn strip_skipped_only_without_tags_and_entities() {
-        // #445: the strip service call is skipped when it provably can't
+        // The strip service call is skipped when it provably can't
         // change anything (no '<', no '&' — the pinned anki stripper is
         // byte-identity there; the tests/native parity suite pins the
         // real-backend equivalence). The bomb proves the skip; the second

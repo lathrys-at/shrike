@@ -1,14 +1,11 @@
-"""The fused native pipeline end to end (#274).
+"""The fused native pipeline end to end.
 
 ONE fully-native server (native onnx backend + native index) exercising
-upsert→index→search over the wire. The standalone ``fused_*`` parity layer
-retired with the crate that carried it (#443): the fused embed→index
-composition lives inside the kernel now, exercised end to end by
-``TestFullyNativeServer`` below, and the raw per-side handle surfaces are
-pinned in ``tests/native/test_index_engine_binding.py``. The server boots
-via the retired ``onnx-rs`` alias, which IS the alias-normalization test
-(absorbed from test_onnx_native.py, #441 — the two files booted near-identical
-servers for the same seam).
+upsert→index→search over the wire. The fused embed→index composition lives
+inside the kernel, exercised end to end by ``TestFullyNativeServer`` below, and
+the raw per-side handle surfaces are pinned in
+``tests/native/test_index_engine_binding.py``. The server boots via the
+``onnx-rs`` alias, which IS the alias-normalization test.
 """
 
 from __future__ import annotations
@@ -33,10 +30,10 @@ pytestmark = [pytest.mark.integration, pytest.mark.embedding]
 class TestFullyNativeServer:
     @pytest.fixture(scope="class")
     def srv(self, server_factory, onnx_model) -> ServerInfo:
-        # Index/derived/compute/backends are all native unconditionally since
-        # the #278 cutover — every server is native end to end. Booted via the
-        # retired `onnx-rs` kind (the accepted alias of `onnx`): the boot
-        # succeeding + status normalizing it is the alias contract.
+        # Index/derived/compute/backends are all native unconditionally — every
+        # server is native end to end. Booted via the `onnx-rs` kind (the accepted
+        # alias of `onnx`): the boot succeeding + status normalizing it is the
+        # alias contract.
         server = server_factory(
             "fully-native",
             embedding_model=str(onnx_model),
@@ -51,8 +48,8 @@ class TestFullyNativeServer:
         pytest.fail("fully-native embedding service did not become available")
 
     def test_status_normalizes_alias_and_reports_providers(self, srv: ServerInfo) -> None:
-        # From test_onnx_native.py (#441): the onnx-rs alias normalizes to the
-        # canonical kind in /status, and the loaded ort providers surface.
+        # The onnx-rs alias normalizes to the canonical kind in /status, and the
+        # loaded ort providers surface.
         base = srv.url.rsplit("/", 1)[0]
         emb = httpx.get(f"{base}/status", timeout=5.0).json()["embedding"]
         assert emb["backend"] == "onnx"
@@ -92,7 +89,7 @@ class TestFullyNativeServer:
             pytest.fail("index did not become ready")
 
         # The native engine's fingerprint namespace shows up as the index
-        # model_id (from test_onnx_native.py, #441).
+        # model_id.
         assert idx["model_id"].startswith("onnx-rs:")
 
         res = mcp(
@@ -102,7 +99,7 @@ class TestFullyNativeServer:
         matches = res["results"][0]["matches"]
         assert matches
         assert "integral" in matches[0]["content"]["Front"]
-        # Provenance (#182) flows through the native fusion identically.
+        # Provenance flows through the native fusion identically.
         assert any(p["signal"] == "text" for p in matches[0]["provenance"])
 
     def test_exact_tier_survives_native_fusion(self, srv: ServerInfo) -> None:

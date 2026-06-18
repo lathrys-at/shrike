@@ -1,6 +1,6 @@
-//! Recognition gating (#199/#228) — the KERNEL's policy half of the
+//! Recognition gating — the KERNEL's policy half of the
 //! recognition capability. The engine contract ([`Recognizer`],
-//! [`Recognition`], [`Segment`]) lives in `shrike-engine-api` (#342); what
+//! [`Recognition`], [`Segment`]) lives in `shrike-engine-api`; what
 //! stays here is what the kernel decides for itself: which recognitions are
 //! substantive enough to store, and which mint a vector.
 //!
@@ -19,7 +19,7 @@ pub enum MediaKind {
     Audio,
 }
 
-/// Where a purpose's recognized text lands (#485). The OCR-vs-describe
+/// Where a purpose's recognized text lands. The OCR-vs-describe
 /// difference collapses to a single **lexical-visibility** axis: every
 /// recognition is STORED in the derived store (so reconcile == rebuild keeps
 /// holding and provenance survives), but a [`Destination::VectorOnly`] source
@@ -36,7 +36,7 @@ pub enum Destination {
     VectorOnly,
 }
 
-/// A recognition purpose (#485): the routing key for the multi-engine sweep.
+/// A recognition purpose: the routing key for the multi-engine sweep.
 /// Each purpose enumerates its own pending set, reads its own media kind,
 /// lands under its own derived `source`, keys its fingerprint meta
 /// independently, and persists per its own [`Destination`] — so OCR, ASR, and
@@ -44,13 +44,13 @@ pub enum Destination {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RecognitionPurpose {
     /// Image → searchable text (Apple Vision / remote VLM-OCR). Source
-    /// `"ocr"`, lexical + vector — behaviour bit-identical to the pre-#485
+    /// `"ocr"`, lexical + vector — behaviour bit-identical to the older
     /// single-slot sweep.
     Ocr,
-    /// Image → descriptive prose for retrieval (#433/#436). Source `"vlm"`,
+    /// Image → descriptive prose for retrieval. Source `"vlm"`,
     /// VECTOR-ONLY (the settled destination rule).
     Describe,
-    /// Audio → transcript (#410/#428). Source `"asr"`, lexical + vector
+    /// Audio → transcript. Source `"asr"`, lexical + vector
     /// (like OCR).
     Asr,
 }
@@ -109,7 +109,7 @@ impl RecognitionPurpose {
     }
 }
 
-/// The gating policy (#199): which recognitions mint an OCR vector, and
+/// The gating policy: which recognitions mint an OCR vector, and
 /// which enter the lexical store at all. Confidence + substance separate
 /// text-bearing images from pictorial ones automatically — no detector.
 #[derive(Debug, Clone)]
@@ -165,14 +165,14 @@ impl RecognitionGate {
     /// Whether recognized text is substantive enough to mint a vector — the
     /// rule `judge` applies, owned here so the re-judge from *stored* text
     /// (confidence already gated at ingest) asks the gate instead of
-    /// re-deriving the char-count threshold (#382).
+    /// re-deriving the char-count threshold.
     pub fn vector_worthy(&self, text: &str) -> bool {
         text.trim().chars().count() >= self.min_chars_vector
     }
 }
 
 /// What one `recognize_pending` sweep did — the typed contract for the host's
-/// background driver (#391). Counts ride only the variant where a batch was
+/// background driver. Counts ride only the variant where a batch was
 /// actually sent; `Ran { recognized: 0, .. }` is the no-progress signal (an
 /// unreadable window) the harness stops on.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn purpose_routing_is_per_engine_and_ocr_keys_are_unchanged() {
         use RecognitionPurpose::*;
-        // OCR's source + fingerprint key are byte-identical to the pre-#485
+        // OCR's source + fingerprint key are byte-identical to the older
         // single-slot constants, so existing rows and stored meta still match
         // (no spurious re-derive on upgrade).
         assert_eq!(Ocr.source(), super::super::OCR_SOURCE);
@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(Asr.destination(), Destination::LexicalAndVector);
         // The load-bearing rule: describe is vector-only.
         assert_eq!(Describe.destination(), Destination::VectorOnly);
-        // Concurrency classification (#485): describe + ASR are long-running
+        // Concurrency classification: describe + ASR are long-running
         // (model-resident, slow per call) and bounded; OCR is fast and never
         // throttled — its dispatch stays byte-identical.
         assert!(Describe.is_long_running());

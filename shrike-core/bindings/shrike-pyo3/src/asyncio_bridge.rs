@@ -1,10 +1,10 @@
-//! Runtime-less Rust-future → asyncio bridge (#332, S3a).
+//! Runtime-less Rust-future → asyncio bridge.
 //!
-//! The kernel's ops are runtime-agnostic futures (#310); the Python harness's
+//! The kernel's ops are runtime-agnostic futures; the Python harness's
 //! executor of choice is its **asyncio loop** — so this bridge makes the loop
 //! itself drive them, honoring the no-owned-runtimes constraint end to end
-//! (pyo3-async-runtimes was rejected for S3 because it polls Rust futures on
-//! a tokio runtime owned by the binding; verdict recorded on #332):
+//! (pyo3-async-runtimes was rejected because it polls Rust futures on
+//! a tokio runtime owned by the binding):
 //!
 //! - `future_into_py` wraps a kernel future in an `asyncio.Future` and
 //!   schedules a poll callback on the running loop.
@@ -38,7 +38,7 @@ use crate::to_py_err;
 type Conversion = Box<dyn FnOnce(Python<'_>) -> PyResult<Py<PyAny>> + Send>;
 type ErasedFuture = Pin<Box<dyn Future<Output = Conversion> + Send>>;
 
-/// Live [`PollCallback`] count — the bridge's leak tripwire (#387). Counted
+/// Live [`PollCallback`] count — the bridge's leak tripwire. Counted
 /// Rust-side (construction vs `Drop`) so the tests can assert release without
 /// trusting Python's GC to even *see* the objects.
 static LIVE_POLL_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
@@ -51,7 +51,7 @@ pub(crate) fn live_poll_callbacks() -> usize {
 /// from any thread (`call_soon_threadsafe` is asyncio's cross-thread door).
 struct LoopWake {
     event_loop: Py<PyAny>,
-    /// WEAK by design (#387): a pending future stores its waker, so a strong
+    /// WEAK by design: a pending future stores its waker, so a strong
     /// reference here would close a cycle through Rust (future → waker →
     /// callback → future slot) that Python's GC cannot traverse — a loop
     /// abandoned mid-op would leak the op's whole bridge state for the life
@@ -63,7 +63,7 @@ struct LoopWake {
 
 impl Wake for LoopWake {
     fn wake(self: Arc<Self>) {
-        // Interpreter exiting ⇒ drop the wake (#435): nobody can await the
+        // Interpreter exiting ⇒ drop the wake: nobody can await the
         // result once the loops are gone, and attaching from this foreign
         // thread concurrent with Py_Finalize aborts the process. The permit
         // also covers the window where `call_soon_threadsafe` releases the
@@ -86,7 +86,7 @@ impl Wake for LoopWake {
 }
 
 /// The loop callback that advances the bridged future by one poll. Also
-/// registered as the asyncio future's done callback (#387): that registration
+/// registered as the asyncio future's done callback: that registration
 /// is the strong reference keeping the bridge state alive while the op is
 /// observable (the waker's is weak), and it makes cancellation cleanup prompt
 /// — the cancelled branch below runs on the cancellation itself instead of
@@ -251,7 +251,7 @@ fn schedule_first_poll(
     )?;
     // The done-callback registration is the strong reference that keeps the
     // bridge state alive while the op is observable — the waker holds the
-    // callback weakly (#387), so without it the callback would die after the
+    // callback weakly, so without it the callback would die after the
     // first Pending poll. It also fires on cancellation, dropping the Rust
     // future promptly via the cancelled branch of `__call__`.
     py_future.call_method1("add_done_callback", (poll_cb.clone_ref(py),))?;
@@ -259,7 +259,7 @@ fn schedule_first_poll(
     Ok(())
 }
 
-/// Test seam (#387): a bridged future that never resolves but *retains its
+/// Test seam: a bridged future that never resolves but *retains its
 /// waker* — the exact in-flight-op shape (a oneshot receiver parks its waker
 /// the same way) whose stored waker once formed the leaking cycle.
 struct ParkedForever(Option<Waker>);
@@ -273,13 +273,13 @@ impl Future for ParkedForever {
     }
 }
 
-/// Test seam (#387): the live [`PollCallback`] count.
+/// Test seam: the live [`PollCallback`] count.
 #[pyfunction]
 pub(crate) fn bridge_live_poll_callbacks() -> usize {
     live_poll_callbacks()
 }
 
-/// Test seam (#387): bridge a waker-retaining, never-resolving future.
+/// Test seam: bridge a waker-retaining, never-resolving future.
 #[pyfunction]
 pub(crate) fn bridge_parked_forever(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     future_into_py(py, ParkedForever(None))

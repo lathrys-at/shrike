@@ -1,11 +1,9 @@
-"""Recognition backends (#228/#221): config→construct for the kernel's
-``Recognizer`` slot.
+"""Recognition backends: config→construct for the kernel's ``Recognizer`` slot.
 
-Since the engine-plugin migration (#342 P3) the Apple Vision engine is native
-(`shrike-recognize-apple`; since #398 its platform glue is Swift behind Rust,
-driving Apple's Swift-only ``RecognizeTextRequest`` API — nothing extra to
-install at runtime; Vision and the Swift runtime ship with macOS).
-``make_recognizer`` constructs the native backend object;
+The Apple Vision engine is native (`shrike-recognize-apple`; its platform glue
+is Swift behind Rust, driving Apple's Swift-only ``RecognizeTextRequest`` API —
+nothing extra to install at runtime; Vision and the Swift runtime ship with
+macOS). ``make_recognizer`` constructs the native backend object;
 ``Harness.attach_recognizer`` hands it to the kernel, where recognition runs
 native end-to-end, Python never on the sweep path.
 
@@ -38,9 +36,9 @@ class RecognizerBackend(Protocol):
 def make_recognizer(kind: str) -> RecognizerBackend:
     """Construct a recognition backend by kind (the `_make_backend` pattern).
     Unavailability — the engine not compiled into this build (platform
-    engines are mobile-only since the #496 boundary), or the native engine
-    off macOS on a build that has it — surfaces as ImportError so the boot
-    path degrades exactly as a missing optional dependency did."""
+    engines are mobile-only), or the native engine off macOS on a build that
+    has it — surfaces as ImportError so the boot path degrades exactly as a
+    missing optional dependency did."""
     if kind == "apple":
         import shrike_native
 
@@ -68,9 +66,9 @@ def make_describe_recognizer(
     api_key_env: str | None = None,
     mmproj: str | None = None,
 ) -> tuple[Any, str, bool]:
-    """Construct the remote VLM describe engine (#433/#485) for the kernel's
-    ``describe`` recognition purpose — image→descriptive prose into the text
-    embedding space (vector-only).
+    """Construct the remote VLM describe engine for the kernel's ``describe``
+    recognition purpose — image→descriptive prose into the text embedding
+    space (vector-only).
 
     Probes connectivity (``/health`` or, failing that, ``/v1/models``) and
     composes the describe fingerprint host-side from the endpoint's model
@@ -85,8 +83,8 @@ def make_describe_recognizer(
     ``reachable`` is False when the endpoint answered NEITHER ``/health`` nor
     ``/v1/models`` (a closed port / DNS failure). In that case the fingerprint
     composes to a DEGENERATE ``describe:<model|unknown>:prompt=N`` (no model
-    meta), so the caller should report the engine degraded rather than ``ready``
-    (#485). The engine still attaches — the sweep's chunk-Err-aborts contract
+    meta), so the caller should report the engine degraded rather than ``ready``.
+    The engine still attaches — the sweep's chunk-Err-aborts contract
     leaves the backlog pending and a later sweep retries once the endpoint is
     up. NB: rows minted under the degenerate fingerprint re-derive ONCE on the
     next restart, when ``model_info`` resolves and the fingerprint sharpens to

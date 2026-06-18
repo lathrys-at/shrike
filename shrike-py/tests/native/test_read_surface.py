@@ -1,4 +1,4 @@
-"""Read-surface parity (#278 series, step 2).
+"""Read-surface parity.
 
 Two layers:
 
@@ -208,8 +208,8 @@ def test_list_notes_filters_and_errors(native_core):
 
     by_type = json.loads(native_core.list_notes(note_type="Basic", with_fields=False))
     assert by_type["total"] == 2
-    # Meta mode: no content (an explicit null on the wire since the #391
-    # to_wire retirement — .get() is the convention-stable form).
+    # Meta mode: no content (an explicit null on the wire — .get() is the
+    # convention-stable form).
     assert by_type["notes"][0].get("content") is None
 
     recent = json.loads(native_core.list_notes(modified_since=0))
@@ -222,7 +222,7 @@ def test_list_notes_filters_and_errors(native_core):
 
 
 def test_read_wire_is_the_pydantic_shape(native_core):
-    """#391 phase 2 (the to_wire retirement): the read surface serializes with
+    """The read surface serializes with
     plain serde at the binding edge — ONE wire convention, the Pydantic one
     (an unset ``Option`` is an explicit ``null``, never a dropped key; the
     schema contract test pins the two sides agree). Deliberately shape-level,

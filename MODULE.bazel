@@ -1,20 +1,20 @@
 """Shrike build module (bzlmod).
 
-Bazel is the polyglot build/test/package entry point (epic #241). This module
-wires the hermetic Python toolchain and the PyPI dependency set; later phases add
-rules_rust + a PyO3 extension (#247) behind the same graph. The legacy WORKSPACE
-file is intentionally absent — bzlmod only.
+Bazel is the polyglot build/test/package entry point. This module wires the
+hermetic Python toolchain and the PyPI dependency set; rules_rust + a PyO3
+extension ride the same graph. The legacy WORKSPACE file is intentionally absent
+— bzlmod only.
 """
 
 module(
     name = "shrike",
     # Build-system module version only. The *wheel* version is stamped from the
-    # git tag at package time (Phase 3, #245), not taken from here.
+    # git tag at package time, not taken from here.
     version = "0.0.0",
 )
 
 bazel_dep(name = "rules_python", version = "2.0.2")
-bazel_dep(name = "rules_cc", version = "0.2.19")  # Bazel 9 removed the native cc_* rules (#420)
+bazel_dep(name = "rules_cc", version = "0.2.19")  # Bazel 9 removed the native cc_* rules
 
 # Hermetic CPython, matching .python-version's minor (3.12). The patch level is
 # whatever python-build-standalone build rules_python bundles for this version;
@@ -24,7 +24,7 @@ python.toolchain(
     python_version = "3.12",
     is_default = True,
     # Register the bundled coverage tool so `bazel coverage` actually collects data
-    # (without it, coverage.dat comes out empty). Backs the coverage lane (#262).
+    # (without it, coverage.dat comes out empty). Backs the coverage lane.
     configure_coverage_tool = True,
 )
 
@@ -48,7 +48,7 @@ pip.parse(
 )
 use_repo(pip, "shrike_sdist_pip")
 
-# ── Rust toolchain + crates: the native compute workspace (#247 → #269) ─────
+# ── Rust toolchain + crates: the native compute workspace ───────────────────
 # rules_rust builds the Shrike native crates (shrike-core/Cargo.toml workspace)
 # against the hermetic CPython. The PyO3 binding crate (shrike-pyo3) and the
 # polyglot-proof demo are the only crates that see pyo3 (//shrike-core:layering_check
@@ -58,7 +58,7 @@ use_repo(pip, "shrike_sdist_pip")
 bazel_dep(name = "rules_rust", version = "0.70.0")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "bazel_skylib", version = "1.8.2")  # copy_file (the .so rename)
-bazel_dep(name = "rules_pkg", version = "1.0.1")  # the create-cards.skill bundle (#245)
+bazel_dep(name = "rules_pkg", version = "1.0.1")  # the create-cards.skill bundle
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(edition = "2021")
@@ -90,7 +90,7 @@ crate.from_cargo(
 # a widened pyo3 bound) — the crates.io release caps pyo3 at `<0.29`, blocking
 # the RUSTSEC-2026-0176/-0177 bump. crate_universe vendors the git rev, pinned
 # by its immutable commit SHA in MODULE.bazel.lock. Drop the patch once upstream
-# ships a 0.29-compatible pyo3-log (Cleanup milestone, #519).
+# ships a 0.29-compatible pyo3-log.
 # usearch's cxx_build leaves OUT_DIR symlinks into the ephemeral build sandbox,
 # which Bazel's output-tree validation rejects as dangling; the patch
 # materializes/drops them (no behaviour change under plain cargo).
@@ -100,7 +100,7 @@ crate.annotation(
     patches = ["//shrike-core/patches:usearch-bazel-cxxbridge-symlink.patch"],
 )
 # cxx's C++ object (cxx_cc) needs GCC's STATIC libgcc.a on aarch64-linux (the
-# outline-atomics helpers, #417); the shim dep appends a linux-only -lgcc to
+# outline-atomics helpers); the shim dep appends a linux-only -lgcc to
 # the link AFTER -lcxx_cc — gold resolves archives left to right, so position
 # is the whole fix (a global --linkopt lands too early and resolves nothing).
 crate.annotation(
@@ -113,7 +113,7 @@ crate.annotation(
         "@@//shrike-core/patches:libgcc_shim",
     ],
 )
-# The anki tree under Bazel (#278 cutover): both anki build scripts run off
+# The anki tree under Bazel: both anki build scripts run off
 # the CHECKED-IN pinned protobuf descriptor set (//shrike-core/third_party/anki,
 # refreshed by scripts/update-anki-descriptors.sh on tag bumps, tripwire-tested
 # under Bazel) instead of cargo's shared-target-dir handoff, which doesn't
@@ -163,7 +163,7 @@ use_repo(crate, "crates")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-# The pinned anki SOURCE archive (#278 cutover): the anki_i18n build script
+# The pinned anki SOURCE archive: the anki_i18n build script
 # needs the repo's ftl/ template strings, which the per-crate Bazel package
 # doesn't carry. The github tag tarball is pinned + checksummed (no submodules
 # — the translation repos are tolerated as absent; English-only strings, which
@@ -179,9 +179,9 @@ exports_files(["ftl"])
     urls = ["https://github.com/ankitects/anki/archive/refs/tags/25.09.4.tar.gz"],
 )
 
-# ── Embedding-test model fixtures as pinned externals (#244 Phase 2c) ────────
+# ── Embedding-test model fixtures as pinned externals ───────────────────────
 # The embedding tests' models, fetched once + checksum-verified instead of
-# downloaded from HuggingFace at test time (removing the #83/#93 flake). Lazily
+# downloaded from HuggingFace at test time (which flaked). Lazily
 # fetched — only an embedding test that data-deps one pulls it. The sha256s are
 # the HuggingFace LFS oids. The integration conftest assembles these into a
 # SHRIKE_TEST_MODEL_DIR tree under Bazel; model_cache then finds them present.
@@ -258,7 +258,7 @@ http_file(
     urls = ["https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/main/all-MiniLM-L6-v2-Q4_K_M.gguf"],
 )
 
-# ── Wave-2 offline-integration profile models (#667, epic #565) ──────────────
+# ── Offline-integration profile models ──────────────────────────────────────
 # Back the pure-ONNX multi-space profile (embeddinggemma text + MobileCLIP2 image)
 # and the stacked jina-text-clip profile. Assembled into per-model dirs by
 # scripts/serve.bzl's `assemble_model_dirs` (from these externals) and read from
@@ -296,12 +296,12 @@ http_file(
     urls = ["https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX/resolve/main/tokenizer.json"],
 )
 
-# MobileCLIP2-S2 ONNX (text+image, 512-dim) — the onnx-multispace image leg. Spike
-# #568 verified plhery/mobileclip2-onnx @ ba95759a loads through ClipBackend as-is
+# MobileCLIP2-S2 ONNX (text+image, 512-dim) — the onnx-multispace image leg.
+# plhery/mobileclip2-onnx @ ba95759a loads through ClipBackend as-is
 # (flat text_model.onnx + vision_model.onnx + per-size preprocessor_config.json + a
 # repo-root tokenizer.json) for both S0 and S2. S2 is the better dogfooding default:
 # same text encoder, a larger/better vision graph (143 MB vs S0's 45 MB) for cleaner
-# cross-modal separation. Pinned to the spike's exact revision. tokenizer.json +
+# cross-modal separation. Pinned to an exact revision. tokenizer.json +
 # preprocessor_config.json are git-stored (non-LFS) → byte sha256 (shared across
 # sizes — byte-identical to S0).
 http_file(

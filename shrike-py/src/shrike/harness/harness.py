@@ -1,12 +1,11 @@
-"""The kernel-mode server core (#332 S3d-2): AsyncKernel + harness services.
+"""The kernel-mode server core: AsyncKernel + harness services.
 
-This replaces ``ShrikeKernel`` for the HTTP host: the kernel (Rust) owns the
-collection, the index orchestration, and the derived ingest; this module is
-the *assembly* — the harness thread running the kernel's executor, the
-embedding runtime attached as a registered service (#342), the derived-store
-build driver, and the operational verbs behind the custom routes. Every verb
-is a coroutine on the host loop (the kernel's ops are loop-driven awaitables;
-only genuinely blocking work — a model load — hops to a thread).
+The kernel (Rust) owns the collection, the index orchestration, and the derived
+ingest; this module is the *assembly* — the harness thread running the kernel's
+executor, the embedding runtime attached as a registered service, the
+derived-store build driver, and the operational verbs behind the custom routes.
+Every verb is a coroutine on the host loop (the kernel's ops are loop-driven
+awaitables; only genuinely blocking work — a model load — hops to a thread).
 """
 
 from __future__ import annotations
@@ -31,14 +30,14 @@ from shrike.harness.derived import DerivedTextStore, NativeDerivedEngine
 from shrike.harness.engines.embedding.base import EmbedderBackend
 from shrike.harness.engines.embedding.runtime import EmbeddingRuntime
 from shrike.harness.index import (
-    ACTIVATION_MARGIN,  # #580/#730: the cross-space floor margin default
+    ACTIVATION_MARGIN,  # the cross-space floor margin default
 )
 from shrike.harness.profiles import MODALITIES
 from shrike.harness.registry import Registry
 
 logger = logging.getLogger("shrike.kernel")
 
-# Query-embedding LRU size (#181): repeated/backspace-retyped queries (and the
+# Query-embedding LRU size: repeated/backspace-retyped queries (and the
 # Enter-after-pause commit) reuse the vector instead of re-embedding. Keyed by
 # backend identity, so a model swap never serves a stale-space vector.
 EMBED_CACHE_SIZE = 128
@@ -48,21 +47,21 @@ class KernelConfigError(Exception):
     """A caller-actionable configuration error (the HTTP host maps it to a 400)."""
 
 
-# The kernel source string each recognition purpose lands under (#485) — the
-# routing key the harness passes to `attach_recognizer_with`, also the `/status`
-# map key. OCR's is unchanged (`"ocr"`).
+# The kernel source string each recognition purpose lands under — the routing
+# key the harness passes to `attach_recognizer_with`, also the `/status` map
+# key.
 RECOGNITION_OCR = "ocr"
 RECOGNITION_DESCRIBE = "vlm"
-# ASR isn't wired into the kernel yet (#485 gates it), but the coverage matrix
-# names the source it WILL land under so an attached ASR engine lights up
-# text→audio honestly once it's integrated. (Today nothing populates this key,
-# so audio stays `unavailable` — the honest state.)
+# ASR isn't wired into the kernel yet, but the coverage matrix names the source
+# it WILL land under so an attached ASR engine lights up text→audio honestly
+# once it's integrated. (Today nothing populates this key, so audio stays
+# `unavailable` — the honest state.)
 RECOGNITION_ASR = "asr"
 
 # Which recognition source derives TEXT from which TARGET modality into the text
-# vector space (#235). An attached, ready engine on one of these sources is what
-# makes its target reachable `via_derived_text` from a text query: OCR text and
-# VLM prose both land in the text space for images; an ASR transcript for audio.
+# vector space. An attached, ready engine on one of these sources is what makes
+# its target reachable `via_derived_text` from a text query: OCR text and VLM
+# prose both land in the text space for images; an ASR transcript for audio.
 _DERIVED_TEXT_SOURCES: dict[str, frozenset[str]] = {
     "image": frozenset({RECOGNITION_OCR, RECOGNITION_DESCRIBE}),
     "audio": frozenset({RECOGNITION_ASR}),
@@ -74,19 +73,18 @@ def _coverage_matrix(
     ready_recognizers: frozenset[str],
     spaces: Sequence[frozenset[str]] | None = None,
 ) -> dict[str, dict[str, str]]:
-    """Build the cross-modal coverage matrix (#235): query-modality →
+    """Build the cross-modal coverage matrix: query-modality →
     target-modality → ``native`` | ``via_derived_text`` | ``unavailable``.
 
     ``served`` is the UNION of modalities the live embedding spaces embed — it
     governs reachability (whether a query modality is embeddable at all, and
     whether a text space exists to derive into). ``spaces`` is the PER-SPACE
-    breakdown (#229/#235): one ``frozenset`` per live embedding space, used for
-    the ``native`` cell, because *native* means **one single space embeds BOTH**
+    breakdown: one ``frozenset`` per live embedding space, used for the
+    ``native`` cell, because *native* means **one single space embeds BOTH**
     modalities — two DISJOINT single-modality spaces (a dedicated text space + a
     separate image-only space) must NOT read text↔image native off the union.
     ``spaces=None`` treats ``served`` as one implicit space (the N≤1 / single-
-    backend case), so the cell reduces to ``q in served and t in served`` — the
-    pre-#235 behaviour, byte-identical.
+    backend case), so the cell reduces to ``q in served and t in served``.
 
     ``ready_recognizers`` is the set of recognition sources currently attached
     AND ready (``ocr``/``vlm``/``asr`` — an errored or unattached engine doesn't
@@ -109,7 +107,7 @@ def _coverage_matrix(
     text→text is ``native``, every media target ``unavailable``.
     """
     # The per-space sets for the `native` cell. None → the union is one implicit
-    # space (N≤1 / single-backend → byte-identical to the pre-#235 union check).
+    # space (N≤1 / single-backend → the union check).
     per_space: tuple[frozenset[str], ...] = tuple(spaces) if spaces is not None else (served,)
 
     def native(q: str, t: str) -> bool:
@@ -137,8 +135,8 @@ def _coverage_matrix(
 
 @dataclass
 class _RecognitionEngine:
-    """One attached recognition engine's harness-side state (#485): the backend
-    kind (`apple`/`describe-remote`), the lifecycle state (the
+    """One attached recognition engine's harness-side state: the backend kind
+    (`apple`/`describe-remote`), the lifecycle state (the
     `RecognitionEngineStatus` enum — `ready`/`error` today, the schema also
     carries `unavailable`/`building` for future use), and its fingerprint when
     known. Per-purpose so `/status` reports one row per engine."""
@@ -149,11 +147,11 @@ class _RecognitionEngine:
 
 
 class DedupStatsRecorder:
-    """Rolling dedup best-match statistics (#207): one sample per upsert
-    draft note — the best SEMANTIC neighbor cosine, or a no-match tick.
-    The calibration feedstock for the dedup threshold; loop-confined (the
-    actions record on the event loop), so no lock. Process-lifetime only —
-    a restart starts fresh (durable accumulation is a later refinement)."""
+    """Rolling dedup best-match statistics: one sample per upsert draft note —
+    the best SEMANTIC neighbor cosine, or a no-match tick. The calibration
+    feedstock for the dedup threshold; loop-confined (the actions record on the
+    event loop), so no lock. Process-lifetime only — a restart starts fresh
+    (durable accumulation is a later refinement)."""
 
     BUCKETS = 20
 
@@ -239,9 +237,9 @@ class KernelIndexView:
         if backend is None or not texts:
             return None
         # LRU per (backend identity, query). Accessed from to_thread workers
-        # since #445 (no longer loop-confined): safe under the GIL — each dict
-        # op is atomic, and a race costs at worst a redundant embed or an
-        # off-by-one eviction, never corruption.
+        # (not loop-confined): safe under the GIL — each dict op is atomic, and
+        # a race costs at worst a redundant embed or an off-by-one eviction,
+        # never corruption.
         base = id(backend)
         out: list[list[float] | None] = [None] * len(texts)
         missing: list[str] = []
@@ -265,8 +263,8 @@ class KernelIndexView:
 
     def search(self, texts: list[str], top_k: int = 10) -> list[list[dict[str, Any]]]:
         """Nearest **text** neighbors per query (the upsert-neighbors path):
-        one list per text of ``{note_id, distance}`` dicts — the old facade's
-        ``search`` shape, over the kernel's engine."""
+        one list per text of ``{note_id, distance}`` dicts, over the kernel's
+        engine."""
         vectors = self.embed_queries(texts)
         if vectors is None:
             return [[] for _ in texts]
@@ -304,7 +302,7 @@ class Harness:
         self.kernel = kernel
         self.wrapper = wrapper
         self.runtime = runtime
-        # The shared llama.cpp ROUTER manager (#567): when N remote/no-endpoint
+        # The shared llama.cpp ROUTER manager: when N remote/no-endpoint
         # embedder spaces share ONE managed server (managed.llama_server.
         # models_dir), this is the single `LlamaServerManager.router(...)` they
         # all talk to over loopback — spawned once, owned here, stopped only by
@@ -313,41 +311,37 @@ class Harness:
         # started at the top of start_embedding, BEFORE any router-managed
         # remote backend (whose connectivity-proof embed needs it listening).
         self._shared_llama_manager = shared_llama_manager
-        # The cross-space image floor margin (#580): the precision/recall dial
-        # folded into the secondary floor's `mean + margin·std` at calibration.
-        # Default 1.0 (ACTIVATION_MARGIN) = today's behaviour; resolved harness-
-        # side from `search.cross_space_fusion.margin` / the env twin.
+        # The cross-space image floor margin: the precision/recall dial folded
+        # into the secondary floor's `mean + margin·std` at calibration. Default
+        # 1.0 (ACTIVATION_MARGIN); resolved harness-side from
+        # `search.cross_space_fusion.margin` / the env twin.
         self.cross_space_floor_margin = cross_space_floor_margin
-        # Additional embedding spaces (#233): the SECONDARY runtimes, attached
-        # to their own kernel embed-space keys alongside the primary. Empty in
-        # the N=1 case (the default), so single-space behaviour — and every
-        # on-disk artifact + the index/search path, which consume only the
-        # PRIMARY space this PR — is byte-identical. The fan-out (an N-per-space
-        # index + cross-space fusion) is PR-B/C; here the secondaries are
-        # attached + reconciled but the index path still reads the primary.
+        # Additional embedding spaces: the SECONDARY runtimes, attached to their
+        # own kernel embed-space keys alongside the primary. Empty in the N=1
+        # case (the default), so single-space behaviour.
         self.secondary_runtimes: list[EmbeddingRuntime] = list(secondary_runtimes or [])
         self.derived = derived
         self._media_read = media_read
         self._media_exists = media_exists
-        # Whether this harness OWNS the embedding runtime's lifecycle (#68).
-        # In multi-collection mode one runtime (the llama-server subprocess /
-        # onnx session) is SHARED across the per-collection harnesses — only
-        # the owner stops it on close(), so a routed collection's teardown
-        # never kills the shared embedder out from under the others. Single-
-        # collection mode (the default) owns its runtime, unchanged.
+        # Whether this harness OWNS the embedding runtime's lifecycle. In
+        # multi-collection mode one runtime (the llama-server subprocess / onnx
+        # session) is SHARED across the per-collection harnesses — only the
+        # owner stops it on close(), so a routed collection's teardown never
+        # kills the shared embedder out from under the others. Single-collection
+        # mode (the default) owns its runtime.
         self.owns_runtime = owns_runtime
         self.index_view = KernelIndexView(kernel, runtime)
         self.dedup_stats = DedupStatsRecorder()
-        # Background maintenance tasks (#471): tracked so close() drains them
-        # (no destroyed-pending teardown) and tests can settle deterministically.
+        # Background maintenance tasks: tracked so close() drains them (no
+        # destroyed-pending teardown) and tests can settle deterministically.
         self._bg_tasks: set[asyncio.Task[Any]] = set()
-        # Recognition (#228/#221/#485): per-purpose engine state, keyed by the
-        # kernel source string (`"ocr"`/`"vlm"`). Empty = nothing attached (a
-        # distinct, representable state from "attached but errored"). Each row
-        # carries its backend kind, state, and (when known) fingerprint for
-        # per-engine `/status`. One shared background sweep task drives every
-        # attached purpose (the kernel's `recognize_pending` sweeps all of them
-        # per batch); tracked so close() drains it.
+        # Recognition: per-purpose engine state, keyed by the kernel source
+        # string (`"ocr"`/`"vlm"`). Empty = nothing attached (a distinct,
+        # representable state from "attached but errored"). Each row carries its
+        # backend kind, state, and (when known) fingerprint for per-engine
+        # `/status`. One shared background sweep task drives every attached
+        # purpose (the kernel's `recognize_pending` sweeps all of them per
+        # batch); tracked so close() drains it.
         self._recognition_engines: dict[str, _RecognitionEngine] = {}
         self._recognition_task: asyncio.Task[Any] | None = None
 
@@ -371,29 +365,28 @@ class Harness:
         cross_space_floor_margin: float = ACTIVATION_MARGIN,
         shared_llama_manager: Any = None,
     ) -> Harness:
-        """Open the kernel on the running loop. Scheduling is the kernel's
-        own (#374 — the owned tokio runtime spawns the collection actor);
-        the harness assembles services and awaits completions. The
-        ``index_save_*`` tuning reaches the kernel's debounced saver
-        (#355 item 2); ``None`` keeps the built-in defaults. ``owns_runtime``
-        is False for a per-collection harness sharing one embedding runtime
-        (#68) — then close() leaves the shared runtime running.
-        ``secondary_runtimes`` are the additional embedding spaces (#233);
-        empty (the default) is the byte-identical N=1 case.
+        """Open the kernel on the running loop. Scheduling is the kernel's own
+        (the owned tokio runtime spawns the collection actor); the harness
+        assembles services and awaits completions. The ``index_save_*`` tuning
+        reaches the kernel's debounced saver; ``None`` keeps the built-in
+        defaults. ``owns_runtime`` is False for a per-collection harness sharing
+        one embedding runtime — then close() leaves the shared runtime running.
+        ``secondary_runtimes`` are the additional embedding spaces; empty (the
+        default) is the N=1 case.
 
         The host ``DerivedTextStore`` (the ``/status`` read surface) is built
-        **here, AFTER the kernel opens the collection** (#562), at the same
+        **here, AFTER the kernel opens the collection**, at the same
         ``cache_layout.derived_db_path`` the kernel's ``DerivedEngine`` opened —
         not by a caller before assembly. The path-derived namespace
         canonicalizes the collection path, and that canonicalization differs by
         whether the file EXISTS at computation time (an existing file → realpath,
         which folds a symlinked prefix like macOS ``/var/folders`` →
         ``/private/var/...``; an absent file → a lexical abspath that does NOT).
-        A fresh collection computed before open (the old caller order) hashed
-        under the abspath namespace while the kernel — which creates the file
-        during open — hashed under the realpath one, so the host ``/status`` read
-        an EMPTY store while the kernel's search store held the rows. Building
-        after open means the file exists for both, so both realpath to the SAME
+        A fresh collection computed before open hashed under the abspath
+        namespace while the kernel — which creates the file during open — hashed
+        under the realpath one, so the host ``/status`` read an EMPTY store while
+        the kernel's search store held the rows. Building after open means the
+        file exists for both, so both realpath to the SAME
         ``derived/<namespace>/shrike.db``. A pre-built ``derived`` may still be
         injected (the test seam); production passes none and lets assembly
         resolve the kernel-authoritative path."""
@@ -405,7 +398,7 @@ class Harness:
         )
         if derived is None:
             # Resolve AFTER open (the collection file now exists, so the host's
-            # canonicalization matches the kernel's — #562). Same computation the
+            # canonicalization matches the kernel's). Same computation the
             # kernel used internally, so they open one shared shrike.db.
             derived_path = cache_layout.derived_db_path(cache_dir, collection_path)
             derived = DerivedTextStore(
@@ -484,16 +477,16 @@ class Harness:
 
     async def _maybe_build_derived(self) -> None:
         """Cheap col_mod probe; the rebuild itself is fire-and-forget — boot
-        and /reload must not block on the FTS5 build (#451 review: the old
-        thread path never did; the store reports BUILDING and searches fall
-        back until ready). The claim in _rebuild_derived dedupes double-fires."""
+        and /reload must not block on the FTS5 build (the store reports BUILDING
+        and searches fall back until ready). The claim in _rebuild_derived
+        dedupes double-fires."""
         col_mod = await self.wrapper.col_mod()
         if self.derived.check_drift(col_mod):
             self._spawn_bg(self._rebuild_derived())
 
     def _spawn_bg(self, coro: Any) -> asyncio.Task[Any]:
-        """Spawn tracked background maintenance (#471): logged on failure,
-        discarded from the set on completion, drained by close()."""
+        """Spawn tracked background maintenance: logged on failure, discarded
+        from the set on completion, drained by close()."""
         task: asyncio.Task[Any] = asyncio.ensure_future(coro)
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
@@ -507,10 +500,10 @@ class Harness:
             await asyncio.gather(*list(self._bg_tasks), return_exceptions=True)
 
     async def _rebuild_derived(self) -> None:
-        # Kernel-side rebuild (#445): the field rows used to round-trip the
-        # whole collection Rust→Python→Rust (~150-250MB transient at 100k
-        # notes). The kernel op collects + builds crate-side; the store here
-        # only drives the status state machine around the await.
+        # Kernel-side rebuild: the kernel op collects + builds crate-side
+        # (avoiding a whole-collection Rust→Python→Rust round-trip, ~150-250MB
+        # transient at 100k notes); the store here only drives the status state
+        # machine around the await.
         if not self.derived.claim_external_build():
             return
         col_mod: int | None = None
@@ -526,9 +519,9 @@ class Harness:
     # -- status ------------------------------------------------------------------
 
     def collection_status(self) -> dict[str, Any]:
-        """The cheap per-collection status fields for a multi-collection row
-        (#68): held (the cooperative-lock state), the index state, and the last
-        col_mod the index saw. No embedding health probe (that's the default
+        """The cheap per-collection status fields for a multi-collection row:
+        held (the cooperative-lock state), the index state, and the last col_mod
+        the index saw. No embedding health probe (that's the default
         collection's full ``status()`` job) — this is a fan-out over every
         assembled collection, so it stays a pure in-memory read."""
         idx = self._index_status()
@@ -540,10 +533,10 @@ class Harness:
 
     async def status(self) -> dict[str, Any]:
         """The core status block — everything in ``/status`` minus host concerns."""
-        # Per-space embedding health (#681): the primary runtime PLUS every
-        # secondary space (#233), not just the primary — a multi-space profile
-        # has more than one embedder, each its own /status entry. health() may
-        # probe llama-server over HTTP, so every space's probe rides to_thread.
+        # Per-space embedding health: the primary runtime PLUS every secondary
+        # space, not just the primary — a multi-space profile has more than one
+        # embedder, each its own /status entry. health() may probe llama-server
+        # over HTTP, so every space's probe rides to_thread.
         runtimes = [self.runtime, *self.secondary_runtimes]
         embedding_spaces = [await asyncio.to_thread(rt.health) for rt in runtimes]
         # ``embedding`` stays the PRIMARY space's health for back-compat (every
@@ -559,9 +552,9 @@ class Harness:
         }
         if (dedup := self.dedup_stats.snapshot()) is not None:
             status["dedup"] = dedup
-        # Per-engine recognition status (#485): a map keyed by source — one row
-        # per attached purpose, each {state, backend, fingerprint}. An empty map
-        # is "nothing attached" (distinct from an attached-but-errored engine).
+        # Per-engine recognition status: a map keyed by source — one row per
+        # attached purpose, each {state, backend, fingerprint}. An empty map is
+        # "nothing attached" (distinct from an attached-but-errored engine).
         status["recognition"] = {
             source: {
                 "state": eng.state,
@@ -570,17 +563,17 @@ class Harness:
             }
             for source, eng in self._recognition_engines.items()
         }
-        # The cross-modal coverage matrix (#498/#235): for each (query, target)
-        # modality pair, how the target is reachable — `native` (one live space
-        # embeds both), `via_derived_text` (a ready recognizer derives text from
-        # the target into the text space), or `unavailable`. Derived from the
-        # live embedding spaces (one today; the union is forward-compatible) and
-        # the attached, ready recognizers. All-`unavailable` when embedding is
-        # down, so the shape is stable for clients.
-        # Per-space modality sets (#235): the primary runtime + every live
-        # secondary space. `native` is computed per-space (one space embeds
-        # both modalities), while `served` (their union) governs reachability.
-        # Empty when embedding is down → every cell unavailable.
+        # The cross-modal coverage matrix: for each (query, target) modality
+        # pair, how the target is reachable — `native` (one live space embeds
+        # both), `via_derived_text` (a ready recognizer derives text from the
+        # target into the text space), or `unavailable`. Derived from the live
+        # embedding spaces and the attached, ready recognizers.
+        # All-`unavailable` when embedding is down, so the shape is stable for
+        # clients.
+        # Per-space modality sets: the primary runtime + every live secondary
+        # space. `native` is computed per-space (one space embeds both
+        # modalities), while `served` (their union) governs reachability. Empty
+        # when embedding is down → every cell unavailable.
         per_space: list[frozenset[str]] = [
             frozenset(rt.backend.modalities)
             for rt in (self.runtime, *self.secondary_runtimes)
@@ -607,9 +600,9 @@ class Harness:
             "size": int(raw.get("size", 0)),
             "ndim": raw.get("ndim"),
         }
-        # Per-modality sub-index breakdown (#684): the kernel reports each
-        # sub-index's own size/ndim (the aggregate above collapses them). Pass it
-        # straight through to IndexModalityStat (text-first, kernel-ordered).
+        # Per-modality sub-index breakdown: the kernel reports each sub-index's
+        # own size/ndim (the aggregate above collapses them). Pass it straight
+        # through to IndexModalityStat (text-first, kernel-ordered).
         if raw.get("modalities"):
             status["modalities"] = [
                 {
@@ -655,8 +648,8 @@ class Harness:
         return {"status": "started", "total": total_notes}
 
     async def _rebuild_then_calibrate(self) -> None:
-        """Full index rebuild, then recalibrate the secondary floors (#576) —
-        the secondary image vectors are fresh, so the floor must be re-derived."""
+        """Full index rebuild, then recalibrate the secondary floors — the
+        secondary image vectors are fresh, so the floor must be re-derived."""
         await self.kernel.rebuild_index()
         await self._recalibrate_secondary_floors()
 
@@ -680,8 +673,8 @@ class Harness:
                 "embedding": await asyncio.to_thread(self.runtime.health),
             }
         # Spawn the shared llama.cpp router ONCE before any router-managed remote
-        # backend (#567): the primary + secondary remote spaces all talk to it
-        # over loopback, and their connectivity-proof embed at start() needs it
+        # backend: the primary + secondary remote spaces all talk to it over
+        # loopback, and their connectivity-proof embed at start() needs it
         # already healthy. router /health is 200 before any model lazy-loads, so
         # this is a fast health-wait. Owned here; stopped only on owner close().
         await self._ensure_shared_router()
@@ -690,10 +683,10 @@ class Harness:
         except (ValueError, ImportError) as e:
             raise KernelConfigError(str(e)) from e
         self._attach(backend)
-        # Fan out the secondary spaces (#233): each is its own kernel embed
-        # space, attached by its content-fingerprint key. A secondary that
-        # fails to start degrades ONLY its space — never the primary, which is
-        # already attached and serving the index/search path this PR.
+        # Fan out the secondary spaces: each is its own kernel embed space,
+        # attached by its content-fingerprint key. A secondary that fails to
+        # start degrades ONLY its space — never the primary, which is already
+        # attached and serving the index/search path.
         await self._attach_secondaries(overrides)
         self._spawn_bg(self._drive_boot_reindex())
         return {
@@ -704,9 +697,9 @@ class Harness:
 
     async def _ensure_shared_router(self) -> None:
         """Spawn the shared llama.cpp router manager if one is configured and
-        not yet running (#567). Idempotent — the native manager's own ``start``
-        no-ops a live child, and we additionally guard so a repeat call doesn't
-        block on the health-wait. Off the loop (spawn + health-wait blocks)."""
+        not yet running. Idempotent — the native manager's own ``start`` no-ops
+        a live child, and we additionally guard so a repeat call doesn't block
+        on the health-wait. Off the loop (spawn + health-wait blocks)."""
         mgr = self._shared_llama_manager
         if mgr is None:
             return
@@ -715,10 +708,10 @@ class Harness:
         await asyncio.to_thread(mgr.start)
 
     async def _attach_secondaries(self, overrides: dict[str, Any]) -> None:
-        """Start + attach every SECONDARY embedding space (#233), best-effort:
-        a space that fails to start (bad model, missing dep, unreachable
-        endpoint) is logged and skipped — only that space degrades, the rest
-        (and the primary) stay live. No-op in the N=1 case (no secondaries)."""
+        """Start + attach every SECONDARY embedding space, best-effort: a space
+        that fails to start (bad model, missing dep, unreachable endpoint) is
+        logged and skipped — only that space degrades, the rest (and the
+        primary) stay live. No-op in the N=1 case (no secondaries)."""
         for rt in self.secondary_runtimes:
             if rt.running:
                 continue
@@ -736,7 +729,7 @@ class Harness:
 
     @staticmethod
     def _space_key_for(rt: EmbeddingRuntime) -> str | None:
-        """A secondary space's explicit key (#233): the started backend's model
+        """A secondary space's explicit key: the started backend's model
         fingerprint (the CONTENT fingerprint, reorder-stable). ``None`` lets the
         kernel fall back to the embedder's own fingerprint — identical, since
         the backend carries it; the explicit pass keeps the harness in control
@@ -749,7 +742,7 @@ class Harness:
 
     async def attach_shared_embedder(self) -> None:
         """Attach an ALREADY-RUNNING shared embedding runtime's backend to this
-        harness's kernel and reconcile its index (#68 multi-collection).
+        harness's kernel and reconcile its index (multi-collection).
 
         Unlike :meth:`start_embedding`, this never starts/stops the runtime —
         the runtime is owned and started elsewhere (the default harness). A
@@ -763,14 +756,13 @@ class Harness:
         self._spawn_bg(self._drive_boot_reindex())
 
     def _attach(self, backend: EmbedderBackend, *, space_key: str | None = None) -> None:
-        """Attach the backend to a kernel embed SPACE (#342/#233). A backend
-        exposing ``native_embedder()`` (the onnx/clip/llama facades — every
-        production backend) hands over a native composition — kernel embeds
-        then never re-enter Python; a custom/test backend without one is
-        captured behind the PyEmbedder dispatch seam. ``space_key`` pins the
-        space identity (#233); ``None`` (the primary / N=1 case) lets the kernel
-        key off the embedder's own fingerprint — byte-identical to the
-        single-slot attach."""
+        """Attach the backend to a kernel embed SPACE. A backend exposing
+        ``native_embedder()`` (the onnx/clip/llama facades — every production
+        backend) hands over a native composition — kernel embeds then never
+        re-enter Python; a custom/test backend without one is captured behind
+        the PyEmbedder dispatch seam. ``space_key`` pins the space identity;
+        ``None`` (the primary / N=1 case) lets the kernel key off the embedder's
+        own fingerprint."""
         native = getattr(backend, "native_embedder", None)
         embedder = native() if callable(native) else shrike_native.PyEmbedder.capture(backend)
         self.kernel.attach_embedder(
@@ -778,13 +770,12 @@ class Harness:
         )
 
     def attach_recognizer(self, backend: Any, purpose: str = RECOGNITION_OCR) -> None:
-        """Attach an OCR/describe backend (#228/#485) for a recognition
-        ``purpose`` (the kernel source — ``"ocr"`` / ``"vlm"``) — the second
-        #342 slot, now keyed by purpose. A native engine
-        (``AppleVisionRecognizer`` in engine-apple builds, ``RemoteDescriber``
-        in engine-remote builds) goes to the kernel directly — recognition
-        then never re-enters Python; any other object satisfying the
-        RecognizerBackend contract (a blocking ``recognize(items)`` plus
+        """Attach an OCR/describe backend for a recognition ``purpose`` (the
+        kernel source — ``"ocr"`` / ``"vlm"``), keyed by purpose. A native
+        engine (``AppleVisionRecognizer`` in engine-apple builds,
+        ``RemoteDescriber`` in engine-remote builds) goes to the kernel directly
+        — recognition then never re-enters Python; any other object satisfying
+        the RecognizerBackend contract (a blocking ``recognize(items)`` plus
         ``model_fingerprint()``) is captured behind the PyRecognizer dispatch
         seam. Must run on the event loop (both paths grab the running loop)."""
         if self._media_read is None or self._media_exists is None:
@@ -801,7 +792,7 @@ class Harness:
 
     def detach_recognizer(self, purpose: str | None = None) -> None:
         """Detach a recognition engine. ``purpose=None`` detaches OCR (the
-        back-compat default); a source string detaches that purpose (#485)."""
+        back-compat default); a source string detaches that purpose."""
         if purpose is None or purpose == RECOGNITION_OCR:
             self.kernel.detach_recognizer()
         else:
@@ -810,7 +801,7 @@ class Harness:
     async def recognition_sweep(
         self, batch_size: int = 8, max_batches: int | None = None
     ) -> dict[str, Any]:
-        """Drive bounded recognition sweeps until nothing is pending (#228).
+        """Drive bounded recognition sweeps until nothing is pending.
 
         Each kernel call recognizes at most ``batch_size`` images then yields
         the executor, so collection ops interleave; the harness runs this as
@@ -826,7 +817,7 @@ class Harness:
             # observable that distinguishes the no-progress STOP (returns after
             # one no-progress batch) from a livelock REGRESSION (would re-take
             # the same window every call). Surfaced so a test can assert the
-            # driver stopped by logic, not by a wall-clock timeout (#525).
+            # driver stopped by logic, not by a wall-clock timeout.
             if report.get("status") != "ran" or int(report.get("remaining", 0)) == 0:
                 report["total_stored"] = total_stored
                 report["batches"] = batches
@@ -861,11 +852,10 @@ class Harness:
                 return report
 
     def start_recognition(self, kind: str) -> None:
-        """Construct + attach an OCR backend by kind (#221) and launch a
-        background sweep. Degrades to an 'error' state row on a missing
-        dependency (the engine isn't compiled in) or an unknown kind — never
-        kills boot. Byte-identical OCR path to before #485 (the OCR purpose,
-        the legacy ``--ocr-backend`` flow)."""
+        """Construct + attach an OCR backend by kind and launch a background
+        sweep. Degrades to an 'error' state row on a missing dependency (the
+        engine isn't compiled in) or an unknown kind — never kills boot (the OCR
+        purpose, the legacy ``--ocr-backend`` flow)."""
         from shrike.harness.engines.recognition import make_recognizer
 
         try:
@@ -892,7 +882,7 @@ class Harness:
         api_key_env: str | None = None,
         mmproj: str | None = None,
     ) -> None:
-        """Construct + attach the remote VLM describe engine (#433/#485) for the
+        """Construct + attach the remote VLM describe engine for the
         ``describe`` purpose (image→prose into the text embedding space,
         vector-only) and launch the shared background sweep. Reports an 'error'
         state row when construction fails (a missing build feature / missing key
@@ -901,8 +891,8 @@ class Harness:
         An unreachable endpoint still ATTACHES (the engine and its degenerate
         fingerprint): the sweep's chunk-Err-aborts contract leaves the backlog
         pending and a later sweep retries once the endpoint is up. We surface it
-        as 'error' rather than 'ready' so a degraded engine is visible (#485) —
-        rows minted under the degenerate fingerprint re-derive once on the next
+        as 'error' rather than 'ready' so a degraded engine is visible — rows
+        minted under the degenerate fingerprint re-derive once on the next
         restart, when model_info resolves and the fingerprint sharpens."""
         from shrike.harness.engines.recognition import make_describe_recognizer
 
@@ -934,11 +924,11 @@ class Harness:
         self._ensure_recognition_sweep()
 
     def _ensure_recognition_sweep(self) -> None:
-        """Launch the shared background sweep task if one isn't already running
-        (#485). The kernel's ``recognize_pending`` sweeps EVERY attached purpose
-        per batch, so one driver serves all engines. Tracked (#471): close()
-        cancels-and-awaits it like every other maintenance task, so a mid-sweep
-        teardown never leaves a destroyed-pending task."""
+        """Launch the shared background sweep task if one isn't already running.
+        The kernel's ``recognize_pending`` sweeps EVERY attached purpose per
+        batch, so one driver serves all engines. Tracked: close() cancels-and-
+        awaits it like every other maintenance task, so a mid-sweep teardown
+        never leaves a destroyed-pending task."""
         if self._recognition_task is not None and not self._recognition_task.done():
             return
         self._recognition_task = self._spawn_bg(self._drive_recognition())
@@ -959,8 +949,8 @@ class Harness:
     def stop_recognition(self, purpose: str | None = None) -> None:
         """Detach a recognition engine (or all) and cancel the sweep. With
         ``purpose=None`` every engine is detached (the boot/teardown path);
-        a source string detaches just that purpose (#485). The shared sweep
-        task is cancelled whenever no engine remains."""
+        a source string detaches just that purpose. The shared sweep task is
+        cancelled whenever no engine remains."""
         sources = (
             list(self._recognition_engines)
             if purpose is None
@@ -981,17 +971,16 @@ class Harness:
         await self._recalibrate_secondary_floors()
 
     async def _recalibrate_secondary_floors(self) -> None:
-        """Recompute the secondary cross-space image activation floors (#576).
+        """Recompute the secondary cross-space image activation floors.
 
-        A dedicated CLIP secondary is image-only, so the engine's own #201b
-        calibration (text→image) finds no text vectors there; this harness-driven
-        pass CLIP-text-embeds a sample of note texts through each secondary's own
-        backend and fires them at its image vectors to derive the floor
-        (``mean + margin·std``, the #580 margin dial). Best effort: a failure
-        leaves the prior floors and only weakens the floor admission to "no
-        floor" (admit any non-empty space) — never breaks search. No-op in the
-        N=1 case (the kernel returns an empty list when there are no
-        secondaries)."""
+        A dedicated CLIP secondary is image-only, so the engine's own intra-
+        modal calibration (text→image) finds no text vectors there; this
+        harness-driven pass CLIP-text-embeds a sample of note texts through each
+        secondary's own backend and fires them at its image vectors to derive
+        the floor (``mean + margin·std``). Best effort: a failure leaves the
+        prior floors and only weakens the floor admission to "no floor" (admit
+        any non-empty space) — never breaks search. No-op in the N=1 case (the
+        kernel returns an empty list when there are no secondaries)."""
         try:
             derived = await self.kernel.calibrate_secondary_floors(self.cross_space_floor_margin)
         except Exception as e:  # noqa: BLE001 — calibration is advisory; never fail search
@@ -1011,15 +1000,15 @@ class Harness:
             return {"status": "not_running"}
         self.kernel.detach_embedder()  # clears every space, flushes, unavailable
         await asyncio.to_thread(self.runtime.stop)
-        # Stop the secondary spaces' runtimes too (#233) — detach already
-        # cleared their kernel slots; this releases their backend resources.
+        # Stop the secondary spaces' runtimes too — detach already cleared their
+        # kernel slots; this releases their backend resources.
         for rt in self.secondary_runtimes:
             await asyncio.to_thread(rt.stop)
-        # Stop the shared router too (#567): `embedding stop` frees GPU/RAM, and
-        # the router process is the resource the remote spaces held. start_
-        # embedding re-spawns it (idempotent) on the next cycle. Owner-only
-        # (mirrors close()): a routed (#68) harness never owns the runtime, so it
-        # must not kill the shared router out from under the owner + siblings.
+        # Stop the shared router too: `embedding stop` frees GPU/RAM, and the
+        # router process is the resource the remote spaces held. start_embedding
+        # re-spawns it (idempotent) on the next cycle. Owner-only (mirrors
+        # close()): a routed harness never owns the runtime, so it must not kill
+        # the shared router out from under the owner + siblings.
         if self.owns_runtime and self._shared_llama_manager is not None:
             await asyncio.to_thread(self._shared_llama_manager.stop)
         return {"status": "stopped", "index": self._index_status()}
@@ -1036,9 +1025,9 @@ class Harness:
             rebuilding = await self.kernel.reindex_if_needed()
             if rebuilding:
                 # The reconcile re-embedded secondary image vectors, so the
-                # cross-space image floor (#576/#580) must be re-derived — every
-                # other reindex path (_drive_reindex/_rebuild_then_calibrate/
-                # _drive_boot_reindex) recalibrates; /reload was the outlier (#596).
+                # cross-space image floor must be re-derived — every other
+                # reindex path (_drive_reindex/_rebuild_then_calibrate/
+                # _drive_boot_reindex) recalibrates, and /reload must too.
                 # No-op at N=1 (the kernel returns an empty list with no secondaries).
                 await self._recalibrate_secondary_floors()
         return {"status": "reloaded", "col_mod": col_mod, "rebuilding": rebuilding}
@@ -1046,9 +1035,9 @@ class Harness:
     async def close(self) -> None:
         """Tear down: background tasks, derived, embedding, then the kernel
         (flushes the index)."""
-        # Cancel-and-drain the tracked maintenance tasks (#471): a rebuild
-        # mid-flight detaches kernel-side (the op completes; detach never
-        # aborts), but the Python task must not be destroyed pending.
+        # Cancel-and-drain the tracked maintenance tasks: a rebuild mid-flight
+        # detaches kernel-side (the op completes; detach never aborts), but the
+        # Python task must not be destroyed pending.
         for task in list(self._bg_tasks):
             task.cancel()
         if self._bg_tasks:
@@ -1056,20 +1045,20 @@ class Harness:
         self.derived.close()
         if self.owns_runtime:
             await asyncio.to_thread(self.runtime.stop)
-            # Stop the secondary spaces' runtimes too (#233) — owned alongside
-            # the primary; a shared (#68) harness leaves them to the owner.
+            # Stop the secondary spaces' runtimes too — owned alongside the
+            # primary; a shared harness leaves them to the owner.
             for rt in self.secondary_runtimes:
                 await asyncio.to_thread(rt.stop)
-            # Stop the shared llama.cpp router LAST (#567): the router-managed
-            # remote backends (now stopped) talked to it, so the process they
-            # depend on outlives them by exactly this teardown. Owner-only —
-            # a shared (#68) routed harness never owns the runtime, so it never
-            # reaches here and never kills the router out from under siblings.
+            # Stop the shared llama.cpp router LAST: the router-managed remote
+            # backends (now stopped) talked to it, so the process they depend on
+            # outlives them by exactly this teardown. Owner-only — a shared
+            # routed harness never owns the runtime, so it never reaches here and
+            # never kills the router out from under siblings.
             if self._shared_llama_manager is not None:
                 await asyncio.to_thread(self._shared_llama_manager.stop)
         self.wrapper.close()
-        # kernel.close drains the collection actor (#374): nothing in flight
-        # when this returns — the interpreter-teardown guard.
+        # kernel.close drains the collection actor: nothing in flight when this
+        # returns — the interpreter-teardown guard.
         await self.kernel.close()
 
 
@@ -1081,7 +1070,7 @@ def _log_task_failure(task: asyncio.Task[Any]) -> None:
         logger.error("Background kernel task failed: %s", exc)
 
 
-# ── multi-collection routing (#68) ──────────────────────────────────────────
+# ── multi-collection routing ────────────────────────────────────────────────
 
 
 class RoutingError(Exception):
@@ -1093,8 +1082,8 @@ class RoutingError(Exception):
 @dataclass(frozen=True)
 class HarnessParams:
     """The collection-independent assembly parameters every per-collection
-    harness shares (#68). The shared base ``cache_dir`` (NOT per-collection —
-    isolation comes from per-artifact namespacing: the index via #67, the
+    harness shares. The shared base ``cache_dir`` (NOT per-collection —
+    isolation comes from per-artifact namespacing: the index namespace, the
     derived store via :func:`cache_layout.derived_db_path`), the shared
     embedding runtime, media resolvers, cooperative-lock settings, and the
     index-flush tuning. One of these is built once at boot; the manager
@@ -1112,31 +1101,30 @@ class HarnessParams:
 
 
 class CollectionManager:
-    """Routes per-call to a per-collection :class:`Harness`, lazily assembled
-    (#68 — the multi-collection capstone).
+    """Routes per-call to a per-collection :class:`Harness`, lazily assembled.
 
     One daemon, many collections: each registered/active collection gets its
-    own ``AsyncKernel`` + namespaced index (#67) + per-collection derived store,
+    own ``AsyncKernel`` + namespaced index + per-collection derived store,
     assembled on first route and governed by its own cooperative-lock
-    idle-release (#64) — only the collection(s) mid-operation hold a lock. The
-    N kernels share one process-global tokio runtime (verified) and one
-    embedding runtime (the llama-server subprocess / onnx session is expensive;
-    one is shared, attached to each kernel's embed slot).
+    idle-release — only the collection(s) mid-operation hold a lock. The N
+    kernels share one process-global tokio runtime and one embedding runtime
+    (the llama-server subprocess / onnx session is expensive; one is shared,
+    attached to each kernel's embed slot).
 
     Selection is **per-call and stateless** (consistent with ``stateless_http``):
     a selector resolves name → path via a **live, re-readable** registry view
-    (contract #2 — re-read on demand so a ``profile create`` in one session routes
-    in the same session), defaulting to the registry's active profile; no
-    server-side mutable "current collection". The registry's stored path is
-    routed THROUGH :mod:`shrike.harness.cache_layout` (contract #1) so canonicalization
-    is the equalizer — never a raw-abspath-derived index path.
+    (re-read on demand so a ``profile create`` in one session routes in the same
+    session), defaulting to the registry's active profile; no server-side
+    mutable "current collection". The registry's stored path is routed THROUGH
+    :mod:`shrike.harness.cache_layout` so canonicalization is the equalizer —
+    never a raw-abspath-derived index path.
 
     The **default collection** (the one the daemon booted with, ``--collection``)
-    is seeded as a ready harness so today's single-collection behavior — boot
-    embedding, the operational routes, the recognition sweep — is unchanged; it
-    owns the shared embedding runtime's lifecycle. Routed (non-default)
-    collections attach the same shared backend to their own kernel and never
-    stop it on teardown.
+    is seeded as a ready harness so single-collection behavior — boot embedding,
+    the operational routes, the recognition sweep — is unchanged; it owns the
+    shared embedding runtime's lifecycle. Routed (non-default) collections
+    attach the same shared backend to their own kernel and never stop it on
+    teardown.
     """
 
     # The registry key for the daemon's boot collection when it isn't a
@@ -1168,7 +1156,7 @@ class CollectionManager:
         self._default_key = self._key_for_path(self._default_path) or self.DEFAULT_KEY
         self._harnesses[self._default_key] = default_harness
 
-    # -- the live registry view (contract #2) --------------------------------
+    # -- the live registry view -----------------------------------------------
 
     def registry(self) -> Registry:
         """Re-read the registry from config every call — the live view.
@@ -1264,11 +1252,11 @@ class CollectionManager:
         namespaced index + per-collection derived store, sharing the base
         cache dir and the embedding runtime."""
         logger.info("Routing: assembling collection %r at %s", key, path)
-        # The per-collection derived store (#547, <cache_dir>/derived/<ns>/shrike.db)
-        # is built by assemble AFTER the kernel opens this collection (#562), so
-        # the host namespace canonicalizes the now-existing file identically to
-        # the kernel's DerivedEngine — never pre-computed here from a maybe-absent
-        # path. The base cache_dir is SHARED (so #67's index namespace under it is
+        # The per-collection derived store (<cache_dir>/derived/<ns>/shrike.db)
+        # is built by assemble AFTER the kernel opens this collection, so the
+        # host namespace canonicalizes the now-existing file identically to the
+        # kernel's DerivedEngine — never pre-computed here from a maybe-absent
+        # path. The base cache_dir is SHARED (so the index namespace under it is
         # preserved for the single-collection user).
         harness = await Harness.assemble(
             collection_path=path,
@@ -1292,8 +1280,8 @@ class CollectionManager:
         return harness
 
     async def resolve_bundle(self, selector: str | None) -> Any:
-        """The per-call action bundle for ``selector`` (#68 — the resolver
-        ``register_tools`` is handed).
+        """The per-call action bundle for ``selector`` — the resolver
+        ``register_tools`` is handed.
 
         Routes to the selector's harness (lazily assembling it) and hands back
         its ``CollectionBundle`` (wrapper + index view + kernel + derived +
@@ -1312,11 +1300,11 @@ class CollectionManager:
         )
 
     def status_rows(self) -> list[dict[str, Any]]:
-        """One status row per KNOWN collection (#68 S3): the daemon's boot/
-        default collection plus every registered profile, deduped by
-        path-namespace (a registered profile that IS the boot collection shows
-        once). An assembled collection contributes its live held/index/col_mod;
-        a registered-but-never-routed one is ``active=False`` with no index
+        """One status row per KNOWN collection: the daemon's boot/default
+        collection plus every registered profile, deduped by path-namespace (a
+        registered profile that IS the boot collection shows once). An assembled
+        collection contributes its live held/index/col_mod; a
+        registered-but-never-routed one is ``active=False`` with no index
         figures yet (nothing has been opened to read them from).
 
         The top-level ``/status`` embedding/index/derived fields describe the

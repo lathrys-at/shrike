@@ -39,16 +39,16 @@ import numpy as np
 import shrike_native
 
 # The spiked probe set and tolerance are SOURCED FROM THE NATIVE CONTRACT
-# (shrike-engine-api's probe module, #342 P4) — one set, two hosts: native
-# hosts run the Rust probe; this module is the Python host's adapter of the
-# same policy over any EmbedChunk callable (facades, fakes, HTTP clients).
+# (shrike-engine-api's probe module) — one set, two hosts: native hosts run the
+# Rust probe; this module is the Python host's adapter of the same policy over
+# any EmbedChunk callable (facades, fakes, HTTP clients).
 BATCH_DRIFT_TOL: float = shrike_native.BATCH_DRIFT_TOL
 
 BATCH_PROBE_TEXTS: list[str] = list(shrike_native.BATCH_PROBE_TEXTS)
 
-# The vision probe set (#211): the same canonical synthetic images the native
-# vision probe embeds — varied content for a wide pixel-activation range, the
-# image analogue of BATCH_PROBE_TEXTS. Used to probe a CLIP vision graph for
+# The vision probe set: the same canonical synthetic images the native vision
+# probe embeds — varied content for a wide pixel-activation range, the image
+# analogue of BATCH_PROBE_TEXTS. Used to probe a CLIP vision graph for
 # batch-safety independently of the text graph (a mixed-precision pair).
 BATCH_PROBE_IMAGES: list[bytes] = list(shrike_native.BATCH_PROBE_IMAGES)
 

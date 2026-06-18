@@ -1,9 +1,9 @@
 //! The OpenAI-compatible remote HTTP engines (feature `remote`): embeddings
 //! ([`embed`]) and VLM describe ([`describe`]) over any endpoint, behind ONE
-//! shared SSRF-pinned client ([`http`], the #708 dedup of the two engines'
+//! shared SSRF-pinned client ([`http`], the dedup of the two engines'
 //! previously-copy-pasted trust-boundary code).
 //!
-//! **Route 2 — async-direct** (#721 S2): the engines implement engine-api's
+//! **Route 2 — async-direct**: the engines implement engine-api's
 //! async traits ([`shrike_engine_api::Embedder`]/[`shrike_engine_api::ImageEmbedder`]/
 //! [`shrike_engine_api::Recognizer`]) DIRECTLY over an async `reqwest` client,
 //! so the kernel awaits them on its runtime (no `Blocking` adapter, no parked

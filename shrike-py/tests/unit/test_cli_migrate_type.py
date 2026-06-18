@@ -1,4 +1,4 @@
-"""CLI handling for `shrike note migrate-type` (#75), with the client stubbed."""
+"""CLI handling for `shrike note migrate-type`, with the client stubbed."""
 
 from __future__ import annotations
 

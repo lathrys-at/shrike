@@ -1,4 +1,4 @@
-"""CLI handling for `shrike note replace` (#85), with the client stubbed."""
+"""CLI handling for `shrike note replace`, with the client stubbed."""
 
 from __future__ import annotations
 

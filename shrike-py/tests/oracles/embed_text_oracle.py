@@ -1,6 +1,6 @@
 """The PYTHON ORACLE for embed-text normalization (test asset, not runtime).
 
-Since the #278 cutover the runtime normalization runs in Rust
+The runtime normalization runs in Rust
 (shrike-collections embed_text.rs) under a byte-identity contract with THIS
 implementation — the tests/native corpus compares them exactly. Runtime code
 must not import this module; `shrike.embed_text` keeps only the version pin.
@@ -67,7 +67,7 @@ _MATHJAX_RE = re.compile(r"\\[()\[\]]|\$\$")
 # Block-level tags and <br> → whitespace, so "a<br>b" doesn't become "ab" once
 # Anki's stripper (which glues across block tags) runs.
 _BLOCK_TAG_RE = re.compile(r"(?i)<\s*/?\s*(?:br|div|p|li|ul|ol|tr|td|h[1-6]|blockquote)\b[^>]*>")
-# Whitespace collapse. NOTE (#612): Python `re`'s `\s` matches the C0 separators
+# Whitespace collapse. NOTE: Python `re`'s `\s` matches the C0 separators
 # U+001C-U+001F, but Rust's `\s` (Unicode White_Space) does NOT, so the two
 # normalizers diverge on those four code points. The byte-identity contract this
 # oracle pins therefore holds over **anki-sanitized field text**: anki's
@@ -128,7 +128,7 @@ def normalize_for_embedding(value: str) -> str:
 
 # Media references that make a field non-empty even with no text: <img>, <audio>,
 # <video>, <object>, <embed>, <source>, and [sound:…]. Used by collection_prune's
-# empty-note rule (#89), not by embedding (which strips media out entirely).
+# empty-note rule, not by embedding (which strips media out entirely).
 _MEDIA_RE = re.compile(r"(?i)<\s*(?:img|audio|video|object|embed|source)\b|\[sound:")
 
 

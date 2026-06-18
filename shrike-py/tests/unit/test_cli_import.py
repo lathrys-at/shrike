@@ -1,4 +1,4 @@
-"""CLI behavior for `shrike collection import` (#72 S3; rehomed in #683), client stubbed."""
+"""CLI behavior for `shrike collection import`, client stubbed."""
 
 from __future__ import annotations
 

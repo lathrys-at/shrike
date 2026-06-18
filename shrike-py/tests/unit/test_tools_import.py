@@ -1,4 +1,4 @@
-"""The import_package action — path-root gate + routing to the kernel op (#72 S2).
+"""The import_package action — path-root gate + routing to the kernel op.
 
 The drift-rebuild correctness is pinned natively (tests/native/test_import_package.py);
 this pins the action layer: the server-local-path gate (off by default, containment),

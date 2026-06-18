@@ -1,4 +1,4 @@
-//! The #637 concurrent-op race gate (a follow-up to #597).
+//! The concurrent-op race gate.
 //!
 //! A SEPARATE test binary on purpose: the runtime seam (`init_runtime`) is
 //! process-global and terminally undriven after `shrike_runtime_shutdown`, so
@@ -10,8 +10,8 @@
 //! always fire its callback within a bounded timeout — it either COMPLETES (it
 //! was admitted before the shutdown flag store, so the driver drained it) or
 //! FAST-FAILS `unavailable` (it reached admission after the store) — but NEVER
-//! orphans (callback never fires → hang). #597 closed the strictly-after case;
-//! this closes the notify→store window #597 left open. Pre-fix this repro is
+//! orphans (callback never fires → hang). The strictly-after case is closed
+//! elsewhere; this closes the notify→store window it left open. Pre-fix this repro is
 //! red-by-design (the op can be stranded on the dying runtime); post-fix it
 //! passes deterministically.
 

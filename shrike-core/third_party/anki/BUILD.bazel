@@ -1,4 +1,4 @@
-# The anki protobuf descriptor set for the PINNED tag (#278 cutover).
+# The anki protobuf descriptor set for the PINNED tag.
 #
 # anki's two build scripts hand this file off via cargo's shared
 # `target/…/build/` layout (`OUT_DIR/../../anki_descriptors.bin`), which does

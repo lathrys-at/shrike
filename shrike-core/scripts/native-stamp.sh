@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compute the native-build stamp: a hash of every input that decides whether the
-# compiled shrike_native extension in the active venv is current (#573). The
+# compiled shrike_native extension in the active venv is current. The
 # single source of truth for staleness — both scripts/native-stale.sh (the check)
 # and scripts/build-native.sh (the writer) call this, so the two can't drift.
 #

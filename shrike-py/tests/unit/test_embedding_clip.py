@@ -1,7 +1,3 @@
-# NOTE (#278 cutover): the Python-engine internals these tests used to pin —
-# the text/image session feeds, preprocessing math, L2 normalization — retired
-# with the Python engine (they run crate-side now, pinned by the integration
-# model tests). What remains here is the facade's own behaviour.
 """Tests for the CLIP backend facade (shrike.embedding_clip), with a fake native engine.
 
 The shared-space *quality* (a text query near the matching image) needs a real model and lives
@@ -64,7 +60,7 @@ class _FakeVariantEngine(_FakeEngine):
 
 
 class _FakeVisionVariantEngine(_FakeEngine):
-    """Text batches safely, but the VISION graph is batch-variant (the #211 mixed-precision
+    """Text batches safely, but the VISION graph is batch-variant (the mixed-precision
     case: fp text + int8 vision). The min(text, vision) probe must force the whole engine
     serial — the text probe alone would wrongly clear it."""
 
@@ -180,13 +176,13 @@ class TestClipBackend:
         _start(be)
         assert be.embedding_dim() == _DIM
         fp = be.model_fingerprint()
-        # clip-rs: is the native engine's vector-space identity, kept verbatim
-        # from the dual-engine bake (#271) — indexes built then load unchanged.
+        # clip-rs: is the native engine's vector-space identity — indexes built
+        # then load unchanged.
         assert fp.startswith("clip-rs:text_model.onnx:")
         assert "vision_model.onnx:" in fp and "imgprep=rs" in fp and "textprep=" in fp
 
     def test_auto_discovers_quantized_only(self, tmp_path: Path) -> None:
-        # A quantized-only export (the CI fixture's shape) loads without any variant param (F1).
+        # A quantized-only export (the CI fixture's shape) loads without any variant param.
         be = ClipBackend(model=str(_model_dir(tmp_path, variant="quantized")))
         _start(be)
         assert be._text_path is not None and be._text_path.name == "text_model_quantized.onnx"
@@ -202,13 +198,13 @@ class TestClipBackend:
         assert be._text_path is not None and be._text_path.name == "text_model.onnx"
 
     def test_reads_size_and_crop_independently(self, tmp_path: Path) -> None:
-        # F2: resize target is the `size`/`shortest_edge` field, crop is `crop_size` — not the same.
+        # Resize target is the `size`/`shortest_edge` field, crop is `crop_size` — not the same.
         be = ClipBackend(model=str(_model_dir(tmp_path)))
         _start(be)
         assert be._resize == 256 and be._crop == 224
 
     def test_scalar_size_and_crop(self, tmp_path: Path) -> None:
-        # F5: the bare-scalar `crop_size`/`size` form (some exports) must not crash start().
+        # The bare-scalar `crop_size`/`size` form (some exports) must not crash start().
         d = _model_dir(tmp_path)
         (d / "preprocessor_config.json").write_text(
             json.dumps(
@@ -250,7 +246,7 @@ class TestClipBackend:
         assert be._native_engine.text_calls == [1, 1, 1]
 
     def test_variant_vision_forces_serial(self, tmp_path: Path) -> None:
-        # The #211 guard: a mixed-precision pair (safe text + batch-variant vision) must take
+        # The mixed-precision guard: a pair (safe text + batch-variant vision) must take
         # min(text, vision) and embed BOTH paths serially — the text probe alone would clear it.
         be = ClipBackend(model=str(_model_dir(tmp_path)))
         _start(be, engine_cls=_FakeVisionVariantEngine)

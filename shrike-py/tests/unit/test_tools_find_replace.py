@@ -1,8 +1,8 @@
-"""Tool-layer find_replace_notes (#85): validation + re-embed of changed notes.
+"""Tool-layer find_replace_notes: validation + re-embed of changed notes.
 
-Kernel-harness port (#355): an applied replace routes the changed set through
-kernel.reindex_notes (re-embed + re-ingest); the re-embed is observable as a
-fresh embed call carrying the edited text.
+An applied replace routes the changed set through kernel.reindex_notes
+(re-embed + re-ingest); the re-embed is observable as a fresh embed call
+carrying the edited text.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ class TestValidation:
             )
 
     def test_invalid_regex_is_clean_input_error(self, kharness, mcp_app, caplog):
-        # #599: an invalid regex/backref is caller-supplied bad input — a clean
+        # An invalid regex/backref is caller-supplied bad input — a clean
         # ToolInputError (WARNING, no traceback), not the catch-all "Unhandled
         # error" + traceback. The preview loop compiles the pattern on EVERY
         # call, so this bites a real apply, not only dry_run.

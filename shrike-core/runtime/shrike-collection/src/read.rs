@@ -1,9 +1,9 @@
-//! The read surface (#278 series, step 2): collection_info, list_notes +
+//! The read surface: collection_info, list_notes +
 //! note serialization, and the embedding-text readers — ports of the
 //! CollectionWrapper methods of the same names (the tests/native parity
 //! harness compares against the pip core).
 //!
-//! Typed since #391 phase 2: the read ops return the canonical
+//! The read ops return the canonical
 //! `shrike-schemas` types directly — no JSON-string assembly here.
 //! Serialization to the host wire happens exactly once, at the binding edge,
 //! with plain serde (an unset `Option` is an explicit `null` — the one wire
@@ -50,7 +50,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// One note's `(note_id, field_names, field_values)`. Field names are
-/// shared per notetype (#445): the old per-note `Vec<String>` clone copied
+/// shared per notetype: a per-note `Vec<String>` clone would copy
 /// every field name once per note — ~400k string allocations per rebuild
 /// read at 100k notes.
 type NoteFieldRow = (i64, std::sync::Arc<Vec<String>>, Vec<String>);
@@ -117,8 +117,7 @@ impl CollectionCore {
 
     /// Normalized embedding text per note id, "" for missing ids (positions
     /// preserved; a REPEATED id carries its text on the first occurrence
-    /// only — the move-out assembly (#445) replaced a full per-note text
-    /// clone, and no caller passes duplicates).
+    /// only — the move-out assembly relies on no caller passing duplicates).
     /// The port of `CollectionWrapper.note_texts`.
     ///
     /// # Errors
@@ -165,9 +164,9 @@ impl CollectionCore {
         Ok(note_ids
             .iter()
             .map(|nid| {
-                // Move-out, not clone (#445): the rebuild path assembled a
-                // second full copy of every note's text here. Same repeated-
-                // id caveat as `note_texts` (no caller passes duplicates).
+                // Move-out, not clone (avoids a second full copy of every
+                // note's text here). Same repeated-id caveat as `note_texts`
+                // (no caller passes duplicates).
                 let (text, images) = by_id.remove(nid).unwrap_or_default();
                 (*nid, text, images)
             })
@@ -196,10 +195,8 @@ impl CollectionCore {
     }
 
     /// `(note_id, image_names)` for every note whose raw fields reference an
-    /// `<img` tag — the recognition sweep's pending-set source (#445): the
-    /// sweep previously rendered the FULL collection's embedding inputs
-    /// (notetype lookups + normalization + strip per field) once per batch
-    /// and discarded the text. One SQL pass with an ASCII `lower()`
+    /// `<img` tag — the recognition sweep's pending-set source. One SQL pass
+    /// with an ASCII `lower()`
     /// pre-filter — exactly the extractor's own ASCII-case-insensitive
     /// probe, so the filter can never skip a note the extractor would
     /// return names for — then the raw-field extractor (same per-field
@@ -213,9 +210,9 @@ impl CollectionCore {
     }
 
     /// `(note_id, sound_names)` for every note whose raw fields reference a
-    /// `[sound:…]` marker — the ASR sweep's pending-set source (#485), the
-    /// audio twin of [`Self::note_image_refs`]. Same scoped-read discipline
-    /// (#445): one SQL pass with an ASCII `lower()` pre-filter that exactly
+    /// `[sound:…]` marker — the ASR sweep's pending-set source, the
+    /// audio twin of [`Self::note_image_refs`]. Same scoped-read discipline:
+    /// one SQL pass with an ASCII `lower()` pre-filter that exactly
     /// matches the extractor's own ASCII byte probe (`[sound:`), then the
     /// raw-field extractor with in-order dedupe.
     ///
@@ -227,7 +224,7 @@ impl CollectionCore {
     }
 
     /// The shared scoped-read body behind [`Self::note_image_refs`] /
-    /// [`Self::note_sound_refs`] (#485): `probe` is the ASCII-lowered marker
+    /// [`Self::note_sound_refs`]: `probe` is the ASCII-lowered marker
     /// the SQL `instr` pre-filter looks for, `extract` the per-field ref
     /// extractor (whose own byte probe matches `probe` exactly, so the filter
     /// can never skip a note the extractor would return refs for). `probe` is
@@ -266,7 +263,7 @@ impl CollectionCore {
     }
 
     /// `(note_id, [leaf tags])` for every tagged note — the tag-centroid
-    /// layer's membership source (#179): ONE pass over `notes.tags` (Anki
+    /// layer's membership source: ONE pass over `notes.tags` (Anki
     /// keeps it space-delimited), exact leaf strings; hierarchy roll-up is
     /// the consumer's prefix aggregation.
     ///
@@ -296,7 +293,7 @@ impl CollectionCore {
     }
 
     /// Whether ANY of `note_ids` currently carries a tag — the SQL half of
-    /// the tag-centroid relevance probe (#445): one scoped aggregate lets an
+    /// the tag-centroid relevance probe: one scoped aggregate lets an
     /// untagged write op skip the O(tagged-notes) recompute entirely.
     ///
     /// # Errors
@@ -318,9 +315,8 @@ impl CollectionCore {
             .ok_or_else(|| NativeError::internal("unexpected exists row shape".to_string()))
     }
 
-    /// Total note count via one SQL aggregate (#445): the tag-centroid
-    /// refresh previously ran `find_notes("")` — materializing every note id
-    /// through a protobuf SearchResponse — just to take `.len()`.
+    /// Total note count via one SQL aggregate — avoids materializing every
+    /// note id through a protobuf SearchResponse just to take `.len()`.
     ///
     /// # Errors
     ///
@@ -368,7 +364,7 @@ impl CollectionCore {
     /// Returns an error if the batched read fails.
     pub fn note_field_map(&self, note_ids: &[i64]) -> NativeResult<Vec<OwnedFieldRow>> {
         // Owned names on this surface (the pyo3 binding's wire shape); the
-        // Arc sharing is an internal property of `note_field_rows` (#445).
+        // Arc sharing is an internal property of `note_field_rows`.
         Ok(self
             .note_field_rows(note_ids)?
             .into_iter()
@@ -519,7 +515,7 @@ impl CollectionCore {
 
     /// The typed notes as internal-wire `Value` dicts — the kernel's search
     /// assembly annotates candidates in place (`substring`/`score`/...), so it
-    /// wants mutable JSON objects. Plain serde (#391 to_wire retirement): a
+    /// wants mutable JSON objects. Plain serde: a
     /// meta-mode note carries an explicit `"content": null`, never a dropped
     /// key — every consumer reads via `.get(..)` + `as_*`, which treat `Null`
     /// exactly like absent.

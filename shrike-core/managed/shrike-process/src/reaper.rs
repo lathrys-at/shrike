@@ -1,4 +1,4 @@
-//! Port-ownership orphan reaping (#594/#654) — the safety-critical core.
+//! Port-ownership orphan reaping — the safety-critical core.
 //!
 //! A managed subprocess survives a parent SIGKILL, so a later start must be
 //! able to reap an orphan left holding our port by a prior unclean shutdown.
@@ -9,7 +9,7 @@
 //! port→PID attribution it rests on; [`Supervisor`](crate::Supervisor) calls
 //! into it but the kill decision lives here.
 //!
-//! The attribution is **positive-only** (#594): a mechanism may place a PID in
+//! The attribution is **positive-only**: a mechanism may place a PID in
 //! the owner set *only* when it has proven that PID owns a LISTEN socket on the
 //! port. "Ran but found nothing" is `Some(empty)` (authoritative: no owner);
 //! "could not run at all" is `None` (ownership unprovable → do not kill). A
@@ -73,8 +73,8 @@ pub(crate) fn port_bindable(host: &str, port: u16) -> bool {
 }
 
 /// Something else holds the port — `EADDRINUSE` specifically, so an unrelated
-/// bind failure (e.g. an unresolvable host) never reads as "held". Test-only
-/// since #594: the reap gate verifies *which PID* owns the port
+/// bind failure (e.g. an unresolvable host) never reads as "held". Test-only:
+/// the reap gate verifies *which PID* owns the port
 /// ([`pid_owns_port`]), never the bare "someone holds it" signal this gave
 /// (that signal, paired with a recycled PID, was what killed bystanders).
 #[cfg(test)]
@@ -90,7 +90,7 @@ pub(crate) fn port_held(host: &str, port: u16) -> bool {
 /// kill" — we never terminate a PID we cannot prove owns our port, so a recycled
 /// PID can't take a bystander down with it.
 ///
-/// #594 invariant (safety-critical — this feeds a kill gate): every mechanism
+/// Invariant (safety-critical — this feeds a kill gate): every mechanism
 /// here may put a PID in the returned set *only* when it has positively proven
 /// that PID owns a LISTEN socket on `port`. "Ran but found nothing" is
 /// `Some(empty)` (authoritative: no owner); "could not run at all" is `None`
@@ -100,7 +100,7 @@ pub(crate) fn port_held(host: &str, port: u16) -> bool {
 /// part of our address is immaterial to ownership — we match on the numeric port
 /// alone, which is what we are about to bind.
 ///
-/// #654 unix fallback chain, each preserving the invariant:
+/// Unix fallback chain, each preserving the invariant:
 ///   1. `lsof`, resolved robustly (PATH, then well-known absolute paths) — the
 ///      sandbox strips `/usr/sbin` from `PATH` but still permits exec'ing the
 ///      absolute binary, so this restores macOS coverage. An lsof that *ran* is
@@ -164,12 +164,11 @@ pub fn port_owner_pids(port: u16) -> Option<Vec<i64>> {
 }
 
 /// Run `lsof` (resolved robustly) against `port`, or `None` if no resolution of
-/// it could be spawned. #654: the bazel `darwin-sandbox` strips `/usr/sbin` from
+/// it could be spawned. The bazel `darwin-sandbox` strips `/usr/sbin` from
 /// `PATH`, so `which("lsof")` fails even though `/usr/sbin/lsof` exists and is
 /// exec'able by absolute path — try PATH first, then the well-known absolute
 /// locations. A spawn that *ran* is authoritative (`Some`, even empty); a
-/// non-zero exit when nothing matches is a legitimate "no owner", not a failure
-/// (#594).
+/// non-zero exit when nothing matches is a legitimate "no owner", not a failure.
 #[cfg(unix)]
 fn lsof_owner_pids(port: u16) -> Option<Vec<i64>> {
     // PATH resolution first (the common case), then well-known absolute paths
@@ -209,14 +208,14 @@ fn lsof_owner_pids(port: u16) -> Option<Vec<i64>> {
     None
 }
 
-/// Linux `/proc`-only fallback (#654): collect the PIDs LISTENing on `port` by
+/// Linux `/proc`-only fallback: collect the PIDs LISTENing on `port` by
 /// parsing `/proc/net/tcp{,6}` for the listening socket inodes, then scanning
 /// `/proc/<pid>/fd/*` symlinks for `socket:[<inode>]`. Pure-Rust, dependency-
 /// free, and *positive* (port → inode → pid). Returns `Some(pids)` when
 /// `/proc/net/tcp{,6}` was readable (`Some(empty)` = readable, no LISTEN owner)
 /// and `None` when neither file could be read (ownership unprovable → no kill).
 ///
-/// Conservative on failure (#594): a `/proc/<pid>/fd` scan that hits a
+/// Conservative on failure: a `/proc/<pid>/fd` scan that hits a
 /// permission error just *omits* that PID — failing to attribute means "don't
 /// reap" (safe), never "reap the wrong one". Our own prior-uid orphan's fds are
 /// readable, so a real orphan is still found.
@@ -287,14 +286,14 @@ fn proc_net_owner_pids(port: u16) -> Option<Vec<i64>> {
 /// Parse `/proc/net/tcp` (or `/proc/net/tcp6`) text, returning the socket inodes
 /// of rows in the LISTEN state whose local-address port equals `port`. Split
 /// from the filesystem so it is unit-testable over fixture text (the
-/// safety-critical correctness; #654).
+/// safety-critical correctness).
 ///
 /// Row layout (whitespace-split, after the header line): field[1] =
 /// `local_address` as `HEXIP:HEXPORT` (the port is the hex after the final `:`;
 /// the IP is 8 hex digits for tcp, 32 for tcp6 — immaterial, we match on the
 /// port alone like the rest of this module); field[3] = `st`, the connection
 /// state (`0A` = TCP_LISTEN); field[9] = `inode`. A row missing any field, with
-/// a non-hex port, or not in LISTEN state is ignored — never guessed at (#594).
+/// a non-hex port, or not in LISTEN state is ignored — never guessed at.
 /// Port match is exact: `0x1538` must not match `0x0538` or `0x15380`, which
 /// equality of the parsed `u16` gives for free.
 #[cfg(target_os = "linux")]
@@ -369,7 +368,7 @@ pub(crate) fn wait_pid_dead(pid: i64, timeout: Duration) -> bool {
 mod tests {
     use super::*;
 
-    // The /proc/net/tcp parser is the safety-critical correctness of the #654
+    // The /proc/net/tcp parser is the safety-critical correctness of the
     // Linux fallback: a misparsed port = a wrong inode = (after fd-scan) a wrong
     // PID killed. Cover it thoroughly over fixture text — pure function, no real
     // /proc needed. Real-kernel row format verified against net/ipv4/tcp_ipv4.c

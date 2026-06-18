@@ -1,11 +1,11 @@
-"""Tool-layer tests for tag ops (#73): input validation + index col_mod bump.
+"""Tool-layer tests for tag ops: input validation + index col_mod bump.
 
 A tag change never alters a note's embedding vector (tags aren't part of the
-embedding text), but it does bump col.mod. Since the #391 re-home the kernel
-op itself advances the stored watermarks WITHOUT re-embedding, so the next
-startup doesn't trigger a needless full rebuild. "Vectors untouched" is
-asserted as "no new embed call", and "watermark advanced" as "index col_mod
-matches the collection + no drift" — observable state, not host-side spies.
+embedding text), but it does bump col.mod. The kernel op itself advances the
+stored watermarks WITHOUT re-embedding, so the next startup doesn't trigger a
+needless full rebuild. "Vectors untouched" is asserted as "no new embed call",
+and "watermark advanced" as "index col_mod matches the collection + no drift" —
+observable state, not host-side spies.
 """
 
 from __future__ import annotations

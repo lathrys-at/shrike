@@ -3,7 +3,7 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 # Crate patches consumed by MODULE.bazel's crate.annotation entries.
 exports_files(glob(["*.patch"]))
 
-# #417: GCC's aarch64 outline-atomics helpers (__aarch64_ldadd4_acq_rel, …)
+# GCC's aarch64 outline-atomics helpers (__aarch64_ldadd4_acq_rel, …)
 # live in the STATIC libgcc.a, which the rustc-driven link (-nodefaultlibs +
 # the shared -lgcc_s only) never supplies — so cxx's C++ object fails to link
 # on aarch64-linux. This linkopts-only shim is injected into the cxx crate's

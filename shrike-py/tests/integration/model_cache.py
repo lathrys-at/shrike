@@ -1,10 +1,9 @@
-"""Resilient, cache-friendly fetch of the test embedding model (#83).
+"""Resilient, cache-friendly fetch of the test embedding model.
 
-The embedding CI lane was flaking on HuggingFace ``429 Too Many Requests``: the
-GGUF model was re-downloaded on every run with no retry and no persistent cache,
-so HF rate-limited the runner IP and the whole lane errored at setup. This module
-adds backoff on transient HTTP failures and lets the download be reused from a
-stable directory (populated by ``actions/cache`` in CI).
+Re-downloading the GGUF model on every run with no retry and no persistent cache
+draws HuggingFace ``429 Too Many Requests`` rate-limits, erroring the whole lane
+at setup. This module adds backoff on transient HTTP failures and lets the
+download be reused from a stable directory (populated by ``actions/cache`` in CI).
 """
 
 from __future__ import annotations
@@ -58,8 +57,8 @@ ONNX_MODEL_FILES = {
     ),
 }
 
-# A second, architecturally-different ONNX model for the embedding lane (#172
-# review): all-distilroberta-v1 is DistilRoBERTa — **768-dim** (not MiniLM's 384,
+# A second, architecturally-different ONNX model for the embedding lane:
+# all-distilroberta-v1 is DistilRoBERTa — **768-dim** (not MiniLM's 384,
 # so its own vector space, no cross-model comparison) and a **BPE tokenizer with no
 # `[PAD]`** (`token_to_id("[PAD]")` is None, so OnnxBackend's `<pad>` resolution
 # fires for real). int8 Xenova export, Apache-2.0. Pins the RoBERTa-only deltas the
@@ -74,7 +73,7 @@ DISTILROBERTA_MODEL_FILES = {
     ),
 }
 
-# The fp32 (non-quantized) export of the same MiniLM (#174). Unlike the int8 model it
+# The fp32 (non-quantized) export of the same MiniLM. Unlike the int8 model it
 # batches **bit-exact** (no dynamic activation quantization), so it's the fixture that
 # proves the batch-safety probe enables batching where it's safe. ~86 MB.
 ONNX_FP32_MODEL_DIR_NAME = "all-MiniLM-L6-v2-onnx-fp32"
@@ -83,7 +82,7 @@ ONNX_FP32_MODEL_FILES = {
     "tokenizer.json": "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
 }
 
-# The small CLIP (image<->text) for the clip backend (#162 Phase 3b): an int8 dual-encoder
+# The small CLIP (image<->text) for the clip backend: an int8 dual-encoder
 # (separate text + vision graphs) + the CLIP tokenizer + image-preprocessing config. Graphs are
 # stored flat (the backend's _resolve_files finds them at the dir root via the `variant` suffix).
 # ~147 MB. jina-clip-v2 is the production-quality option; this is the CI/test fixture.
@@ -96,11 +95,11 @@ CLIP_MODEL_FILES = {
     "preprocessor_config.json": f"{_CLIP_BASE}/preprocessor_config.json",
 }
 
-# -- Wave-2 offline-integration profile models (#667, epic #565) --------------
+# -- Wave-2 offline-integration profile models -------------------------------
 #
 # These back the pure-ONNX multi-space profile (scripts/profiles/onnx-multispace.yml:
-# embeddinggemma + MobileCLIP2), plus jina-clip-v2 pre-staged for #673 (native
-# fused-graph ClipBackend support; not consumed by any current profile). They are
+# embeddinggemma + MobileCLIP2), plus jina-clip-v2 pre-staged for native
+# fused-graph ClipBackend support (not consumed by any current profile). They are
 # NOT used by any CI test (the per-PR lane never downloads multi-GB models); they
 # exist so //scripts:serve_<profile> can
 # materialize them by dir-name (Bazel runfiles under `bazel run`, this fetch source
@@ -126,14 +125,14 @@ EMBEDDINGGEMMA_MODEL_FILES = {
 }
 
 # MobileCLIP2-S2 ONNX (text+image, 512-dim shared space) — the image leg of the
-# onnx-multispace profile. Spike #568 verified plhery/mobileclip2-onnx rev ba95759a
-# loads through ClipBackend AS-IS (flat text_model.onnx + vision_model.onnx +
+# onnx-multispace profile. plhery/mobileclip2-onnx rev ba95759a loads through
+# ClipBackend AS-IS (flat text_model.onnx + vision_model.onnx +
 # preprocessor_config.json per size subdir, a repo-root tokenizer.json) for BOTH S0
 # and S2. S2 is the better default for dogfooding: same 254 MB text encoder, a
 # larger/better 143 MB vision encoder (vs S0's 45 MB) — +98 MB buys cleaner
-# cross-modal separation (the spike's grid: cat↔cat +0.2932 S2 vs +0.2657 S0). fp32
-# graphs (batch-cleared). Apple Sample Code License (apple-amlr) on the base weights.
-# Pinned to the spike's exact revision so the bytes never drift. The preprocessor +
+# cross-modal separation (cat↔cat +0.2932 S2 vs +0.2657 S0). fp32 graphs
+# (batch-cleared). Apple Sample Code License (apple-amlr) on the base weights.
+# Pinned to an exact revision so the bytes never drift. The preprocessor +
 # repo-root tokenizer are shared across sizes (byte-identical to S0).
 MOBILECLIP2_MODEL_DIR_NAME = "mobileclip2-s2-onnx"
 _MOBILECLIP2_REV = "ba95759a5bdbaca53e9111e2550a76ec09c8fd9e"
@@ -145,15 +144,15 @@ MOBILECLIP2_MODEL_FILES = {
     "tokenizer.json": f"{_MOBILECLIP2_BASE}/tokenizer.json",
 }
 
-# jina-clip-v2 ONNX (text+image) — pre-staged for #673 (native fused-graph
-# ClipBackend support). NOTE: the canonical jinaai/jina-clip-v2 ONNX export is a
-# SINGLE FUSED model.onnx that takes text AND image inputs on every call — it does
-# NOT ship the separate text_model.onnx + vision_model.onnx graphs ClipBackend
-# requires, so it is NOT a drop-in for the dual-encoder contract as-published.
-# #673 is the deferred native work to drive that fused graph, and it will consume
-# exactly this export. It is NOT consumed by any current profile — jina-text-clip
-# uses MobileCLIP2 for its image leg. The dir/files below pin the combined int8
-# export + the root tokenizer/preprocessor. ~874 MB int8. Apache-2.0/CC.
+# jina-clip-v2 ONNX (text+image) — pre-staged for native fused-graph ClipBackend
+# support. NOTE: the canonical jinaai/jina-clip-v2 ONNX export is a SINGLE FUSED
+# model.onnx that takes text AND image inputs on every call — it does NOT ship the
+# separate text_model.onnx + vision_model.onnx graphs ClipBackend requires, so it
+# is NOT a drop-in for the dual-encoder contract as-published. The deferred native
+# work to drive that fused graph will consume exactly this export. It is NOT
+# consumed by any current profile — jina-text-clip uses MobileCLIP2 for its image
+# leg. The dir/files below pin the combined int8 export + the root
+# tokenizer/preprocessor. ~874 MB int8. Apache-2.0/CC.
 JINA_CLIP_V2_MODEL_DIR_NAME = "jina-clip-v2-onnx-int8"
 _JINA_CLIP_V2_BASE = "https://huggingface.co/jinaai/jina-clip-v2/resolve/main"
 JINA_CLIP_V2_MODEL_FILES = {
@@ -162,7 +161,7 @@ JINA_CLIP_V2_MODEL_FILES = {
     "preprocessor_config.json": f"{_JINA_CLIP_V2_BASE}/preprocessor_config.json",
 }
 
-# The small multimodal embedding model for the manual #501 image-embed harness
+# The small multimodal embedding model for the manual image-embed harness
 # (test_multimodal.py): jina-embeddings-v5-omni nano — a text GGUF + a vision
 # mmproj that embed text AND images into one 768-dim space. ~625 MB (431 MB
 # text + 194 MB vision projector). NOT used by any CI test, for two reasons:
@@ -313,22 +312,22 @@ def cached_mobileclip2_model_dir(fallback_dir: Path) -> Path:
     """The MobileCLIP2-S2 ONNX dir (text+image, 512-dim shared space; ClipBackend).
 
     Flat text_model.onnx + vision_model.onnx + preprocessor_config.json + tokenizer.json
-    (the layout spike #568 verified loads through ClipBackend as-is). ~399 MB."""
+    (the layout ClipBackend loads as-is). ~399 MB."""
     return _cached_model_dir(fallback_dir, MOBILECLIP2_MODEL_DIR_NAME, MOBILECLIP2_MODEL_FILES)
 
 
 def cached_jina_clip_v2_model_dir(fallback_dir: Path) -> Path:
     """The jina-clip-v2 int8 ONNX dir (combined model.onnx + tokenizer + preprocessor).
 
-    Pre-staged for #673 (native fused-graph ClipBackend support); not consumed by
-    any current profile. NOTE the combined-graph caveat in the module-level
+    Pre-staged for native fused-graph ClipBackend support; not consumed by any
+    current profile. NOTE the combined-graph caveat in the module-level
     declaration: the published export is NOT a ClipBackend drop-in (single fused
     graph, not split text/vision). ~874 MB."""
     return _cached_model_dir(fallback_dir, JINA_CLIP_V2_MODEL_DIR_NAME, JINA_CLIP_V2_MODEL_FILES)
 
 
 def cached_multimodal_model_dir(fallback_dir: Path) -> Path:
-    """The jina-v5-omni nano dir (text GGUF + vision mmproj) for the #501 manual
+    """The jina-v5-omni nano dir (text GGUF + vision mmproj) for the manual
     image-embed harness. ~625 MB; only fetched when the harness actually runs
     (a patched llama-server is present) or when called directly to pre-seed the
     shared cache. Returns the dir; the two files are named by MULTIMODAL_TEXT_NAME /

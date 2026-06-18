@@ -1,9 +1,9 @@
-//! The finalize-gated `log::Log` wrapper (#450, sibling of #435).
+//! The finalize-gated `log::Log` wrapper.
 //!
 //! pyo3-log's `Logger::log` runs `Python::attach` on whatever thread emits
 //! the record — for native `tracing` events (bridged via `log-always`) that
 //! is routinely a kernel-runtime thread (engine compute, the actor, timers).
-//! That attach window is exactly the #435 hazard: left ungated, a late
+//! That attach window is exactly the finalization hazard: left ungated, a late
 //! emission racing interpreter exit can straddle `Py_Finalize` and abort in
 //! `PyGILState_Release`. The gate's other claim sites live in this crate's
 //! own code; pyo3-log's lives inside the pyo3-log crate — so instead of

@@ -1,4 +1,4 @@
-"""Interpreter-teardown pins (#374 design 7; #435).
+"""Interpreter-teardown pins.
 
 The kernel's runtime threads outlive any kernel (the process-global
 runtime is never shut down); the hazard is a Python-touching task being
@@ -8,7 +8,7 @@ paths: open a kernel, attach a Python backend, do real work, and exit
 WITHOUT closing — the process must still exit cleanly (no segfault, no
 hang, no abort).
 
-The #435 lesson: "every op completed" is not enough. The bridge waker's
+The lesson: "every op completed" is not enough. The bridge waker's
 `call_soon_threadsafe` releases the GIL inside the call, so the loop thread
 can observe the result, finish `main()`, and reach `Py_Finalize` while the
 waker thread is still inside its gilstate window — on CPython 3.12/Linux
@@ -16,7 +16,7 @@ that aborted the process (`PyGILState_Release: thread state ... must be
 current when releasing`). The finalization gate (`finalize_gate.rs`, armed
 via atexit) drains those windows before finalization begins; these pins
 cover the quiesced exit, the ops-still-in-flight exit, that same exit with
-the pyo3-log bridge installed (#450 — its `Python::attach` rides the gate
+the pyo3-log bridge installed (its `Python::attach` rides the gate
 too), and the gate's refusal path directly.
 """
 
@@ -66,7 +66,7 @@ def _run_teardown_script(tmp_path, body: str) -> None:
         capture_output=True,
         text=True,
         timeout=120,
-        # Diagnosis rig for the intermittent Linux SIGABRT (#435): faulthandler
+        # Diagnosis rig for the intermittent Linux SIGABRT: faulthandler
         # dumps every Python thread's stack into the captured stderr on a fatal
         # signal, and a Rust panic (if that's what aborts) carries its backtrace.
         env={**os.environ, "PYTHONFAULTHANDLER": "1", "RUST_BACKTRACE": "1"},
@@ -74,7 +74,7 @@ def _run_teardown_script(tmp_path, body: str) -> None:
     if proc.returncode != 0:
         # Assertion explanations can be truncated by the report; the captured
         # stderr stream is shown in full on failure — put the whole transcript
-        # there so a CI flake carries its own diagnosis (#435).
+        # there so a CI flake carries its own diagnosis.
         sys.stderr.write(
             f"teardown subprocess rc={proc.returncode}\n"
             f"--- subprocess stdout ---\n{proc.stdout}\n"
@@ -85,7 +85,7 @@ def _run_teardown_script(tmp_path, body: str) -> None:
 
 
 def test_exit_without_close_is_clean(tmp_path) -> None:
-    """The original #374 D pin: ops run to COMPLETION, exit without close()."""
+    """The original pin: ops run to COMPLETION, exit without close()."""
     _run_teardown_script(
         tmp_path,
         """
@@ -107,7 +107,7 @@ def test_exit_without_close_is_clean(tmp_path) -> None:
 
 
 def test_exit_with_inflight_ops_is_clean(tmp_path) -> None:
-    """Ops still IN FLIGHT at exit (#435's widened window).
+    """Ops still IN FLIGHT at exit (the widened window).
 
     Un-awaited ops keep running on the kernel runtime after the loop closes
     (`spawn_op` detaches observation, never aborts the work), so their embeds
@@ -136,11 +136,11 @@ def test_exit_with_inflight_ops_is_clean(tmp_path) -> None:
 
 
 def test_exit_with_logging_bridge_and_inflight_ops_is_clean(tmp_path) -> None:
-    """The pyo3-log attach path under the gate (#450).
+    """The pyo3-log attach path under the gate.
 
     Every server process calls `init_logging()`, after which ANY native
     `log`/`tracing` emission from a kernel-runtime thread attaches the GIL
-    inside pyo3-log — an attach window the #449 site-by-site pins never
+    inside pyo3-log — an attach window the site-by-site pins never
     exercised (none of the other teardown scripts install the bridge). Run
     the in-flight-ops exit with the bridge installed, Python logging
     configured, and native log levels wide open: late emissions racing

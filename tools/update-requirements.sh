@@ -6,7 +6,7 @@
 #
 # The lock is universal (cross-platform, marker-guarded) and hashed, and includes
 # the extras the Bazel test/build graph needs (dev tooling; onnxruntime is a hard
-# dependency since #497). gpu is excluded on purpose: onnxruntime-gpu conflicts
+# dependency). gpu is excluded on purpose: onnxruntime-gpu conflicts
 # with the base onnxruntime carrier.
 set -euo pipefail
 
@@ -18,7 +18,7 @@ UV_VERSION=0.11.19
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-# pyproject.toml lives in the shrike-py/ unit (#731).
+# pyproject.toml lives in the shrike-py/ unit.
 uvx "uv@${UV_VERSION}" pip compile shrike-py/pyproject.toml \
   --python-version 3.12 \
   --universal \

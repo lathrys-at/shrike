@@ -125,7 +125,7 @@ def index_status(ctx: click.Context) -> None:
         output.emit_json(idx_status)
         return
 
-    # Shared renderer (#684): identical to the `server status` Index block,
+    # Shared renderer: identical to the `server status` Index block,
     # including the per-modality sub-index breakdown.
     status_render.render_index(idx_status)
 

@@ -1,4 +1,4 @@
-//! The Shrike C-ABI binding (#504): the action exchange over a C ABI.
+//! The Shrike C-ABI binding: the action exchange over a C ABI.
 //!
 //! A native Swift/Kotlin app embeds the kernel in-process and drives it
 //! through these `extern "C"` functions — the shape the tokio pivot reserved
@@ -17,7 +17,7 @@
 //!   load-bearing: a `current_thread` runtime polls `spawn_op`'d tasks ONLY
 //!   while a thread drives it, so without it the async ops below would never
 //!   run and their callbacks would never fire. [`shrike_runtime_shutdown`]
-//!   stops + joins the driver at teardown (#393's fuller suspension handling
+//!   stops + joins the driver at teardown (fuller suspension handling
 //!   lands in a later slice).
 //! - [`shrike_open`] / [`shrike_close`] manage a kernel handle (an opaque
 //!   `Arc<Kernel>` boxed behind a raw pointer).
@@ -27,7 +27,7 @@
 //!   work is never an option here: `spawn_op`'s detach-not-abort contract
 //!   means the op always runs; the callback is the only way to observe it.
 //! - [`shrike_attach_remote_embedder`] composes the remote embeddings engine
-//!   (route 2 async-direct, #721 S2: `RemoteEmbedder` -> `AsyncWithPolicy`, no
+//!   (route 2 async-direct: `RemoteEmbedder` -> `AsyncWithPolicy`, no
 //!   `Blocking` adapter) into the kernel's `Arc<dyn Embedder>` slot, mirroring
 //!   `native_embedder.rs::from_remote` minus the PyO3 wrappers.
 //! - [`shrike_string_free`] returns ownership of a string this library
@@ -37,7 +37,7 @@
 //!   nothing it didn't allocate; the entry point exists for the typed-result
 //!   surface a later slice adds).
 //!
-//! ## Marshaling rules (epic #265 convention 6)
+//! ## Marshaling rules
 //!
 //! As on the PyO3 side, only coarse, batched data crosses the C ABI: C strings
 //! (UTF-8) and byte buffers, with structured payloads carried as a single JSON
@@ -235,7 +235,7 @@ fn outcome_json(outcome: NativeResult<String>) -> String {
 
 // ── runtime ─────────────────────────────────────────────────────────────────
 
-/// The `current_thread` runtime's DRIVER state (#504, the joint-review fix).
+/// The `current_thread` runtime's DRIVER state.
 ///
 /// A `current_thread` tokio runtime has no worker threads: a spawned task
 /// makes progress ONLY while some thread is parked inside
@@ -250,7 +250,7 @@ fn outcome_json(outcome: NativeResult<String>) -> String {
 /// dedicated OS thread parked in `shrike_kernel::block_on(park)` for the
 /// runtime's whole life — the canonical "runtime on a dedicated thread, post
 /// work via the Handle" mobile shape (one async-executing thread the host can
-/// suspend/stop deterministically, #393). `park` awaits this `Notify`; once
+/// suspend/stop deterministically). `park` awaits this `Notify`; once
 /// the runtime is driven, every `spawn_op` task — and `shrike_close`'s
 /// spawned close — runs to completion. `shrike_runtime_shutdown` notifies and
 /// joins the driver.
@@ -263,15 +263,14 @@ struct Driver {
 #[cfg(feature = "anki-core")]
 static DRIVER: std::sync::Mutex<Option<Driver>> = std::sync::Mutex::new(None);
 
-/// Terminal "the dedicated driver is shutting down / shut down" flag (#597,
-/// #637).
+/// Terminal "the dedicated driver is shutting down / shut down" flag.
 ///
 /// Set (under [`ADMIT_LOCK`]) by [`shrike_runtime_shutdown`] **before** it wakes
 /// the driver to drain. Once set, [`admit_op`] refuses new ops, so they
 /// FAST-FAIL a completion through the callback instead of being dispatched onto
 /// a runtime that is being torn down (the undriven `current_thread` runtime
 /// would queue a task that is never polled — its callback would never fire and
-/// [`shrike_close`]'s `rx.recv()` would block forever; the S14b-1 hang,
+/// [`shrike_close`]'s `rx.recv()` would block forever; a hang
 /// realistic on a racy iOS suspend/teardown). Ops admitted BEFORE the store are
 /// counted in [`INFLIGHT`] and the driver drains them to completion first.
 ///
@@ -283,7 +282,7 @@ static DRIVER: std::sync::Mutex<Option<Driver>> = std::sync::Mutex::new(None);
 #[cfg(feature = "anki-core")]
 static DRIVER_SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// In-flight op accounting for the drain-on-shutdown (#637). An op admitted by
+/// In-flight op accounting for the drain-on-shutdown. An op admitted by
 /// [`admit_op`] increments this; [`finish_op`] decrements it when the op's task
 /// (and its callback) has run. The driver's shutdown path drains until this is
 /// zero, so an op that was admitted BEFORE shutdown still completes rather than
@@ -297,7 +296,7 @@ static INFLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize
 static DRAINED: std::sync::LazyLock<tokio::sync::Notify> =
     std::sync::LazyLock::new(tokio::sync::Notify::new);
 
-/// Serializes the admission decision against shutdown (#637). The op path takes
+/// Serializes the admission decision against shutdown. The op path takes
 /// it to atomically "check the flag AND increment INFLIGHT"; shutdown takes it
 /// to "set the flag" — so an op can never read the flag as `false` and then
 /// increment AFTER shutdown has already snapshotted INFLIGHT and started
@@ -367,7 +366,7 @@ pub extern "C" fn shrike_runtime_init() -> bool {
                 .name("shrike-cabi-rt".to_string())
                 .spawn(move || {
                     // Drive the runtime for its life. On the shutdown signal,
-                    // DRAIN already-spawned ops before returning (#637): a
+                    // DRAIN already-spawned ops before returning: a
                     // current_thread runtime only polls spawned tasks while a
                     // thread is inside block_on, so returning the instant we're
                     // notified would strand any op admitted just before shutdown
@@ -417,8 +416,8 @@ pub extern "C" fn shrike_runtime_init() -> bool {
 /// default multi-thread mode, or already shut down). After this the
 /// `current_thread` runtime is no longer driven.
 ///
-/// **An op is never orphaned by shutdown — sequential OR concurrent (#597 +
-/// #637).** An op issued strictly after this has returned fast-fails through
+/// **An op is never orphaned by shutdown — sequential OR concurrent.** An op
+/// issued strictly after this has returned fast-fails through
 /// the callback (the flag is set; the runtime is provably undriven). An op
 /// issued CONCURRENTLY with this resolves to one of two safe outcomes, never a
 /// hang: either it was admitted before the flag store and the driver drains it
@@ -431,16 +430,14 @@ pub extern "C" fn shrike_runtime_shutdown() {
     ffi_guard("shrike_runtime_shutdown", (), || {
         #[cfg(feature = "anki-core")]
         if let Some(driver) = DRIVER.lock().expect("driver lock poisoned").take() {
-            // Set the flag BEFORE notifying the driver (#637), under ADMIT_LOCK
+            // Set the flag BEFORE notifying the driver, under ADMIT_LOCK
             // so it is atomic with respect to op admission. The ordering closes
             // the concurrent-op race: an op issued while shutdown runs either
             //   (a) was admitted before this store → it's counted in INFLIGHT,
             //       so the driver's drain loop waits for it to complete + fire;
             //   (b) reaches `admit_op` after this store → it fast-fails through
             //       the callback (the runtime is being torn down).
-            // Neither outcome strands the op on a dying runtime. (#597 only
-            // covered the strictly-after-shutdown case; this closes the window
-            // between the old notify and store.)
+            // Neither outcome strands the op on a dying runtime.
             {
                 let _guard = ADMIT_LOCK.lock().expect("admit lock poisoned");
                 DRIVER_SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
@@ -500,7 +497,7 @@ pub unsafe extern "C" fn shrike_open(
                 )))
             }
         };
-        // Admit the open like any other op (#637): fast-fail if shut down,
+        // Admit the open like any other op: fast-fail if shut down,
         // otherwise count it so a concurrent shutdown drains it.
         if !admit_op() {
             return Dispatch::Now(Err(NativeError::unavailable(
@@ -541,7 +538,7 @@ pub unsafe extern "C" fn shrike_close(handle: *mut ShrikeHandle) {
             return;
         }
         let handle = Box::from_raw(handle);
-        // Post-shutdown fast-path (#597/#637): admit the close like any op. If
+        // Post-shutdown fast-path: admit the close like any op. If
         // the driver is shut down, `admit_op` returns false and the spawn +
         // std-channel bridge below (which would block forever on rx.recv(),
         // since the spawned close is queued onto an undriven runtime and never
@@ -550,14 +547,14 @@ pub unsafe extern "C" fn shrike_close(handle: *mut ShrikeHandle) {
         // drain anyway; dropping the Box reclaims the memory and is the most we
         // can soundly do. When admitted, the close is counted in INFLIGHT so a
         // CONCURRENT shutdown DRAINS it (drives it to completion) rather than
-        // stranding this thread on rx.recv() — the #637 close path.
+        // stranding this thread on rx.recv() — the close path.
         if !admit_op() {
             drop(handle);
             return;
         }
         let kernel = Arc::clone(&handle.kernel);
         // Drive close to completion on the kernel runtime via the SPAWN +
-        // std-channel bridge (#504 driver fix): spawn the close onto the
+        // std-channel bridge: spawn the close onto the
         // runtime (`spawn_op` — driven by the parked current_thread driver, or
         // by the default multi-thread workers if no driver was installed) and
         // block THIS C thread on a plain std channel for the result. This
@@ -600,7 +597,7 @@ pub unsafe extern "C" fn shrike_close(handle: *mut ShrikeHandle) {
 ///   result is the `Vec<UpsertNoteResult>` JSON.
 /// - `search` — `{"query": "...", "top_k": N}`; result is `[[note_id, score, [[signal, rank], ...]], ...]`.
 /// - `delete_notes` — `{"note_ids": [...]}`; result is `{"deleted": [...],
-///   "not_found": [...]}` (#604: the maintained single-op kernel delete).
+///   "not_found": [...]}` (the maintained single-op kernel delete).
 /// - `collection_info` — `{}`; result is `{"note_count": N}` (the read the
 ///   smoke verifies; the full info surface grows in a later slice).
 ///
@@ -645,7 +642,7 @@ pub unsafe extern "C" fn shrike_op(
                 )))
             }
         };
-        // Admit the op (#597/#637): fast-fail through the callback if the driver
+        // Admit the op: fast-fail through the callback if the driver
         // is shut down (the undriven current_thread runtime would queue a task
         // that never runs); otherwise count it in INFLIGHT so a concurrent
         // shutdown DRAINS it instead of stranding it.
@@ -709,7 +706,7 @@ async fn dispatch(kernel: Arc<Kernel>, action: String, params: String) -> Native
                 note_ids: Vec<i64>,
             }
             let args: Args = parse(&params)?;
-            // The maintained kernel op (#604) returns {deleted, not_found} in
+            // The maintained kernel op returns {deleted, not_found} in
             // its single write job — the same shape the MCP `delete_notes`
             // action serves. Serialize it through as the result JSON.
             let response = kernel.delete_notes(args.note_ids).await?;
@@ -717,7 +714,7 @@ async fn dispatch(kernel: Arc<Kernel>, action: String, params: String) -> Native
         }
         "collection_info" => {
             // The read the smoke verifies: a scoped `note_count` (a COUNT
-            // query, not a materialize-all-ids scan — #445 "read only what the
+            // query, not a materialize-all-ids scan — "read only what the
             // op needs"). The full collection_info surface (note types, decks,
             // tags, stats) lands in a later slice.
             let count = kernel.collection().run(|core| core.note_count()).await??;
@@ -742,18 +739,18 @@ fn default_top_k() -> usize {
 // ── the remote embedder slot ────────────────────────────────────────────────
 
 /// Compose the remote-embeddings engine into one of the kernel's embed SPACES
-/// (#233) — the relay-offload path (a desktop/DIY kernel over the relay) or any
+/// — the relay-offload path (a desktop/DIY kernel over the relay) or any
 /// OpenAI-compatible cloud endpoint. Mirrors `native_embedder.rs::from_remote`
 /// minus the PyO3 wrappers: `RemoteEmbedder` -> `AsyncWithPolicy`
 /// (host-assembled fingerprint/dim + the `safe_batch` text chunking) ->
-/// `Arc<dyn Embedder>`. Route 2 async-direct (#721 S2): no `Blocking` adapter —
+/// `Arc<dyn Embedder>`. Route 2 async-direct: no `Blocking` adapter —
 /// the kernel awaits the engine's reqwest IO on its runtime.
 ///
-/// The embed slot is an ORDERED SET of spaces since #233: a Swift/Kotlin caller
+/// The embed slot is an ORDERED SET of spaces: a Swift/Kotlin caller
 /// that wants a dedicated text space PLUS a separate platform vision space
 /// calls this **once per space** (the resolved ABI decision — one attach per
 /// space, not a batched attach). `space_key` is the space's CONTENT identity
-/// (reorder-stable, #233); two distinct keys are two distinct spaces, re-using
+/// (reorder-stable); two distinct keys are two distinct spaces, re-using
 /// a key REPLACES that space in place. When `space_key` is null the kernel keys
 /// off `fingerprint` (and, failing that, the endpoint's own identity), so a
 /// single-space mobile host attaches exactly as before.
@@ -817,7 +814,7 @@ pub unsafe extern "C" fn shrike_attach_remote_embedder(
                         model,
                     },
                 )?;
-                // Route 2: the remote embedder is async-direct (#721 S2) — it
+                // Route 2: the remote embedder is async-direct — it
                 // implements the async `Embedder` trait, so it attaches WITHOUT
                 // the `Blocking` adapter. `AsyncWithPolicy` carries the host
                 // fingerprint/dim and chunks the text path by `safe_batch` (the
@@ -907,7 +904,7 @@ fn to_json<T: serde::Serialize>(value: &T) -> NativeResult<String> {
 ///
 /// The caller MUST have already counted this op via [`admit_op`]; the spawned
 /// task calls [`finish_op`] in its tail (after the callback fires) so the
-/// shutdown drain (#637) waits for it to complete. `finish_op` runs even if the
+/// shutdown drain waits for it to complete. `finish_op` runs even if the
 /// inner future or the callback panics — tokio's task harness unwinds the task,
 /// but the count must not leak, so it's released via a drop guard.
 #[cfg(feature = "anki-core")]

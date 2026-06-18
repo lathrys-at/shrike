@@ -1,4 +1,4 @@
-"""CLI behavior for `shrike profile` (#66, slices 1-2).
+"""CLI behavior for `shrike profile`.
 
 These commands are pure config operations — they never reach the server — so
 the tests drive the real CLI against an isolated --config file and assert on

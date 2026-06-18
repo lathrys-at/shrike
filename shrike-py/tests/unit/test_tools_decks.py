@@ -1,11 +1,10 @@
-"""Tool-layer tests for deck ops (#74): col_mod bump without vector changes.
+"""Tool-layer tests for deck ops: col_mod bump without vector changes.
 
 Deck create/rename/delete-empty never change a note's embedding text, so they
 must advance the kernel's stored watermark (avoiding a spurious rebuild)
-WITHOUT touching vectors. Since the #391 re-home the kernel op itself carries
-that tail: "no vectors touched" is "no new embed call"; "bumped" is "the
-index col_mod matches the collection + no drift" — observable state, not
-host-side spies.
+WITHOUT touching vectors. The kernel op itself carries that tail: "no vectors
+touched" is "no new embed call"; "bumped" is "the index col_mod matches the
+collection + no drift" — observable state, not host-side spies.
 """
 
 from __future__ import annotations
