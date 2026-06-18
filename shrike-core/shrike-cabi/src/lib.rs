@@ -1,9 +1,9 @@
-//! The Shrike mobile binding (#504): the action exchange over a C ABI.
+//! The Shrike C-ABI binding (#504): the action exchange over a C ABI.
 //!
 //! A native Swift/Kotlin app embeds the kernel in-process and drives it
-//! through these `extern "C"` functions — the principled successor to the
-//! deleted shrike-cabi, the shape the tokio pivot reserved ("a future
-//! C/Swift layer adapts the action exchange with completion callbacks").
+//! through these `extern "C"` functions — the shape the tokio pivot reserved
+//! ("a future C/Swift layer adapts the action exchange with completion
+//! callbacks").
 //! **Zero CPython**: nothing here links libpython (pinned by the
 //! `no_libpython` link-property test), so the no-Python-on-mobile property
 //! is structural, not aspirational.
@@ -364,7 +364,7 @@ pub extern "C" fn shrike_runtime_init() -> bool {
             // kernel's block_on, which calls it on the installed runtime) for
             // the runtime's life, so every Handle::spawn'd op is driven.
             let thread = std::thread::Builder::new()
-                .name("shrike-mobile-rt".to_string())
+                .name("shrike-cabi-rt".to_string())
                 .spawn(move || {
                     // Drive the runtime for its life. On the shutdown signal,
                     // DRAIN already-spawned ops before returning (#637): a

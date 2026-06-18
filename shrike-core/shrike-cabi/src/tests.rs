@@ -118,7 +118,7 @@ fn temp_dir() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "shrike-mobile-{}-{}",
+        "shrike-cabi-{}-{}",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
@@ -315,7 +315,7 @@ fn a_now_dispatch_fires_exactly_once() {
 /// Mirror of the kernel's `no_cpython_smoke` link guarantee, made a direct
 /// artifact assertion (#504's verification line: "the no-Python property
 /// pinned by the link — no libpython anywhere in the artifact"). The test
-/// binary STATICALLY links the whole `shrike-mobile` crate and its kernel
+/// binary STATICALLY links the whole `shrike-cabi` crate and its kernel
 /// closure, so if any of it pulled in libpython, this binary would reference
 /// it. We inspect the running test binary's symbols/load commands for any
 /// Python reference and assert there is none.

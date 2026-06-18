@@ -24,7 +24,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use shrike_mobile::{
+use shrike_cabi::{
     shrike_close, shrike_op, shrike_open, shrike_runtime_init, shrike_runtime_shutdown,
     ShrikeHandle,
 };
@@ -94,7 +94,7 @@ fn full_flow_fires_callbacks_under_the_current_thread_driver() {
     // A second init is a no-op false (one runtime, one driver).
     assert!(!shrike_runtime_init(), "a second runtime_init is a no-op");
 
-    let dir = std::env::temp_dir().join(format!("shrike-mobile-ct-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("shrike-cabi-ct-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let collection = dir.join("c.anki2").to_string_lossy().into_owned();
     let cache = dir.join("cache").to_string_lossy().into_owned();

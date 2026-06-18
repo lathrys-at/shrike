@@ -19,7 +19,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use shrike_mobile::{
+use shrike_cabi::{
     shrike_close, shrike_op, shrike_open, shrike_runtime_init, shrike_runtime_shutdown,
     ShrikeHandle,
 };
@@ -62,7 +62,7 @@ fn op_racing_shutdown_always_fires_its_callback_bounded() {
         shrike_runtime_init(),
         "first init installs the current_thread runtime"
     );
-    let dir = std::env::temp_dir().join(format!("shrike-mobile-race-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("shrike-cabi-race-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let collection = dir.join("c.anki2").to_string_lossy().into_owned();
     let cache = dir.join("cache").to_string_lossy().into_owned();

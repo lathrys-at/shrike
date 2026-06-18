@@ -12,7 +12,7 @@ exports_files(["Cargo.toml"])
 #                             pinned) + remote (the HTTP engines). Named by
 #                             //shrike-core/shrike-pyo3 (engine-ort + engine-remote).
 #  - `shrike_engine_remote` — the MOBILE set: remote ONLY, no ort. Named by
-#                             //shrike-core/shrike-mobile (engine-remote, no
+#                             //shrike-core/shrike-cabi (engine-remote, no
 #                             in-process ort on device).
 #
 # The crate NAME stays `shrike_engine` on both (only the target name disambiguates),

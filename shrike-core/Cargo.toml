@@ -10,6 +10,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "shrike-cabi",
     "shrike-cache",
     "shrike-collection",
     "shrike-derived",
@@ -21,7 +22,6 @@ members = [
     "shrike-kernel",
     "shrike-llama-server",
     "shrike-media",
-    "shrike-mobile",
     "shrike-network",
     "shrike-process",
     "shrike-pyo3",

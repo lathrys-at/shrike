@@ -7,7 +7,7 @@
 //! in `shrike-pyo3`, the one crate allowed to depend on `pyo3` (enforced by
 //! `//shrike-core:layering_check`); the marshaling/threading conventions are
 //! documented on the binding crates that enforce them (`shrike-pyo3`,
-//! `shrike-mobile`), not here.
+//! `shrike-cabi`), not here.
 //!
 //! # Error taxonomy
 //!

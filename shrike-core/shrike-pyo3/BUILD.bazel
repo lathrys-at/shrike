@@ -79,7 +79,7 @@ rust_shared_library(
 )
 
 # The lean (mobile) build's CI proof now lives on its OWN crate (#504):
-# //shrike-core/shrike-mobile is the real mobile binding (the C-ABI cdylib, zero
+# //shrike-core/shrike-cabi is the real mobile binding (the C-ABI cdylib, zero
 # pyo3), and its `rust_shared_library` + `rust_test` exercise the mobile
 # feature set (anki-core + engine-remote, no ort, no managers) on the per-PR
 # `//...` lane — the `mobile_skeleton` reuse-of-shrike-pyo3-sources proof it

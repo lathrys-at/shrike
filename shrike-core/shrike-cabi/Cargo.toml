@@ -1,8 +1,7 @@
-# The Shrike MOBILE binding crate (#504): the action exchange over a C ABI —
-# the principled successor to the deleted shrike-cabi, and the second of the
-# two kernel builds (docs/distribution.md's build matrix). Sibling of
-# shrike-pyo3, but it sees ZERO pyo3: a native Swift/Kotlin app embeds the
-# kernel in-process and drives the action exchange with C completion
+# The Shrike C-ABI binding crate (#504): the action exchange over a C ABI, and
+# the second of the two kernel builds (docs/distribution.md's build matrix).
+# Sibling of shrike-pyo3, but it sees ZERO pyo3: a native Swift/Kotlin app
+# embeds the kernel in-process and drives the action exchange with C completion
 # callbacks, so no CPython links into the artifact (pinned by the
 # `no_libpython` link-property test, mirroring the kernel's no_cpython_smoke).
 #
@@ -11,15 +10,15 @@
 # never engine-ort and never the managers. A capability not compiled in is a
 # config error naming the profile; a declared-but-failed one degrades.
 [package]
-name = "shrike-mobile"
+name = "shrike-cabi"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "The Shrike mobile binding crate — the action exchange over a C ABI (#504). No CPython."
+description = "The Shrike C-ABI binding crate — the action exchange over a C ABI (#504). No CPython."
 
 [lib]
-name = "shrike_mobile"
+name = "shrike_cabi"
 # cdylib: the xcframework/AAR artifact. staticlib: static linking into an iOS
 # app. rlib: so the in-crate C-ABI smoke test (a Rust C-caller) can link the
 # functions. The no_libpython link-property test asserts none of these carry

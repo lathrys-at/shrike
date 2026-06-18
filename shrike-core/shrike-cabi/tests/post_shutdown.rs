@@ -22,7 +22,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use shrike_mobile::{
+use shrike_cabi::{
     shrike_close, shrike_op, shrike_open, shrike_runtime_init, shrike_runtime_shutdown,
     ShrikeHandle,
 };
@@ -69,8 +69,7 @@ fn post_shutdown_op_and_close_fast_fail_via_callback_not_hang() {
         "shrike_runtime_init must install the current_thread runtime first in this process"
     );
 
-    let dir =
-        std::env::temp_dir().join(format!("shrike-mobile-postshutdown-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("shrike-cabi-postshutdown-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let collection = dir.join("c.anki2").to_string_lossy().into_owned();
     let cache = dir.join("cache").to_string_lossy().into_owned();
