@@ -1348,7 +1348,9 @@ module load order clean and the layering read top-down. The folder still has a
 (`harness.resolve_bundle` imports `CollectionBundle` inside the function, the
 #68 routing-resolver pattern) — the same shape as the lazy `harness →
 cli.config` seam. The reorg relocates these lazy seams; it does not try to
-remove them (that would be redesign, not reorg).
+remove them (that would be redesign, not reorg). (Hoisting `CollectionBundle` to a
+neutral home is a possible future cleanup that would drop even the lazy edge; it
+is deliberately not done here.)
 
 **Public surface is unchanged.** Import name `shrike`, the `shrike` CLI,
 `ShrikeClient`'s path (top-level `shrike.client`), and `python -m shrike.server`
