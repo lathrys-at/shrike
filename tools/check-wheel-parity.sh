@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Parity gate (#245, reshaped by #497): the Bazel py_wheel is the release artifact;
+# Parity gate: the Bazel py_wheel is the release artifact;
 # the hatchling wheel is the dev-lane build (pip install -e). The Python payload and
 # metadata must stay equivalent so the dev lane exercises what ships. Builds both and
 # compares the substantive metadata (name, deps, extras, project URLs,
 # entry-point-bearing fields, long description) and the packaged `shrike/` source
-# files. The Bazel wheel ADDITIONALLY ships the `shrike_native/` package (#497 — the
+# files. The Bazel wheel ADDITIONALLY ships the `shrike_native/` package (the
 # platform-tagged wheel carries the extension); the gate asserts that payload is
 # present (incl. the compiled _native.so) and excludes it from the file comparison
 # (the hatchling wheel is pure Python by design; the dev venv gets shrike_native from
@@ -28,7 +28,7 @@ echo "Building the Bazel wheel…" >&2
 bazel_whl="$("$repo_root/tools/build-wheel.sh" "$work/bazel")"
 
 echo "Building the hatchling wheel…" >&2
-# pyproject.toml lives in the shrike-py/ unit (#731) — point uv at it.
+# pyproject.toml lives in the shrike-py/ unit — point uv at it.
 uv build --wheel "$repo_root/shrike-py" --out-dir "$work/hatch" >&2
 hatch_whl="$(ls "$work"/hatch/*.whl | head -1)"
 
@@ -74,7 +74,7 @@ bazel_meta, bazel_files, bazel_native = load(sys.argv[1])
 hatch_meta, hatch_files, _ = load(sys.argv[2])
 
 ok = True
-# The release wheel must actually carry the extension (#497) — a pure-Python
+# The release wheel must actually carry the extension — a pure-Python
 # shrike-mcp cannot run (the kernel is shrike_native).
 if "shrike_native/_native.so" not in bazel_native:
     print(f"  MISMATCH native payload: bazel wheel lacks shrike_native/_native.so "

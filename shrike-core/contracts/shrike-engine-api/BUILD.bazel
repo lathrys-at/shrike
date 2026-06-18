@@ -4,7 +4,7 @@ package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
-# The engine contract (#342): the traits the kernel consumes and every engine
+# The engine contract: the traits the kernel consumes and every engine
 # crate implements. A LEAF — no engine deps, no kernel dep, no pyo3.
 rust_library(
     name = "shrike_engine_api",
@@ -24,7 +24,7 @@ rust_test(
     crate = ":shrike_engine_api",
     deps = [
         # Test-only: decode the pure-Rust BMP probe images to verify validity
-        # (#211; production code emits raw bytes — no image dep in the leaf).
+        # (production code emits raw bytes — no image dep in the leaf).
         "@crates//:image",
         "@crates//:serde_json",
     ],

@@ -19,8 +19,8 @@ set -euo pipefail
 # which carries [tool.coverage.*]) are found regardless of cwd.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Since the native cutover the suite imports shrike_native, which pip alone
-# doesn't build — fail early with the fix instead of an ImportError wall (#400).
+# The suite imports shrike_native, which pip alone doesn't build — fail early
+# with the fix instead of an ImportError wall.
 if ! python -c 'import shrike_native' 2>/dev/null; then
   echo "shrike_native is not importable — build it first: scripts/build-native.sh" >&2
   exit 1
@@ -48,7 +48,7 @@ if [ ! -f "$HOOK" ]; then
   cp "$ROOT/tools/coverage_subprocess.pth" "$HOOK"
 fi
 
-# The [tool.coverage.*] config lives in the harness pyproject, now under shrike-py/ (#731).
+# The [tool.coverage.*] config lives in the harness pyproject under shrike-py/.
 export COVERAGE_PROCESS_START="$ROOT/shrike-py/pyproject.toml"
 
 # Combined `-n auto` run over both suites, matching CI. `-m "not embedding and not

@@ -1,23 +1,21 @@
 load("@rules_python//python:defs.bzl", "py_test")
 load("@shrike_pip//:requirements.bzl", "requirement")
 
-# Build-invoked tooling (#695). This package is the home for things the *build*
+# Build-invoked tooling. This package is the home for things the *build*
 # runs — version-pin locks and their tripwires, sdist/wheel builders, the
 # workspace-status stamp, and the hermetic-toolchain CI smoke tests below. See
 # README.md for the scripts/ vs tools/ vs bin/ boundary.
 
 # The pinned llama.cpp lock, consumed as `data` by :llama_lock_in_sync_test —
 # the de-dup tripwire (check_llama_lock.py) that asserts it matches MODULE.bazel's
-# llama_server_* http_archives (#566). The lock lives here, beside its checker and
-# writer (update-llama-lock.sh), mirroring the sibling bazel.lock build-pin (#695
-# reunited the split llama-lock concern).
+# llama_server_* http_archives. The lock lives here, beside its checker and
+# writer (update-llama-lock.sh), mirroring the sibling bazel.lock build-pin.
 exports_files(["llama-server.lock"])
 
-# Phase 0 make-or-break spike (#242): the native-dependency wheels must import and
-# run on Bazel's hermetic CPython toolchain, on every target platform. If this
-# fails, the "consume native deps as wheels" assumption is wrong. See
-# import_spike.py for what it exercises. A live, non-manual smoke test — every
-# `bazel test //...` runs it.
+# The native-dependency wheels must import and run on Bazel's hermetic CPython
+# toolchain, on every target platform. If this fails, the "consume native deps
+# as wheels" assumption is wrong. See import_spike.py for what it exercises. A
+# live, non-manual smoke test — every `bazel test //...` runs it.
 py_test(
     name = "import_spike",
     size = "small",
@@ -31,9 +29,8 @@ py_test(
     ],
 )
 
-# Phase 1 smoke (#243): the shrike library + its declared deps import cleanly and
-# a pure function runs. Broader pytest migration is Phase 2 (#244). A live,
-# non-manual smoke test — every `bazel test //...` runs it.
+# Smoke: the shrike library + its declared deps import cleanly and a pure
+# function runs. A live, non-manual smoke test — every `bazel test //...` runs it.
 py_test(
     name = "library_smoke",
     size = "small",
@@ -42,7 +39,7 @@ py_test(
     deps = ["//shrike-py/src/shrike:shrike"],
 )
 
-# De-dup tripwire (#566): tools/llama-server.lock and MODULE.bazel duplicate the
+# De-dup tripwire: tools/llama-server.lock and MODULE.bazel duplicate the
 # pinned llama.cpp tag + the four per-platform SHA256s (Bazel can't read the lock at
 # module-resolution time). This fails CI the moment they drift — a bump applied to
 # one but not the other. Pure stdlib, so it's also a plain pytest unit (pip lane,

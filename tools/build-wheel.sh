@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Build the release wheel via Bazel and give it its real filename (#245/#497).
+# Build the release wheel via Bazel and give it its real filename.
 #
 # py_wheel stamps the tag-derived version (STABLE_VERSION) into the wheel's
 # METADATA + .dist-info, but Bazel computes the output *filename* at analysis time
 # — before stamping — so it ships as `shrike_py-{STABLE_VERSION}-<tags>.whl`.
 # This copies it to the metadata's actual version, preserving the python/abi/platform
-# tags (cp312-abi3-<platform> since #497 — the wheel carries the native extension).
+# tags (cp312-abi3-<platform> — the wheel carries the native extension).
 # Used by release.yml and locally.
 #
 # Usage: tools/build-wheel.sh [OUT_DIR]   (default: dist/)

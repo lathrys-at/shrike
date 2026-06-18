@@ -1,4 +1,4 @@
-"""Build-time model assembly + per-profile launcher targets for `//scripts:serve_<profile>` (#699).
+"""Build-time model assembly + per-profile launcher targets for `//scripts:serve_<profile>`.
 
 The dogfooding launcher (`scripts/serve.py`) boots a real Shrike server from a
 checked-in, path-free capability *profile*. Each profile names its onnx models by
@@ -14,9 +14,9 @@ BUILD TIME (`copy_file` into ``models/<dir-name>/<file>``), then declares one
 so running one profile no longer drags every profile's externals. The single
 ``_MODEL_FILES`` table below is the ONE source of truth for which externals make up
 each model dir; the macro derives both the `copy_file` rules and each launcher's
-``data`` from it, so the old runtime ``_model_sources()``↔``data`` hand-sync (a
-"missing runfile = a forgotten dep" footgun) is gone — adding a model is one row
-here, not a row in serve.py + a hand-mirrored ``data`` entry.
+``data`` from it, so there is no runtime ↔ ``data`` hand-sync to keep aligned (a
+"missing runfile = a forgotten dep" footgun) — adding a model is one row here, not
+a row in serve.py + a hand-mirrored ``data`` entry.
 
 The server reads the assembled dirs IN PLACE from runfiles (no runtime copy): the
 launcher resolves each model dir-name to its absolute runfiles path and writes that
@@ -55,7 +55,7 @@ _MODEL_FILES = {
         ("@model_embeddinggemma_tokenizer//file", "tokenizer.json"),
     ],
     # MobileCLIP2-S2 image leg (onnx-multispace): text + vision graphs + preprocessor
-    # + tokenizer, flat in one dir (the ClipBackend layout spike #568 verified).
+    # + tokenizer, flat in one dir (the verified ClipBackend layout).
     "mobileclip2-s2-onnx": [
         ("@model_mobileclip2_text_onnx//file", "text_model.onnx"),
         ("@model_mobileclip2_vision_onnx//file", "vision_model.onnx"),

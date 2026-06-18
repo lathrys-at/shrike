@@ -1,4 +1,4 @@
-"""Unit tests for the //scripts:serve_<profile> launcher's pure logic (#565/#656/#699).
+"""Unit tests for the //scripts:serve_<profile> launcher's pure logic.
 
 Covers profile resolution, the path-free invariant, arg parsing, the
 effective-config composition (dir-name → absolute path rewrite), the run-server
@@ -31,7 +31,7 @@ def test_load_text_onnx_profile_is_path_free() -> None:
 
 
 def test_load_onnx_multispace_profile_is_path_free() -> None:
-    # The pure-ONNX multi-space profile (#667): embeddinggemma text + MobileCLIP2
+    # The pure-ONNX multi-space profile: embeddinggemma text + MobileCLIP2
     # image, both onnx, path-free, distinct image leg.
     profile = serve.load_profile("onnx-multispace")
     assert "collection" not in profile
@@ -43,13 +43,13 @@ def test_load_onnx_multispace_profile_is_path_free() -> None:
     assert text["modalities"] == ["text"]
     assert text["model"] == "embeddinggemma-300m-onnx-int8"
     assert not Path(text["model"]).is_absolute()
-    # The image leg (text + image into one shared space; one image space, #580).
+    # The image leg (text + image into one shared space; one image space).
     image = embedders[1]
     assert image["runtime"] == "onnx"
     assert image["modalities"] == ["text", "image"]
     assert image["model"] == "mobileclip2-s2-onnx"
     assert not Path(image["model"]).is_absolute()
-    # Exactly one entry declares the image modality (the #580 single-image-space rule).
+    # Exactly one entry declares the image modality (the single-image-space rule).
     image_entries = [e for e in embedders if "image" in e["modalities"]]
     assert len(image_entries) == 1
 
@@ -62,7 +62,7 @@ def test_onnx_multispace_model_names_both_legs() -> None:
     ]
 
 
-# -- jina-text-clip (#669): the manual/local-only hybrid multi-space profile ---
+# -- jina-text-clip: the manual/local-only hybrid multi-space profile ----------
 #
 # Download-free, server-free structural checks on the committed profile: it is
 # path-free, declares TWO embedding spaces — a dedicated TEXT space on a managed
@@ -96,7 +96,7 @@ def test_jina_text_clip_profile_is_path_free_hybrid() -> None:
     assert text["modalities"] == ["text"]
     assert text["pooling"] == "last"
     # The IMAGE leg: in-process ONNX CLIP (text + image into one shared space) —
-    # the single image-embedding space (#580).
+    # the single image-embedding space.
     image = embedders[1]
     assert image["runtime"] == "onnx"
     assert image["modalities"] == ["text", "image"]
@@ -175,7 +175,7 @@ def test_path_free_profile_passes() -> None:
     serve.check_path_free("ok", {"embedders": [{"runtime": "onnx", "model": "m"}]})
 
 
-# -- jina-omni (#668): the manual/local-only single-omni profile ---------------
+# -- jina-omni: the manual/local-only single-omni profile ----------------------
 #
 # Download-free, server-free structural checks on the committed profile: it is
 # path-free, declares ONE text+image space on a managed (manage: auto)
@@ -198,7 +198,7 @@ def test_jina_omni_profile_is_path_free_managed_omni() -> None:
     embedders = profile["embedders"]
     assert len(embedders) == 1, "jina-omni is ONE shared text+image space"
     entry = embedders[0]
-    # remote with no endpoint = the managed llama-server below (#501 multimodal
+    # remote with no endpoint = the managed llama-server below (the multimodal
     # managed shape); text+image into one space; last-token pooling.
     assert entry["runtime"] == "remote"
     assert "endpoint" not in entry
@@ -349,13 +349,13 @@ def test_resolve_off_bazel_calls_the_fetcher(
     assert out == fetched
 
 
-# -- the off-Bazel fetcher map (#667/#699) -------------------------------------
+# -- the off-Bazel fetcher map -------------------------------------------------
 #
 # Exercises the real _fetchers() map (imports model_cache) — a registration
 # regression guard: every CI/dogfooding profile model dir-name must resolve to a
 # callable model_cache fetcher. No download (the fetchers are referenced, never
-# called). The bazel runfiles file-map lives in serve.bzl now (one source of
-# truth); this map is only the off-Bazel download source serve.py still owns.
+# called). The bazel runfiles file-map lives in serve.bzl (one source of
+# truth); this map is only the off-Bazel download source serve.py owns.
 
 
 def test_fetchers_cover_the_profile_models() -> None:
@@ -370,7 +370,7 @@ def test_fetchers_cover_the_profile_models() -> None:
 
 
 def test_fetchers_registers_jina_clip_v2_for_673() -> None:
-    # jina-clip-v2 is pre-staged for #673 (native fused-graph ClipBackend support);
+    # jina-clip-v2 is pre-staged for native fused-graph ClipBackend support;
     # not consumed by any current profile, but kept registered as a download source.
     fetchers = serve._fetchers()
     assert "jina-clip-v2-onnx-int8" in fetchers
@@ -423,7 +423,7 @@ def test_compose_roundtrips_text_onnx_profile() -> None:
     assert reloaded["embedders"][0]["runtime"] == "onnx"
 
 
-# -- ONNX provider auto-detect + overlay (#569) --------------------------------
+# -- ONNX provider auto-detect + overlay ---------------------------------------
 #
 # Download-free: stub onnxruntime.get_available_providers / nvidia-smi presence /
 # the active-provider readback. No GPU and no real onnxruntime call.
@@ -567,7 +567,7 @@ def test_compose_does_not_overlay_remote_or_platform() -> None:
 
 
 def test_compose_no_providers_arg_leaves_entries_unchanged() -> None:
-    # providers=None (the pre-#569 call shape) injects nothing.
+    # providers=None injects nothing.
     profile = {"embedders": [{"runtime": "onnx", "modalities": ["text"], "model": "minilm"}]}
     config = serve.compose_effective_config(profile, {"minilm": "/abs/minilm"}, providers=None)
     assert "providers" not in config["embedders"][0]

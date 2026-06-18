@@ -3,7 +3,7 @@ load("@shrike_pip//:requirements.bzl", "requirement")
 load("//scripts:serve.bzl", "assemble_model_dirs", "serve_profile")
 load("//tools/bazel:defs.bzl", "pytest_test")
 
-# //scripts:serve_<profile> — the consolidated dogfooding launchers (#565/#656/#699).
+# //scripts:serve_<profile> — the consolidated dogfooding launchers.
 #
 #   ./bazel run //scripts:serve_text_onnx -- [--seed qa] [--foreground|--daemon]
 #   ./bazel run //scripts:serve_onnx_multispace -- [--seed qa]
@@ -12,9 +12,8 @@ load("//tools/bazel:defs.bzl", "pytest_test")
 # path-free capability profile. Each profile's models are assembled from the
 # pinned Bazel externals into a per-model dir AT BUILD TIME (no runtime copy, no
 # new download), and each launcher's `data` is scoped to JUST its own profile +
-# models (#699 deleted the old single all-models target + its serve.py-side
-# `_model_sources()`↔`data` hand-sync). The serve.bzl `_MODEL_FILES` table is the
-# one source of truth for what assembles each model dir.
+# models. The serve.bzl `_MODEL_FILES` table is the one source of truth for what
+# assembles each model dir.
 
 # Assemble each profile model's scattered http_file externals into a per-model
 # `models/<dir-name>/` runfiles dir (one `copy_file` per file + a `model_dir_*`
@@ -56,7 +55,7 @@ serve_profile(
     deps = _SERVE_DEPS,
 )
 
-# onnx-multispace — the pure-ONNX multi-space profile (#667): embeddinggemma text
+# onnx-multispace — the pure-ONNX multi-space profile: embeddinggemma text
 # + MobileCLIP2 image, two in-process ONNX spaces.
 serve_profile(
     name = "onnx_multispace",

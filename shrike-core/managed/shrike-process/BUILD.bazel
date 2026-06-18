@@ -4,9 +4,9 @@ package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
-# Generic managed-subprocess lifecycle (#710): the `ManagedProcess` policy trait
+# Generic managed-subprocess lifecycle: the `ManagedProcess` policy trait
 # + `Supervisor<P>` (spawn/health-wait/orphan-reap/stop) + the port-ownership
-# orphan reaper (#594/#654). A layer-FLOOR crate (enforced by
+# orphan reaper. A layer-FLOOR crate (enforced by
 # //shrike-core:layering_check) — shrike-error + std + libc + tracing only, NO
 # kernel or engine coupling, and deliberately NO HTTP dep (health rides the
 # policy's `health_check` hook).

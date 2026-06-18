@@ -2,7 +2,7 @@ load("@rules_python//python:defs.bzl", "py_binary")
 load("@shrike_sdist_pip//:requirements.bzl", sdist_requirement = "requirement")
 load(":defs.bzl", "pytest_test")
 
-# Shared Bazel test machinery (#244). The pytest launcher is exported so each
+# Shared Bazel test machinery. The pytest launcher is exported so each
 # pytest_test target can list it in srcs/main from any package.
 exports_files(["pytest_runner.py"])
 
@@ -15,7 +15,7 @@ pytest_test(
     xdist = None,
 )
 
-# The //shrike-py:sdist builder (#245): runs hatchling via the `build` API to produce the
+# The //shrike-py:sdist builder: runs hatchling via the `build` API to produce the
 # Python source distribution. Its build-tool deps live in the dedicated
 # @shrike_sdist_pip hub so they stay out of the runtime lock.
 py_binary(

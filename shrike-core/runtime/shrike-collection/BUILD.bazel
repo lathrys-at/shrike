@@ -4,12 +4,12 @@ package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
-# Rust collection core over anki's protobuf service layer (#278, slice 1).
+# Rust collection core over anki's protobuf service layer.
 # Pure Rust — NO pyo3 (enforced by //shrike-core:layering_check).
 #
 # Builds the whole anki dependency tree; its protobuf codegen runs the
 # hermetic protoc external (//shrike-core/third_party/protoc) via the crate
-# annotations in MODULE.bazel — on the regular build graph since the cutover.
+# annotations in MODULE.bazel.
 rust_library(
     name = "shrike_collection",
     srcs = glob(["src/**/*.rs"]),

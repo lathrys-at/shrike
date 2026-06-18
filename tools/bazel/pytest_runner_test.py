@@ -1,4 +1,4 @@
-"""Tests for the Bazel pytest launcher's shard partitioning (#244 sharding)."""
+"""Tests for the Bazel pytest launcher's shard partitioning."""
 
 from __future__ import annotations
 

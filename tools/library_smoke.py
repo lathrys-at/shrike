@@ -1,17 +1,16 @@
-"""Phase 1 smoke (#243).
+"""Library import smoke.
 
 Proves the `//shrike-py/src/shrike:shrike` library target and its declared deps import
 cleanly on the hermetic toolchain: every core module loads (so the dep list is
-complete), and a pure, DB-free function runs. Cheap CI coverage of the wiring
-until the full pytest suite migrates in Phase 2 (#244).
+complete), and a pure, DB-free function runs. Cheap CI coverage of the wiring.
 """
 
 from __future__ import annotations
 
 
 def main() -> int:
-    # Since the #278 cutover the normalization runs in the native core; the
-    # smoke proves the native module is importable and carries it.
+    # The normalization runs in the native core; the smoke proves the native
+    # module is importable and carries it.
     import shrike_native
 
     import shrike

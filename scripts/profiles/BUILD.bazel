@@ -1,4 +1,4 @@
-# The checked-in, path-free capability profiles (#565/#656). A filegroup so
+# The checked-in, path-free capability profiles. A filegroup so
 # the //scripts:serve_<profile> launchers can data-dep the whole set (each resolves a profile by name at
 # run time from runfiles / the source tree).
 filegroup(

@@ -1,4 +1,4 @@
-"""pytest_test — run pytest file(s) as one Bazel py_test (#244).
+"""pytest_test — run pytest file(s) as one Bazel py_test.
 
 Wraps rules_python's py_test with the shared pytest launcher
 (//tools/bazel:pytest_runner.py), so the files run under `bazel test` the same way
@@ -30,10 +30,10 @@ Every other default is overridable per-target the same way: `size` (default
 "small"), `deps` / `data` / `args`, and any other `py_test` attribute
 (`tags`, `timeout`, `flaky`, `env`, …) passed through via `**kwargs`. The only
 non-negotiable deps are the launcher + pytest/pytest-asyncio/pytest-xdist;
-the code under test comes from the caller's `deps` (since #259 the shrike
-package is fine-grained sub-libraries, so a target names the specific
-libraries it exercises — usually via its package's conftest — instead of
-getting the whole package implicitly).
+the code under test comes from the caller's `deps` (the shrike package is
+fine-grained sub-libraries, so a target names the specific libraries it
+exercises — usually via its package's conftest — instead of getting the whole
+package implicitly).
 """
 
 load("@rules_python//python:defs.bzl", "py_test")
@@ -46,7 +46,7 @@ def pytest_test(name, srcs, deps = [], data = [], args = [], size = "small", xdi
     # value (None / 0 / False) for a serial run. str() so an int count works too.
     xdist_args = ["-n", str(xdist)] if xdist else []
 
-    # Disarm the local native-staleness backstop (#573) under Bazel: that hook
+    # Disarm the local native-staleness backstop under Bazel: that hook
     # (tests/conftest.py) guards the pip lane's per-venv .so against a missing
     # rebuild, but Bazel builds the extension hermetically and has no venv stamp
     # to read, so the check is meaningless here. A caller's own `env` still wins.

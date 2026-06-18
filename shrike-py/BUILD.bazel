@@ -1,16 +1,16 @@
 load("@rules_python//python:packaging.bzl", "py_wheel")
 load("//tools/bazel:sdist.bzl", "py_sdist")
 
-# The shrike-py/ unit owns its build artifacts (#731). The Python harness is now a
-# self-contained, subtree-extractable unit mirroring shrike-core/ (epic #729): its
+# The shrike-py/ unit owns its build artifacts. The Python harness is a
+# self-contained, subtree-extractable unit mirroring shrike-core/: its
 # wheel + sdist targets live here (//shrike-py:wheel / //shrike-py:sdist), not at
 # the repo root. The clean dependency edge to the Rust side is the published
 # extension only — //shrike-core/bindings/shrike-pyo3:wheel_files / its platform settings —
 # no reach into the workspace internals.
 
-# The release wheel (#245; platform-tagged since #497). Version is stamped from the
+# The release wheel (platform-tagged). Version is stamped from the
 # git tag (STABLE_VERSION via tools/workspace_status.sh) — the exact tag version on a
-# clean release/rc tag, replacing hatch-vcs as the artifact builder.
+# clean release/rc tag.
 # strip_path_prefixes drops `shrike-py/src/` and the extension package dir so the
 # wheel ships `shrike/...` AND `shrike_native/...` (the compiled _native.so + stubs +
 # py.typed): one artifact, no separate shrike-native dist, no version-skew surface.
@@ -52,7 +52,7 @@ py_wheel(
         "pyyaml>=6.0",
         "rich>=13.0",
         "numpy>=1.26",
-        # The dylib carrier for the native ort engine — hard dep since #497 (the
+        # The dylib carrier for the native ort engine — a hard dep (the
         # onnx/clip extras are gone; the `gpu` extra swaps the carrier).
         "onnxruntime>=1.17",
     ],
@@ -94,7 +94,7 @@ py_wheel(
     ],
     deps = [
         # The package tree as a filegroup — py_wheel packages direct files only, so
-        # the (srcs-less, #259) //shrike-py/src/shrike:shrike umbrella wouldn't contribute.
+        # the (srcs-less) //shrike-py/src/shrike:shrike umbrella wouldn't contribute.
         "//shrike-py/src/shrike:wheel_srcs",
         "//shrike-py/src/shrike:py_typed",
         # The shrike_native package payload: __init__.py + .pyi stubs + py.typed +
@@ -103,7 +103,7 @@ py_wheel(
     ],
 )
 
-# The release sdist (#245). hatchling builds it via the `build` API from the staged
+# The release sdist. hatchling builds it via the `build` API from the staged
 # source tree (the dist_files filegroups + the root-package files), git-independent
 # thanks to the explicit [tool.hatch.build.targets.sdist] include, with the version
 # stamped from the git tag. `manual` (like //shrike-py:wheel) keeps it off the per-PR
@@ -113,7 +113,7 @@ py_wheel(
 py_sdist(
     name = "sdist",
     # pyproject.toml lives in this unit dir, so the sdist's project root is shrike-py/
-    # within the staged tree (#731). The repo-root README/LICENSE/CHANGELOG are copied
+    # within the staged tree. The repo-root README/LICENSE/CHANGELOG are copied
     # into it at build time so the tarball is self-contained.
     project_subdir = "shrike-py",
     srcs = [

@@ -1,4 +1,4 @@
-"""pytest entry point for Bazel `py_test` targets (#244).
+"""pytest entry point for Bazel `py_test` targets.
 
 rules_python has no pytest rule, so each pytest target runs this launcher with its
 test file(s) passed as args (see //tools/bazel:defs.bzl `pytest_test`). Config is
@@ -90,7 +90,7 @@ def main() -> int:
     # The macro passes the test file path(s) as args.
     args += sys.argv[1:]
 
-    # Under `bazel coverage` (#262), run serially: xdist workers are execnet
+    # Under `bazel coverage`, run serially: xdist workers are execnet
     # subprocesses the bootstrap's in-process tracer can't see, so a `-n auto`
     # coverage run silently measures only the controller (~10% instead of ~90%).
     # Coverage runs are off the per-PR hot path, so the serial wall-time cost

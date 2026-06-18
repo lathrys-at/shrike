@@ -18,23 +18,22 @@ py_library(
 )
 
 # The native binding + kernel-assembly suite (asyncio bridge, AsyncKernel,
-# KernelIndex, Harness, the collection-core parity harness). Discovered to be
-# OFF the CI lanes entirely after #285 made tests Bazel-only (no target here)
-# — added by the post-series review so the 50+ binding tests gate PRs again.
+# KernelIndex, Harness, the collection-core parity harness). These 50+ binding
+# tests gate PRs.
 pytest_test(
     name = "native",
     srcs = glob(["test_*.py"]),
     deps = [
         ":conftest",
         # test_search_quality.py drives the REAL search_notes action in-process
-        # via the StubEmbedder + the shared metric engine (#559).
+        # via the StubEmbedder + the shared metric engine.
         "//shrike-py/tests/manual/search_quality",
         "//shrike-py/tests/manual/search_quality:inprocess",
     ],
     size = "medium",
 )
 
-# Source files for the //shrike-py:sdist source distribution (#245).
+# Source files for the //shrike-py:sdist source distribution.
 filegroup(
     name = "dist_files",
     testonly = False,

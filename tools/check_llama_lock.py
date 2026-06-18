@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tripwire: tools/llama-server.lock and MODULE.bazel must agree (#566).
+"""Tripwire: tools/llama-server.lock and MODULE.bazel must agree.
 
 The pinned llama.cpp tag + the four per-platform SHA256s live in
 ``tools/llama-server.lock`` (shell-sourceable, consumed by the CI model-cache

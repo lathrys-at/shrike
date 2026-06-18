@@ -1,7 +1,7 @@
 load("@rules_pkg//pkg:mappings.bzl", "pkg_files", "strip_prefix")
 load("@rules_pkg//pkg:zip.bzl", "pkg_zip")
 
-# The create-cards skill bundle (#245): a `.skill` zip whose root holds the skill
+# The create-cards skill bundle: a `.skill` zip whose root holds the skill
 # folder (create-cards/SKILL.md, create-cards/references/…) — the layout Claude
 # Desktop / claude.ai expect on upload. The Bazel equivalent of package-skill.py
 # (which stays for ad-hoc/local packaging; it lives here in the unit, symlinked

@@ -4,7 +4,7 @@ package(default_visibility = ["//shrike-core:__subpackages__"])
 
 exports_files(["Cargo.toml"])
 
-# Generic image preprocessing for the CLIP pixel pipeline (#707): decode →
+# Generic image preprocessing for the CLIP pixel pipeline: decode →
 # resize-shortest-edge → center-crop → rescale/normalize → CHW f32. A layer-FLOOR
 # crate (enforced by //shrike-core:layering_check) — image/shrike-error only, NO
 # kernel or engine coupling. The accelerated normalize/CHW path is the default
