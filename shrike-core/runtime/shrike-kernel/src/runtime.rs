@@ -119,7 +119,10 @@ impl DrivenPools {
     /// A live clone of the sync sender, or `None` once
     /// [`shutdown_driven_pools`] has taken it.
     fn sync_sender(&self) -> Option<mpsc::UnboundedSender<PoolJob>> {
-        self.sync_tx.lock().expect("driven sync sender poisoned").clone()
+        self.sync_tx
+            .lock()
+            .expect("driven sync sender poisoned")
+            .clone()
     }
 
     /// A live clone of the compute sender, or `None` post-shutdown.
@@ -395,7 +398,13 @@ pub fn shutdown_driven_pools() {
     // once its receiver sees every sender gone — the transient clones held by
     // an in-flight enqueue drop as that call returns, so a quiesced kernel
     // closes immediately.
-    drop(pools.sync_tx.lock().expect("driven sync sender poisoned").take());
+    drop(
+        pools
+            .sync_tx
+            .lock()
+            .expect("driven sync sender poisoned")
+            .take(),
+    );
     drop(
         pools
             .compute_tx

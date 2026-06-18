@@ -52,9 +52,14 @@ from shrike_native._native import async_collection_open as async_collection_open
 from shrike_native._native import async_kernel_open as async_kernel_open
 from shrike_native._native import decode_media_b64 as decode_media_b64
 from shrike_native._native import derived_db_path as derived_db_path
+from shrike_native._native import drive_compute as drive_compute
+from shrike_native._native import drive_io as drive_io
+from shrike_native._native import drive_pools_shutdown as drive_pools_shutdown
+from shrike_native._native import drive_sync as drive_sync
 from shrike_native._native import embedder_probe as embedder_probe
 from shrike_native._native import fetch_media_url as fetch_media_url
 from shrike_native._native import index_namespace as index_namespace
+from shrike_native._native import init_driven_runtime as init_driven_runtime
 from shrike_native._native import native_embedder_probe as native_embedder_probe
 from shrike_native._native import rehomed_actions as rehomed_actions
 from shrike_native._native import rrf_fuse as rrf_fuse

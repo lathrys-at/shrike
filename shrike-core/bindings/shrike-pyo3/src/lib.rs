@@ -211,6 +211,71 @@ fn decode_media_b64(py: Python<'_>, data: String) -> PyResult<Vec<u8>> {
         .map_err(to_py_err)
 }
 
+// ── Driven runtime: the harness commits N+2 threads, shrike-core spawns none ──
+// The server installs a current_thread runtime in DRIVEN mode at boot, then
+// donates GIL-releasing threads to drive it: one IO thread, one collection/sync
+// thread, and N compute threads. Each entry below releases the GIL (`py.detach`)
+// and parks in the matching pure-Rust loop for the server's life; the asyncio
+// bridge still submits ops, invisibly driven by the IO thread.
+
+/// Install a `current_thread` runtime in the driven model — call ONCE, before
+/// any kernel op, so the set-once seam wins over the lazy multi-thread default.
+/// Tolerates a re-call within one process (a re-import): an already-installed
+/// runtime is the same install, not an error.
+#[cfg(feature = "anki-core")]
+#[pyfunction]
+fn init_driven_runtime(py: Python<'_>) -> PyResult<()> {
+    py.detach(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| NativeError::internal(format!("building the driven runtime: {e}")))?;
+        // An already-installed runtime (a second call in one process) is benign:
+        // the seam is set-once, so the first install stands.
+        let _ = shrike_kernel::init_driven_runtime(runtime);
+        Ok(())
+    })
+    .map_err(to_py_err)
+}
+
+/// Park this thread as the driven runtime's IO/timer driver until
+/// [`drive_pools_shutdown`] is called. GIL released for the thread's life; the
+/// asyncio loop submits ops that this thread polls.
+#[cfg(feature = "anki-core")]
+#[pyfunction]
+fn drive_io(py: Python<'_>) -> PyResult<()> {
+    py.detach(shrike_kernel::drive_io_until_shutdown)
+        .map_err(to_py_err)
+}
+
+/// Park this thread as the serialized collection / anki-sync execution thread
+/// until the pools are shut down. GIL released; a non-runtime context, so anki's
+/// own `block_on` is legal here.
+#[cfg(feature = "anki-core")]
+#[pyfunction]
+fn drive_sync(py: Python<'_>) -> PyResult<()> {
+    py.detach(shrike_kernel::drive_sync).map_err(to_py_err)
+}
+
+/// Park this thread as one of the N CPU-compute workers until the pools are shut
+/// down. GIL released, so native engine compute runs with real parallelism (the
+/// capture seam re-acquires the GIL only for custom/test backends).
+#[cfg(feature = "anki-core")]
+#[pyfunction]
+fn drive_compute(py: Python<'_>) -> PyResult<()> {
+    py.detach(shrike_kernel::drive_compute).map_err(to_py_err)
+}
+
+/// Signal every committed driven thread to return so the harness can join them
+/// — call after kernel work has quiesced (the collection actor drained). Closes
+/// the pool queues and trips the IO thread's shutdown signal. GIL released so
+/// the threads it wakes can finish without contending for it.
+#[cfg(feature = "anki-core")]
+#[pyfunction]
+fn drive_pools_shutdown(py: Python<'_>) {
+    py.detach(shrike_kernel::shutdown_driven_pools)
+}
+
 /// One derived-store MATCH row: (note_id, source, ref, txt, snippet).
 type MatchRow = (i64, String, String, Option<String>, Option<String>);
 /// Per-query, per-modality parallel rankings: {modality: (note_ids, distances)}.
@@ -1003,6 +1068,11 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     {
         m.add_function(wrap_pyfunction!(fetch_media_url, m)?)?;
         m.add_function(wrap_pyfunction!(decode_media_b64, m)?)?;
+        m.add_function(wrap_pyfunction!(init_driven_runtime, m)?)?;
+        m.add_function(wrap_pyfunction!(drive_io, m)?)?;
+        m.add_function(wrap_pyfunction!(drive_sync, m)?)?;
+        m.add_function(wrap_pyfunction!(drive_compute, m)?)?;
+        m.add_function(wrap_pyfunction!(drive_pools_shutdown, m)?)?;
     }
     // The engine/manager matrix: a class is present exactly when its
     // feature is compiled — a lean build simply lacks the name (the Python
