@@ -335,6 +335,13 @@ class Harness:
         # Background maintenance tasks: tracked so close() drains them (no
         # destroyed-pending teardown) and tests can settle deterministically.
         self._bg_tasks: set[asyncio.Task[Any]] = set()
+        # The readiness MARKER tasks (`_settle_and_mark_ready`) are tracked
+        # apart from the maintenance work they wait on. A marker awaits
+        # settle_background(), which gathers the OTHER bg tasks — so a marker
+        # must never gather a sibling marker, or two concurrent re-acquires
+        # deadlock (M1 awaits M2 awaiting M1, neither sets _ready). Markers
+        # wait only on maintenance; close() still drains them via _bg_tasks.
+        self._settle_markers: set[asyncio.Task[Any]] = set()
         # The readiness barrier (#850): boot / reload / cooperative re-acquire
         # run their index+derived maintenance to quiescence and set this Event;
         # the data plane and tests await it instead of polling status + sleeping.
@@ -493,7 +500,7 @@ class Harness:
         if self.derived.check_drift(col_mod):
             self._spawn_bg(self._rebuild_derived())
         self._spawn_bg(self._drive_reindex())
-        self._spawn_bg(self._settle_and_mark_ready(generation))
+        self._spawn_marker(generation)
 
     async def _drive_reindex(self) -> None:
         if await self.kernel.reindex_if_needed():
@@ -518,14 +525,23 @@ class Harness:
         task.add_done_callback(_log_task_failure)
         return task
 
+    def _spawn_marker(self, generation: int) -> asyncio.Task[Any]:
+        """Spawn a readiness marker for `generation` and register it as a marker
+        so settle_background() never awaits it (a marker waits on maintenance,
+        not on other markers — see settle_background)."""
+        task = self._spawn_bg(self._settle_and_mark_ready(generation))
+        self._settle_markers.add(task)
+        task.add_done_callback(self._settle_markers.discard)
+        return task
+
     async def settle_background(self) -> None:
         """Await in-flight background maintenance (drift rebuilds, reindex
         drivers) — deterministic boots for tests and operational verbs. Excludes
-        the CALLING task, so a maintenance task (the re-acquire readiness marker)
-        may settle the others without awaiting itself."""
-        current = asyncio.current_task()
+        every readiness MARKER task (`_settle_and_mark_ready`), not just the
+        caller: a marker gathers only the maintenance it waits on, so two
+        concurrent re-acquires can't deadlock on each other's markers."""
         while True:
-            pending = [t for t in self._bg_tasks if t is not current]
+            pending = [t for t in self._bg_tasks if t not in self._settle_markers]
             if not pending:
                 break
             await asyncio.gather(*pending, return_exceptions=True)
