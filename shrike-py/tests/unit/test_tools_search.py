@@ -517,7 +517,7 @@ def _build_derived(kharness, derived) -> None:
             )
         )
     )
-    derived.build(rows, mod)
+    derived._build(rows, mod)
 
 
 class TestDerivedSearch:

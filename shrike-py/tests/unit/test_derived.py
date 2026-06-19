@@ -27,7 +27,7 @@ ROWS = [
 def store(tmp_path):
     s = DerivedTextStore(path=tmp_path / "shrike.db")
     assert s.available is False  # not ready until a build stamps col_mod
-    s.build(ROWS, col_mod=100)
+    s._build(ROWS, col_mod=100)
     yield s
     s.close()
 
@@ -42,7 +42,7 @@ class TestBuild:
 
     def test_build_skips_blank_text(self, tmp_path):
         s = DerivedTextStore(path=tmp_path / "shrike.db")
-        s.build([(1, "field", "Front", "  "), (1, "field", "Back", "real")], col_mod=1)
+        s._build([(1, "field", "Front", "  "), (1, "field", "Back", "real")], col_mod=1)
         assert s.size == 1  # the blank field is not indexed
         s.close()
 
@@ -77,7 +77,7 @@ class TestSubstring:
 
     def test_limit_caps_results(self, tmp_path):
         s = DerivedTextStore(path=tmp_path / "shrike.db")
-        s.build([(i, "field", "F", f"shared token n{i}") for i in range(10)], col_mod=1)
+        s._build([(i, "field", "F", f"shared token n{i}") for i in range(10)], col_mod=1)
         assert len(s.search_substring("shared", limit=3)) == 3
         s.close()
 
@@ -113,7 +113,7 @@ class TestSourceSeam:
     """A second source under one note id is searchable + removable independently."""
 
     def test_second_source_searchable_with_its_provenance(self, store):
-        store.ingest(1, "ocr", {"diagram.png": "cristae folds visible in the image"})
+        store._ingest(1, "ocr", {"diagram.png": "cristae folds visible in the image"})
         hits = store.search_substring("cristae")
         assert hits is not None and len(hits) == 1
         assert hits[0].note_id == 1
@@ -121,15 +121,15 @@ class TestSourceSeam:
         assert hits[0].ref == "diagram.png"
 
     def test_remove_one_source_leaves_the_other(self, store):
-        store.ingest(1, "ocr", {"diagram.png": "cristae folds"})
-        store.remove([1], source="ocr")
+        store._ingest(1, "ocr", {"diagram.png": "cristae folds"})
+        store._remove([1], source="ocr")
         assert store.search_substring("cristae") == []  # ocr source gone
         assert [m.note_id for m in store.search_substring("powerhouse")] == [1]  # field stays
 
     def test_ingest_replaces_only_its_own_source(self, store):
         # Re-ingesting "field" for note 1 replaces its field rows but never touches an ocr source.
-        store.ingest(1, "ocr", {"diagram.png": "cristae"})
-        store.ingest(1, "field", {"Front": "Updated mitochondria text"})
+        store._ingest(1, "ocr", {"diagram.png": "cristae"})
+        store._ingest(1, "field", {"Front": "Updated mitochondria text"})
         assert [m.note_id for m in store.search_substring("cristae")] == [1]
         assert store.search_substring("powerhouse") == []  # old field text replaced
         assert [m.note_id for m in store.search_substring("Updated")] == [1]
@@ -137,18 +137,18 @@ class TestSourceSeam:
 
 class TestIncremental:
     def test_ingest_adds_a_note(self, store):
-        store.ingest(4, "field", {"Front": "Newly authored card"})
+        store._ingest(4, "field", {"Front": "Newly authored card"})
         assert [m.note_id for m in store.search_substring("authored")] == [4]
 
     def test_ingest_is_idempotent_replace(self, store):
-        store.ingest(1, "field", {"Front": "first revision"})
-        store.ingest(1, "field", {"Front": "second revision"})
+        store._ingest(1, "field", {"Front": "first revision"})
+        store._ingest(1, "field", {"Front": "second revision"})
         assert store.search_substring("first") == []
         assert [m.note_id for m in store.search_substring("second")] == [1]
 
     def test_remove_drops_all_sources(self, store):
-        store.ingest(1, "ocr", {"x.png": "cristae"})
-        store.remove([1])
+        store._ingest(1, "ocr", {"x.png": "cristae"})
+        store._remove([1])
         assert store.search_substring("powerhouse") == []
         assert store.search_substring("cristae") == []
 
@@ -177,7 +177,7 @@ class TestPersistence:
     def test_reopen_loads_built_state(self, tmp_path):
         path = tmp_path / "shrike.db"
         s1 = DerivedTextStore(path=path)
-        s1.build(ROWS, col_mod=100)
+        s1._build(ROWS, col_mod=100)
         s1.close()
 
         s2 = DerivedTextStore(path=path)
@@ -196,7 +196,7 @@ class TestCorruptRecovery:
         s = DerivedTextStore(path=path)  # must not raise out of __init__
         # Recovered to a clean, usable store (the corrupt file was dropped + recreated).
         assert s.available is False  # fresh: no build has run yet
-        s.build(ROWS, col_mod=1)
+        s._build(ROWS, col_mod=1)
         assert s.available is True
         assert [m.note_id for m in s.search_substring("powerhouse")] == [1]
         s.close()
@@ -208,7 +208,7 @@ class TestBuildFailure:
         # shared connection sees the intact pre-build data, not a half-cleared index. A non-iterable
         # `rows` raises inside the locked transaction, *after* the two DELETEs.
         with pytest.raises(TypeError):
-            store.build(42, col_mod=200)  # type: ignore[arg-type]
+            store._build(42, col_mod=200)  # type: ignore[arg-type]
         assert store.state == IndexState.ERROR
         # size() reads on the same connection: without the rollback it would see the DELETEd 0 rows;
         # with it, the original 4 are intact.
@@ -225,7 +225,7 @@ class TestFts5Unavailable:
         assert s.status()["fts5"] is False
         assert s.search_substring("mitochondria") is None
         assert s.search_fuzzy("mitochondria") == []
-        s.build(ROWS, col_mod=1)  # a no-op, not a crash
+        s._build(ROWS, col_mod=1)  # a no-op, not a crash
         assert s.size == 0
         s.close()
 

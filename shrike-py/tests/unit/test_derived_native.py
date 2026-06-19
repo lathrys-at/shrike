@@ -43,13 +43,13 @@ class TestNativeDerivedEngine:
 
         store = DerivedTextStore(path=tmp_path / "shrike.db")
         assert isinstance(store._engine, NativeDerivedEngine)
-        store.build(ROWS, col_mod=100)
+        store._build(ROWS, col_mod=100)
         _assert_store_serves(store)
         store.close()
 
     def test_on_disk_db_round_trips(self, tmp_path: Path) -> None:
         store = DerivedTextStore(path=tmp_path / "shrike.db")
-        store.build(ROWS, col_mod=100)
+        store._build(ROWS, col_mod=100)
         store.close()
 
         reopened = DerivedTextStore(path=tmp_path / "shrike.db")

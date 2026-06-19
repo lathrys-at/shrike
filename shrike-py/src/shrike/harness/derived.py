@@ -312,11 +312,14 @@ class DerivedTextStore:
             logger.warning("Derived-text store count failed: %s", e)
             return 0
 
-    # ── writes (low-level engine seam; the KERNEL is the sole production writer
-    # of shrike.db — these route no production traffic, the harness drives the
-    # kernel's `rebuild_derived` and per-op ingest actor instead) ──────────────
+    # ── writes (PRIVATE: the low-level engine seam) ────────────────────────────
+    # The KERNEL is the sole production writer of shrike.db — production never
+    # writes through this facade (it drives the kernel's `rebuild_derived` + the
+    # per-op ingest actor), so these are underscore-private: a non-test caller is
+    # a dual-writer/SQLITE_BUSY bug, not a supported path. Tests use them to stage
+    # fixture state for the read-path assertions.
 
-    def ingest(self, note_id: int, source: str, refs_text: Mapping[str, str]) -> None:
+    def _ingest(self, note_id: int, source: str, refs_text: Mapping[str, str]) -> None:
         """Replace a note's text rows for one ``source`` (incremental upsert).
 
         ``refs_text`` maps a ``ref`` (field name, or a media filename for a derived source) to its
@@ -326,13 +329,13 @@ class DerivedTextStore:
             return
         self._engine.ingest(note_id, source, refs_text)
 
-    def remove(self, note_ids: list[int], source: str | None = None) -> None:
+    def _remove(self, note_ids: list[int], source: str | None = None) -> None:
         """Drop notes' rows (all sources, or just one)."""
         if not self._available or self._engine is None or not note_ids:
             return
         self._engine.remove(note_ids, source)
 
-    def build(self, rows: Iterable[tuple[int, str, str, str]], col_mod: int) -> None:
+    def _build(self, rows: Iterable[tuple[int, str, str, str]], col_mod: int) -> None:
         """Full (re)build from ``(note_id, source, ref, text)`` rows; stamps ``col_mod``."""
         if not self._available or self._engine is None:
             return
