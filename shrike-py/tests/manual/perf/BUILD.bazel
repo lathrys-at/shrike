@@ -1,0 +1,48 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("//tools/bazel:defs.bzl", "pytest_test")
+load("@shrike_pip//:requirements.bzl", "requirement")
+
+package(default_testonly = True)
+
+# The perf-harness support: the deterministic corpus generator + the two profiles
+# (perf-stub / perf-real, ridden as data). The corpus is built through the REAL
+# native write path, so it needs shrike_native + the collection wrapper; pillow
+# generates the procedural images. The perf lane is off the per-PR critical path,
+# so its test target is `manual`; the library itself stays buildable on `//...`.
+py_library(
+    name = "perf",
+    srcs = [
+        "__init__.py",
+        "corpus.py",
+    ],
+    data = glob(["profiles/*.yml"]),
+    imports = ["../../.."],  # repo root on sys.path so `tests.manual.perf.*` resolves
+    visibility = ["//shrike-py/tests:__subpackages__"],
+    deps = [
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
+        "//shrike-py/src/shrike:collection",
+        requirement("pillow"),
+    ],
+)
+
+# The corpus generator's tests: build tiny collections through the native write
+# path (seconds). `manual` — the perf lane is benchmarking infra, not a per-PR
+# correctness gate; run it by name or locally.
+pytest_test(
+    name = "corpus_test",
+    size = "small",
+    srcs = ["test_corpus.py"],
+    tags = ["manual"],
+    deps = [":perf"],
+)
+
+# Source files for the //shrike-py:sdist source distribution.
+filegroup(
+    name = "dist_files",
+    testonly = False,
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel", "**/__pycache__/**", "**/*.pyc", "**/*.pyo"],
+    ),
+    visibility = ["//visibility:public"],
+)

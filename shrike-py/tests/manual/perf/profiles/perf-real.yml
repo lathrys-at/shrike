@@ -1,0 +1,24 @@
+# perf-real — the end-to-end profile for the performance harness (#865).
+#
+# The real in-process ONNX backends, mirroring the onnx-multispace dogfooding
+# profile: a primary text space + one CLIP text+image space, so a run measures
+# the FULL cost a user sees — model inference included — as the counterpart to
+# perf-stub's kernel-isolation run. The two profiles share the same modality
+# shape (text + image) so their distributions are comparable.
+#
+# PATH-FREE (the hard invariant): model: is a bare DIR-NAME (model_cache's
+# *_DIR_NAME); the perf runner materializes it from the Bazel external (or a
+# model_cache fetch) and rewrites model: to its absolute path before boot, exactly
+# as the serve launcher does. Providers are detected per host; none declared.
+
+embedders:
+  # The primary text space (int8 → batch-variant → probed serial at startup).
+  - modalities: [text]
+    runtime: onnx
+    model: embeddinggemma-300m-onnx-int8
+    pooling: mean
+  # The image leg: a CLIP dual-encoder (text + image into one shared space). No
+  # pooling — it emits a pre-pooled, projected vector.
+  - modalities: [text, image]
+    runtime: onnx
+    model: mobileclip2-s2-onnx

@@ -1,0 +1,18 @@
+# perf-stub — the kernel-isolation profile for the performance harness (#865).
+#
+# One synthetic embedding space spanning text + image: a deterministic,
+# dependency-free embedder (no model, negligible cost). A workflow run under this
+# profile measures the kernel / IO / orchestration cost — the #445 hotspot class
+# (per-op full-collection scans, lock-held writes, N+1 hydration) — without
+# model-inference time in the signal.
+#
+# `runtime: synthetic` resolves ONLY in a build that compiled `engine-synthetic`
+# (a dev/benchmark build: `scripts/build-native.sh --synthetic`). A release/lean
+# build refuses this profile at resolution — synthetic is never shipped.
+#
+# PATH-FREE, like the dogfooding profiles: no collection:, no absolute paths. The
+# perf runner supplies the corpus + run paths as flags.
+
+embedders:
+  - modalities: [text, image]
+    runtime: synthetic
