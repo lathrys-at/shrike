@@ -84,7 +84,7 @@ use crate::index_orchestrator::{self, EmbedInput};
 use crate::index_set::IndexSet;
 use crate::recognize::RecognitionGate;
 use crate::runtime;
-use crate::tag_centroids::{self, TagCentroidConfig, TagKeyMap, TagRefresher};
+use crate::tag_centroids::{TagKeyMap, TagRefresher};
 use crate::watermark::WatermarkFloors;
 use crate::{EmbedService, SerializedCollection, FIELD_SOURCE};
 use shrike_engine_api::{Embedder, ImageEmbedder, ImageResolver};
@@ -326,7 +326,6 @@ pub struct Ingestor {
     embed: Arc<RwLock<EmbedSpaces>>,
     recognition_gate: RecognitionGate,
     tag_keys: Arc<TagKeyMap>,
-    tag_config: TagCentroidConfig,
     tag_refresh: Arc<TagRefresher>,
     floors: Mutex<WatermarkFloors>,
     /// Count of drained items/jobs whose processing PANICKED and was contained
@@ -348,7 +347,6 @@ impl Ingestor {
         embed: Arc<RwLock<EmbedSpaces>>,
         recognition_gate: RecognitionGate,
         tag_keys: Arc<TagKeyMap>,
-        tag_config: TagCentroidConfig,
         tag_refresh: Arc<TagRefresher>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -358,7 +356,6 @@ impl Ingestor {
             embed,
             recognition_gate,
             tag_keys,
-            tag_config,
             tag_refresh,
             floors: Mutex::new(WatermarkFloors::default()),
             drain_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -453,31 +450,19 @@ impl Ingestor {
         self.derived.ingest_many(&batch, FIELD_SOURCE)
     }
 
-    /// Recompute every tag centroid from the engine's current text vectors —
-    /// the SYNCHRONOUS refresh boot/rebuild paths use (a no-op without an
-    /// embedder). The per-op tail uses the coalesced [`TagRefresher`] instead.
+    /// Await a full tag-centroid recompute to completion — the boot/rebuild
+    /// path (it must finish before "ready"). Routes through the shared
+    /// [`TagRefresher`] so the recompute runs on the compute pool (never inline
+    /// on this actor task) AND under the refresher's exclusion lock (so it can't
+    /// run concurrently with the coalesced per-op refresh on the same engine +
+    /// key map). A no-op `0` without an embedder.
     ///
     /// # Errors
     ///
     /// Returns an error if the collection read fails or the engine rejects the
     /// `tag.text` rebuild.
     pub async fn refresh_tag_centroids(&self) -> NativeResult<usize> {
-        if self.embed_service().is_none() {
-            return Ok(0);
-        }
-        let (rows, total) = self
-            .collection
-            .run(|core| -> NativeResult<_> {
-                let rows = core.note_tag_rows()?;
-                let total = core.note_count()?;
-                Ok((rows, total))
-            })
-            .await??;
-        let tag_engine = self.index_set.tag_engine();
-        let built =
-            tag_centroids::recompute(&*tag_engine, &rows, total, &self.tag_config, &self.tag_keys)?;
-        self.index_set.primary_saver().request_save();
-        Ok(built)
+        self.tag_refresh.refresh_now().await
     }
 
     /// Best-effort synchronous tag refresh: never fails the op it rides on.

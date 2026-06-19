@@ -247,6 +247,10 @@ impl TagKeyMap {
 /// have.
 pub struct TagRefresher {
     job: Arc<crate::maintenance::Maintenance>,
+    /// The shared recompute state, also captured into `job`'s run closure — so
+    /// the awaited [`Self::refresh_now`] path and the coalesced background path
+    /// run the SAME exclusion-locked recompute.
+    ctx: Arc<RefreshCtx>,
 }
 
 /// Pacing between coalesced follow-up refreshes under sustained write
@@ -274,17 +278,34 @@ impl TagRefresher {
             config,
             saver,
             embed,
+            recompute_lock: tokio::sync::Mutex::new(()),
         });
         let job = crate::maintenance::Maintenance::new(
-            Box::new(move || {
+            {
                 let ctx = Arc::clone(&ctx);
-                Box::pin(async move { ctx.run_once().await })
-            }),
+                Box::new(move || {
+                    let ctx = Arc::clone(&ctx);
+                    Box::pin(async move { ctx.run_once().await })
+                })
+            },
             std::time::Duration::ZERO,
             std::time::Duration::from_secs_f64(TAG_REFRESH_WINDOW),
             0,
         );
-        Arc::new(Self { job })
+        Arc::new(Self { job, ctx })
+    }
+
+    /// Run a tag-centroid refresh AND await its completion, serialized with the
+    /// coalesced background path on the shared exclusion lock and run on the
+    /// compute pool. The boot/reindex/rebuild tail uses this (it must finish
+    /// before "ready"); returns the centroid count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collection read or the engine `tag.text` rebuild
+    /// fails.
+    pub async fn refresh_now(&self) -> NativeResult<usize> {
+        self.ctx.recompute_locked().await
     }
 
     /// Note a membership-relevant change. Never blocks, never errors: the
@@ -312,39 +333,51 @@ struct RefreshCtx {
     config: TagCentroidConfig,
     saver: Arc<crate::index_orchestrator::DebouncedSaver>,
     embed: Arc<std::sync::RwLock<crate::EmbedSpaces>>,
+    /// Serializes EVERY recompute — the coalesced background path AND the
+    /// awaited boot/rebuild path ([`TagRefresher::refresh_now`]) — against each
+    /// other. `recompute` is non-atomic across the engine and the [`TagKeyMap`]
+    /// (drop/ensure/add the `tag.text` space, then `keys.replace`); two running
+    /// concurrently would tear that interleave so the engine's tag-keys and the
+    /// key map disagree, and `tag_ranking` ranks a nameless/stale key. The
+    /// `Maintenance` single-flight only serializes the background path with
+    /// itself, so this lock is what excludes the awaited path too.
+    recompute_lock: tokio::sync::Mutex<()>,
 }
 
 impl RefreshCtx {
-    async fn run_once(&self) {
+    /// Recompute under the exclusion lock, on the compute pool. Returns the
+    /// centroid count (a no-op `0` without an embedder). The shared core of the
+    /// coalesced background refresh and the awaited boot/rebuild refresh.
+    async fn recompute_locked(&self) -> NativeResult<usize> {
         if self.embed.read().expect("embed slot poisoned").is_empty() {
-            return; // no embedder → no text vectors to mean over
+            return Ok(0); // no embedder → no text vectors to mean over
         }
-        let result: NativeResult<()> = async {
-            let (rows, total) = self
-                .collection
-                .run(|core| -> NativeResult<_> { Ok((core.note_tag_rows()?, core.note_count()?)) })
-                .await??;
-            // `recompute` is O(collection) CPU + engine reads/writes (a vector
-            // per distinct tagged note, then a wholesale tag-space rebuild). It
-            // MUST NOT run on a runtime worker (blocking/compute work rides
-            // `spawn_blocking`, never a worker thread) — at 100k notes it would
-            // stall the worker for the whole recompute. Hand it to the blocking
-            // pool with owned/Arc captures.
-            let engine = Arc::clone(&self.engine);
-            let keys = Arc::clone(&self.keys);
-            let config = self.config.clone();
-            // O(collection) CPU + engine reads/writes → the compute pool
-            // (`dispatch_compute`), never a runtime worker.
-            crate::runtime::dispatch_compute(move || {
-                recompute(&*engine, &rows, total, &config, &keys)
-            })
-            .await?;
-            Ok(())
-        }
-        .await;
-        match result {
-            Ok(()) => self.saver.request_save(),
-            Err(e) => tracing::warn!(error = ?e, "tag centroid refresh failed"),
+        let (rows, total) = self
+            .collection
+            .run(|core| -> NativeResult<_> { Ok((core.note_tag_rows()?, core.note_count()?)) })
+            .await??;
+        let engine = Arc::clone(&self.engine);
+        let keys = Arc::clone(&self.keys);
+        let config = self.config.clone();
+        // Hold the exclusion lock across the recompute so a concurrent refresh
+        // (background or awaited) can't tear the engine/key-map interleave.
+        // `recompute` is O(collection) CPU + engine reads/writes, so it MUST run
+        // on the compute pool (`dispatch_compute`), never a runtime worker — at
+        // 100k notes it would stall the single async executor for the whole run.
+        let _guard = self.recompute_lock.lock().await;
+        let built = crate::runtime::dispatch_compute(move || {
+            recompute(&*engine, &rows, total, &config, &keys)
+        })
+        .await?;
+        self.saver.request_save();
+        Ok(built)
+    }
+
+    /// The coalesced background path: best-effort (never surfaces an error to
+    /// the op it rides on).
+    async fn run_once(&self) {
+        if let Err(e) = self.recompute_locked().await {
+            tracing::warn!(error = ?e, "tag centroid refresh failed");
         }
     }
 }

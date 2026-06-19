@@ -633,7 +633,6 @@ impl Kernel {
             Arc::clone(&embed),
             recognition_gate.clone(),
             Arc::clone(&tag_keys),
-            tag_config.clone(),
             Arc::clone(&tag_refresh),
         );
         let ingest = ingest::spawn(ingestor);
