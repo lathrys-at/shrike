@@ -349,9 +349,10 @@ block behind it.
 We deliberately do **not** add a per-embed timeout. Every shipping embedder resolves in
 bounded time — ONNX is bounded local compute; the llama-server backend has a 60s HTTP
 timeout plus bounded retry, so a wedged server surfaces as a transport *error*, not a hang —
-which makes the unbounded-hang case unreachable through any production path. It needs a
-custom embedder whose future never resolves *and* never errors (the `PyEmbedder` test/custom
-escape hatch, on no production path). A drain-side timeout would be an untunable guess (set
+which makes the unbounded-hang case unreachable through any shipping backend. It needs a
+custom embedder whose future never resolves *and* never errors — no shipping backend does;
+the kernel's `GatedEmbedder` test double synthesizes exactly this. A drain-side timeout would
+be an untunable guess (set
 too low it self-wedges under load on a slow large batch) and could not reclaim a route-1 job
 already running on the compute pool; it would add complexity to the most ordering-critical
 path to defend a non-production hazard. The contract is documented on the `Embedder` trait
