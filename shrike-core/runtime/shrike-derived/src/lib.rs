@@ -580,6 +580,9 @@ impl DerivedEngine {
         self.build_inner(next, live_notes, col_mod)
     }
 
+    const IDX_SHADOW_DDL: &'static str =
+        "CREATE VIRTUAL TABLE idx_shadow USING fts5(txt, tokenize='trigram')";
+
     #[allow(clippy::type_complexity)]
     fn build_inner(
         &self,
@@ -587,152 +590,163 @@ impl DerivedEngine {
         live_notes: &[i64],
         col_mod: i64,
     ) -> NativeResult<usize> {
-        // The streaming producer reads each chunk through the collection actor
-        // (the single drive_sync thread). The connection lock MUST NOT be held
-        // across `next()`: a concurrent `search` runs `search_substring`/
-        // `search_fuzzy` THROUGH that same actor and takes THIS lock, so holding
-        // it across the actor-dependent pull would wedge the actor on the lock
-        // while the build waits on the actor — a circular deadlock. So the lock
-        // is taken per phase (each chunk replace, then the final prune+stamp) and
-        // dropped around every `next()`.
+        // BUILD-AND-SWAP. The streaming producer reads each chunk through the
+        // collection actor (the single drive_sync thread). The connection lock
+        // MUST NOT be held across `next()`: a concurrent `search` runs
+        // `search_substring`/`search_fuzzy` THROUGH that same actor and takes
+        // THIS lock, so holding it across the actor-dependent pull would wedge
+        // the actor on the lock while the build waits on the actor — a circular
+        // deadlock.
         //
-        // The rebuild is REPLACE-IN-PLACE, NOT delete-all-then-insert: there is
-        // no up-front wholesale field clear, so a concurrent search NEVER sees an
-        // emptied index mid-rebuild (no full-recall cliff). Each chunk, in its
-        // own transaction, replaces ONLY its notes' field rows — a note's old
-        // rows stay searchable until that chunk overwrites them — and the final
-        // pass deletes field rows for any note this rebuild did NOT refresh
-        // (deleted notes, or live notes whose fields all went blank). Because the
-        // build is many transactions, a crash mid-rebuild leaves a partial store
-        // at the OLD col_mod (stamped LAST), which reads as drift next boot and
-        // rebuilds — the rebuildable-cache contract.
+        // So the new index is built into SHADOW tables (`idx_shadow`/
+        // `rowmap_shadow`) entirely OFF the live `idx`/`rowmap`, per chunk under
+        // a short lock dropped around every `next()`. The live tables are
+        // untouched throughout the build, so a concurrent search serves the FULL
+        // OLD index the whole time — no empty/partial window, no recall cliff. A
+        // single short swap transaction then renames the shadow over the live
+        // tables atomically: readers see the complete old index until the swap
+        // commits, the complete new one after. A mid-stream error or a crash
+        // before the swap discards the shadow and leaves the live store intact at
+        // the OLD col_mod (stamped only in the swap) — drift rebuilds next boot.
+        self.reset_shadow()?;
+        // Carry the recognition rows (`ocr`/`asr`/… — NOT rebuilt) into the
+        // shadow so the swap is a clean whole-table replace, not a field-only
+        // graft. Bounded by recognized-content volume, chunked under short locks.
+        self.copy_recognition_rows_to_shadow()?;
+        // Stream the new field rows into the shadow, off the live tables.
         let mut total = 0usize;
-        let mut refreshed: std::collections::HashSet<i64> = std::collections::HashSet::new();
         while let Some(chunk) = next() {
             let chunk = chunk?;
-            total += self.replace_field_chunk(&chunk, &mut refreshed)?;
+            total += self.insert_field_chunk_to_shadow(&chunk)?;
         }
-        self.prune_and_stamp(live_notes, &refreshed, col_mod)?;
+        // Atomic swap: prune dead-note rows, rename the shadow over the live
+        // tables, stamp col_mod — all in ONE short transaction.
+        self.swap_shadow_and_stamp(live_notes, col_mod)?;
         Ok(total)
     }
 
-    /// Replace ONE chunk's field rows in a short transaction (lock released on
-    /// return, so the actor-dependent pulls between chunks never block on it).
-    /// Replace-in-place: for each note PRESENT in this chunk, its old `field`
-    /// rows are deleted and the new ones inserted within the same transaction —
-    /// so a concurrent search sees either the old rows or the new, never an empty
-    /// gap. Records every refreshed note id in `refreshed` (the final pass uses
-    /// it to drop field rows for notes this rebuild never touched). Returns the
-    /// rows seen (blank text skipped). The idx↔rowmap pairing rides
-    /// `last_insert_rowid()` on this connection — sound under the single mutexed
-    /// connection, and a concurrent read takes the lock but never inserts.
-    fn replace_field_chunk(
-        &self,
-        chunk: &[(i64, String, String, String)],
-        refreshed: &mut std::collections::HashSet<i64>,
-    ) -> NativeResult<usize> {
-        // The distinct note ids this chunk carries — their old field rows are
-        // replaced wholesale (a note's fields are re-read together per chunk).
-        let chunk_ids: Vec<i64> = {
-            let mut ids: Vec<i64> = chunk.iter().map(|(id, _, _, _)| *id).collect();
-            ids.sort_unstable();
-            ids.dedup();
-            ids
-        };
-        let mut conn = self.lock();
-        let tx = conn.transaction().map_err(db_err)?;
-        // Drop ONLY these notes' field rows (not the whole table), then re-insert.
-        Self::delete_field_rows(&tx, &chunk_ids)?;
-        let mut seen = 0usize;
-        {
-            let mut ins_idx = tx
-                .prepare_cached("INSERT INTO idx(txt) VALUES(?1)")
-                .map_err(db_err)?;
-            let mut ins_map = tx
-                .prepare_cached(
-                    "INSERT INTO rowmap(rowid, note_id, source, ref) VALUES(?1,?2,?3,?4)",
-                )
-                .map_err(db_err)?;
-            for (note_id, source, reference, text) in chunk {
-                seen += 1;
-                if text.trim().is_empty() {
-                    continue;
-                }
-                ins_idx.execute([text]).map_err(db_err)?;
-                let rowid = tx.last_insert_rowid();
-                ins_map
-                    .execute(rusqlite::params![rowid, note_id, source, reference])
-                    .map_err(db_err)?;
-            }
-        }
-        tx.commit().map_err(db_err)?;
-        refreshed.extend(chunk_ids);
-        Ok(seen)
-    }
-
-    /// Delete only the `field`-source rows (idx + rowmap) for `note_ids` — the
-    /// replace half of [`Self::replace_field_chunk`]. Leaves recognition rows
-    /// (`ocr`/`asr`/…) and below-gate markers untouched.
-    fn delete_field_rows(conn: &Connection, note_ids: &[i64]) -> NativeResult<()> {
-        if note_ids.is_empty() {
-            return Ok(());
-        }
-        let (id_clause, id_params) = Self::note_id_clause(conn, "note_id", note_ids)?;
-        let clause = format!("{id_clause} AND source = 'field'");
-        let params: Vec<&dyn rusqlite::ToSql> = id_params
-            .iter()
-            .map(|n| n as &dyn rusqlite::ToSql)
-            .collect();
-        conn.execute(
-            &format!("DELETE FROM idx WHERE rowid IN (SELECT rowid FROM rowmap WHERE {clause})"),
-            rusqlite::params_from_iter(params.iter().copied()),
+    /// Drop any leftover shadow tables (a prior aborted rebuild) and create
+    /// fresh empty ones. Its own short transaction.
+    fn reset_shadow(&self) -> NativeResult<()> {
+        let conn = self.lock();
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS idx_shadow; \
+             DROP TABLE IF EXISTS rowmap_shadow;",
         )
         .map_err(db_err)?;
+        conn.execute(Self::IDX_SHADOW_DDL, []).map_err(db_err)?;
         conn.execute(
-            &format!("DELETE FROM rowmap WHERE {clause}"),
-            rusqlite::params_from_iter(params.iter().copied()),
+            "CREATE TABLE rowmap_shadow(\
+             rowid INTEGER PRIMARY KEY, note_id INTEGER NOT NULL, \
+             source TEXT NOT NULL, ref TEXT NOT NULL)",
+            [],
         )
         .map_err(db_err)?;
         Ok(())
     }
 
-    /// The final pass of the streaming rebuild (one short transaction): drop the
-    /// `field` rows for any note this rebuild did NOT refresh (a deleted note, or
-    /// a live note whose fields all went blank — neither appeared in the stream),
-    /// prune recognition rows + segments + below-gate markers for notes no longer
-    /// in the collection, then stamp `col_mod` LAST (so until it lands, drift
-    /// still fires — crash-safe). The authoritative note set for the RECOGNITION
-    /// prune is `live_notes` (the collection): a note can be live yet contribute
-    /// no field rows, and its recognition rows must survive.
-    fn prune_and_stamp(
+    /// Copy the live recognition rows (every non-`field` source) into the shadow,
+    /// re-pairing idx↔rowmap on the shadow connection. Chunked under short locks
+    /// (the lock is released between chunks) so a concurrent search interleaves;
+    /// the volume is bounded by recognized-content size, not the collection.
+    fn copy_recognition_rows_to_shadow(&self) -> NativeResult<()> {
+        // Read the live recognition (idx.txt, note_id, source, ref) rows once.
+        let rows: Vec<(String, i64, String, String)> = {
+            let conn = self.lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT idx.txt, m.note_id, m.source, m.ref FROM idx \
+                     JOIN rowmap m ON m.rowid = idx.rowid WHERE m.source != 'field'",
+                )
+                .map_err(db_err)?;
+            let out = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .map_err(db_err)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(db_err)?;
+            out
+        };
+        for chunk in rows.chunks(Self::INLINE_ID_MAX) {
+            let mut conn = self.lock();
+            let tx = conn.transaction().map_err(db_err)?;
+            Self::insert_shadow_rows(
+                &tx,
+                chunk
+                    .iter()
+                    .map(|(txt, nid, source, r)| (*nid, source.as_str(), r.as_str(), txt.as_str())),
+            )?;
+            tx.commit().map_err(db_err)?;
+        }
+        Ok(())
+    }
+
+    /// Insert ONE chunk of new `field` rows into the shadow under a short lock
+    /// (released on return, so the actor-dependent pulls between chunks never
+    /// block on it). Returns the rows seen (blank text skipped). The shadow's
+    /// idx↔rowmap pairing rides `last_insert_rowid()` on this connection.
+    fn insert_field_chunk_to_shadow(
         &self,
-        live_notes: &[i64],
-        refreshed: &std::collections::HashSet<i64>,
-        col_mod: i64,
-    ) -> NativeResult<()> {
+        chunk: &[(i64, String, String, String)],
+    ) -> NativeResult<usize> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
-        // Field rows for notes the rebuild never refreshed are stale (the note is
-        // gone, or now all-blank) — drop them. `refreshed` is the set that got
-        // new field rows this pass.
-        let stale_field: Vec<i64> = {
-            let mut stmt = tx
-                .prepare("SELECT DISTINCT note_id FROM rowmap WHERE source = 'field'")
+        let seen = chunk.len();
+        Self::insert_shadow_rows(
+            &tx,
+            chunk
+                .iter()
+                .map(|(nid, source, r, txt)| (*nid, source.as_str(), r.as_str(), txt.as_str())),
+        )?;
+        tx.commit().map_err(db_err)?;
+        Ok(seen)
+    }
+
+    /// Insert `(note_id, source, ref, text)` rows into `idx_shadow`/
+    /// `rowmap_shadow`, pairing the FTS5 rowid via `last_insert_rowid()` (blank
+    /// text skipped, exactly like the live insert).
+    fn insert_shadow_rows<'a>(
+        tx: &rusqlite::Transaction<'_>,
+        rows: impl Iterator<Item = (i64, &'a str, &'a str, &'a str)>,
+    ) -> NativeResult<()> {
+        let mut ins_idx = tx
+            .prepare_cached("INSERT INTO idx_shadow(txt) VALUES(?1)")
+            .map_err(db_err)?;
+        let mut ins_map = tx
+            .prepare_cached(
+                "INSERT INTO rowmap_shadow(rowid, note_id, source, ref) VALUES(?1,?2,?3,?4)",
+            )
+            .map_err(db_err)?;
+        for (note_id, source, reference, text) in rows {
+            if text.trim().is_empty() {
+                continue;
+            }
+            ins_idx.execute([text]).map_err(db_err)?;
+            let rowid = tx.last_insert_rowid();
+            ins_map
+                .execute(rusqlite::params![rowid, note_id, source, reference])
                 .map_err(db_err)?;
-            let ids: Vec<i64> = stmt
-                .query_map([], |r| r.get(0))
-                .map_err(db_err)?
-                .collect::<Result<_, _>>()
-                .map_err(db_err)?;
-            ids.into_iter().filter(|n| !refreshed.contains(n)).collect()
-        };
-        Self::delete_field_rows(&tx, &stale_field)?;
-        // Recognition rows + gated markers for notes no longer in the collection.
+        }
+        Ok(())
+    }
+
+    /// The atomic swap (ONE short transaction): prune the shadow's recognition
+    /// rows for notes no longer in the collection (and the live segments/gated
+    /// markers for them — those tables are not swapped), then RENAME the shadow
+    /// over the live `idx`/`rowmap`, and stamp `col_mod` LAST. SQLite renames an
+    /// FTS5 table cleanly; the whole thing is one transaction, so a reader sees
+    /// the complete old index until commit and the complete new one after — never
+    /// a partial. A crash before this leaves the live tables + old col_mod intact.
+    /// `live_notes` is the authoritative set: a note can be live yet have no field
+    /// rows, and its recognition rows must survive.
+    fn swap_shadow_and_stamp(&self, live_notes: &[i64], col_mod: i64) -> NativeResult<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(db_err)?;
         let live: std::collections::HashSet<i64> = live_notes.iter().copied().collect();
+        // Recognition rows that were copied into the shadow but whose note is gone.
         let stale: Vec<i64> = {
             let mut stmt = tx
                 .prepare(
-                    "SELECT DISTINCT note_id FROM rowmap WHERE source != 'field' \
+                    "SELECT DISTINCT note_id FROM rowmap_shadow WHERE source != 'field' \
                      UNION SELECT DISTINCT note_id FROM gated",
                 )
                 .map_err(db_err)?;
@@ -744,9 +758,55 @@ impl DerivedEngine {
             ids.into_iter().filter(|n| !live.contains(n)).collect()
         };
         if !stale.is_empty() {
-            Self::delete_rows(&tx, &stale, None)?;
+            // Drop the dead notes' recognition rows from the SHADOW (idx_shadow +
+            // rowmap_shadow), and their segments + gated markers from the live
+            // tables (not part of the idx/rowmap swap).
+            let (id_clause, id_params) = Self::note_id_clause(&tx, "note_id", &stale)?;
+            let params: Vec<&dyn rusqlite::ToSql> = id_params
+                .iter()
+                .map(|n| n as &dyn rusqlite::ToSql)
+                .collect();
+            tx.execute(
+                &format!(
+                    "DELETE FROM idx_shadow WHERE rowid IN \
+                     (SELECT rowid FROM rowmap_shadow WHERE {id_clause})"
+                ),
+                rusqlite::params_from_iter(params.iter().copied()),
+            )
+            .map_err(db_err)?;
+            tx.execute(
+                &format!("DELETE FROM rowmap_shadow WHERE {id_clause}"),
+                rusqlite::params_from_iter(params.iter().copied()),
+            )
+            .map_err(db_err)?;
+            // The live segments + gated tables aren't part of the idx/rowmap
+            // swap, so prune the dead notes from them directly.
+            tx.execute(
+                &format!("DELETE FROM segments WHERE {id_clause}"),
+                rusqlite::params_from_iter(params.iter().copied()),
+            )
+            .map_err(db_err)?;
             Self::delete_gated(&tx, &stale, None)?;
         }
+        // Atomic whole-table swap: the new index replaces the old in one step.
+        tx.execute_batch(
+            "DROP TABLE idx; \
+             DROP TABLE rowmap; \
+             ALTER TABLE idx_shadow RENAME TO idx; \
+             ALTER TABLE rowmap_shadow RENAME TO rowmap;",
+        )
+        .map_err(db_err)?;
+        // The rowmap indexes rode the old table; recreate them on the new one.
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS rowmap_note ON rowmap(note_id, source)",
+            [],
+        )
+        .map_err(db_err)?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS rowmap_source ON rowmap(source, note_id)",
+            [],
+        )
+        .map_err(db_err)?;
         tx.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('col_mod', ?1)",
             [col_mod],
@@ -1605,6 +1665,74 @@ mod tests {
                 .is_empty());
         }
         assert_eq!(e.get_col_mod(), Some(2));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn streamed_rebuild_error_leaves_the_live_index_untouched() {
+        // Build-and-swap atomicity: a mid-stream chunk error aborts the rebuild
+        // BEFORE the swap, so the live index + col_mod are exactly as they were —
+        // the failed rebuild reads as drift next boot and retries (no partial
+        // state, the property the old single-transaction rebuild had).
+        let (e, dir) = store();
+        build_snapshot_live(
+            &e,
+            &[
+                (1, "field".into(), "F".into(), "alpha original".into()),
+                (2, "field".into(), "F".into(), "beta original".into()),
+            ],
+            7,
+        )
+        .unwrap();
+
+        // Stream new text, then ERROR before the stream completes.
+        let mut step = 0;
+        #[allow(clippy::type_complexity)]
+        let mut next = || -> Option<NativeResult<Vec<(i64, String, String, String)>>> {
+            step += 1;
+            match step {
+                1 => Some(Ok(vec![(
+                    1i64,
+                    "field".to_string(),
+                    "F".to_string(),
+                    "alpha rebuilt".to_string(),
+                )])),
+                _ => Some(Err(NativeError::internal(
+                    "simulated mid-stream read failure",
+                ))),
+            }
+        };
+        let live = [1i64, 2];
+        let err = e.build_streamed(&mut next, &live, 99).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Internal);
+
+        // The live index is UNCHANGED: the OLD text still matches, the new text
+        // never landed, and col_mod stayed at 7 (so drift re-fires).
+        assert!(!e
+            .search_substring("alpha original", 10, None, &[])
+            .unwrap()
+            .unwrap_or_default()
+            .is_empty());
+        assert!(e
+            .search_substring("alpha rebuilt", 10, None, &[])
+            .unwrap()
+            .unwrap_or_default()
+            .is_empty());
+        assert_eq!(e.get_col_mod(), Some(7));
+
+        // A subsequent clean rebuild still works (the leftover shadow is reset).
+        build_snapshot_live(
+            &e,
+            &[(1, "field".into(), "F".into(), "alpha healed".into())],
+            8,
+        )
+        .unwrap();
+        assert!(!e
+            .search_substring("alpha healed", 10, None, &[])
+            .unwrap()
+            .unwrap_or_default()
+            .is_empty());
+        assert_eq!(e.get_col_mod(), Some(8));
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -500,6 +500,21 @@ impl Ingestor {
         self.floors.lock().expect("floors poisoned").derived.clear();
     }
 
+    /// Poison BOTH watermark floors after a drain panic was caught
+    /// ([`drain_loop`]): a panic mid-batch leaves the index/derived state of that
+    /// batch unknown, so block ANY further watermark advance until a full
+    /// reconcile/rebuild heals (which clears the floor). Without this, a later
+    /// SUCCESSFUL batch could advance the watermark past the panicked work — the
+    /// over-certification → silent-loss class (invariant #5/poison floor). Flooring
+    /// at `i64::MIN` blocks every advance (`resolve` returns `None` while the floor
+    /// is at/below the candidate). Recovers a poisoned floors mutex (the panic may
+    /// have poisoned it) rather than re-panicking, so the sole writer survives.
+    fn poison_floors_after_panic(&self) {
+        let mut floors = self.floors.lock().unwrap_or_else(|e| e.into_inner());
+        floors.index.resolve(i64::MIN, false);
+        floors.derived.resolve(i64::MIN, false);
+    }
+
     /// Index a set of present notes + remove an absent/deleted set, then advance
     /// each space's watermark to `advance_to` (with floor/failure handling). The
     /// shared core of [`Self::process_batch`] and [`Self::store_recognition`].
@@ -1024,7 +1039,9 @@ impl Ingestor {
         });
         // Consumer: the FTS5 rebuild on the compute pool, pulling chunks via
         // `blocking_recv` (a plain compute thread, not a runtime context). The
-        // read overlaps the insert; the whole rebuild is ONE transaction.
+        // read overlaps the insert; the build streams into a shadow index and
+        // swaps it over the live one atomically (so a concurrent search serves
+        // the full old index until the swap — no mid-rebuild recall cliff).
         let derived = Arc::clone(&self.derived);
         let live = ids;
         let n = runtime::dispatch_compute(move || {
@@ -1108,11 +1125,15 @@ async fn drain_loop(ingestor: Arc<Ingestor>, mut rx: mpsc::UnboundedReceiver<Ing
                 }
                 let ing = Arc::clone(&ingestor);
                 let work = async move { ing.process_batch(batch).await }.boxed();
-                process_caught(&ingestor.drain_panics, "batch", work).await;
+                if process_caught(&ingestor.drain_panics, "batch", work).await {
+                    ingestor.poison_floors_after_panic();
+                }
             }
             IngestMsg::Job(run) => {
                 let ing = Arc::clone(&ingestor);
-                process_caught(&ingestor.drain_panics, "job", run(ing)).await;
+                if process_caught(&ingestor.drain_panics, "job", run(ing)).await {
+                    ingestor.poison_floors_after_panic();
+                }
             }
             IngestMsg::Flush(done) => {
                 let _ = done.send(());
@@ -1125,12 +1146,13 @@ async fn drain_loop(ingestor: Arc<Ingestor>, mut rx: mpsc::UnboundedReceiver<Ing
 /// Drive one drain-loop unit of work under a panic boundary, so a fault in
 /// processing one item (a poisoned lock, an unexpected bug) loses only that item
 /// instead of killing the sole writer. A caught panic is logged once at WARNING
-/// and counted on `panics` (the `/status` degraded signal).
+/// and counted on `panics` (the `/status` degraded signal). Returns whether a
+/// panic was caught, so the caller can poison the watermark floors.
 async fn process_caught(
     panics: &std::sync::atomic::AtomicU64,
     kind: &str,
     work: BoxFuture<'static, ()>,
-) {
+) -> bool {
     if std::panic::AssertUnwindSafe(work)
         .catch_unwind()
         .await
@@ -1141,7 +1163,9 @@ async fn process_caught(
             %kind,
             "ingest drain caught a panic; that unit's notes are un-indexed until the next reconcile heals them"
         );
+        return true;
     }
+    false
 }
 
 /// Compose orchestrator inputs from collection rows + the derived store's
@@ -1257,9 +1281,14 @@ mod tests {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         runtime::testing::run_with_sync(async move {
-            process_caught(&p, "job", async { panic!("boom") }.boxed()).await;
+            let caught = process_caught(&p, "job", async { panic!("boom") }.boxed()).await;
+            assert!(
+                caught,
+                "a panic is reported to the caller (to poison the floors)"
+            );
             assert_eq!(p.load(Ordering::Relaxed), 1, "the panic was counted");
-            process_caught(&p, "job", async {}.boxed()).await;
+            let clean = process_caught(&p, "job", async {}.boxed()).await;
+            assert!(!clean, "a clean unit reports no panic");
             assert_eq!(
                 p.load(Ordering::Relaxed),
                 1,
@@ -1267,6 +1296,26 @@ mod tests {
             );
         });
         std::panic::set_hook(prev);
+    }
+
+    /// After a caught drain panic the floors are poisoned so NO later batch can
+    /// advance the watermark past the unknown-state work (the M3 silent-loss
+    /// guard). A subsequent clean batch at any col.mod is blocked until a full
+    /// reconcile clears the floor.
+    #[test]
+    fn poisoned_floors_block_every_later_advance() {
+        let mut floors = WatermarkFloors::default();
+        // Simulate poison_floors_after_panic's effect.
+        floors.index.resolve(i64::MIN, false);
+        floors.derived.resolve(i64::MIN, false);
+        // A later "successful" batch at a high col.mod must NOT advance.
+        assert_eq!(floors.index.resolve(1_000, true), None);
+        assert_eq!(floors.derived.resolve(1_000, true), None);
+        // A reconcile clears it; advances resume.
+        floors.index.clear();
+        floors.derived.clear();
+        assert_eq!(floors.index.resolve(1_000, true), Some(1_000));
+        assert_eq!(floors.derived.resolve(1_000, true), Some(1_000));
     }
 
     /// The C2 recognition re-embed composes from collection field text + THIS
