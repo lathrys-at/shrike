@@ -23,7 +23,7 @@ def test_result_union_discriminates_on_status() -> None:
     """A result dict resolves to the variant matching its status, with required fields."""
     ok = TypeAdapter(UpsertNoteResult).validate_python({"status": "created", "id": 1})
     assert isinstance(ok, UpsertNoteOk)
-    assert ok.id == 1 and ok.neighbors == [] and ok.neighbors_unavailable is False
+    assert ok.id == 1
 
     err = TypeAdapter(UpsertNoteResult).validate_python(
         {"status": "error", "index": 2, "error": "bad"}
@@ -93,24 +93,6 @@ def test_search_response_uses_message_not_underscore() -> None:
     # The legacy underscore key is ignored (extra="ignore"), not surfaced.
     legacy = SearchResponse.model_validate({"results": [], "_message": "building"})
     assert legacy.message is None
-
-
-def test_upsert_response_neighbor_shape() -> None:
-    resp = UpsertNotesResponse.model_validate(
-        {
-            "results": [
-                {
-                    "status": "created",
-                    "id": 1,
-                    "neighbors": [{"id": 2, "score": 0.8, "tags": ["x"]}],
-                }
-            ]
-        }
-    )
-    r = resp.results[0]
-    assert r.neighbors is not None
-    assert r.neighbors[0].id == 2
-    assert r.neighbors[0].score == 0.8
 
 
 def test_server_status_models_the_responsive_payload() -> None:

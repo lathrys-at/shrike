@@ -150,6 +150,7 @@ class TestAsyncKernel:
             assert [r[0] for r in results] == ["created", "created", "skipped", "error"]
             assert results[0][1] is not None
             assert "first field" in results[3][2]
+            await kernel.settle()
 
             # The kernel maintained the index: its shared engine handle sees
             # exactly the created notes' vectors.
@@ -171,6 +172,7 @@ class TestAsyncKernel:
             # {deleted, not_found} JSON in its single write job.
             deleted = json.loads(await kernel.delete_notes([results[0][1]]))
             assert deleted == {"deleted": [results[0][1]], "not_found": []}
+            await kernel.settle()
             assert sorted(engine.keys()) == sorted(created[1:])
             assert not await kernel.reindex_if_needed()
 
@@ -418,6 +420,7 @@ class TestAsyncKernelImages:
                 "error",
             )
             assert all(r[0] == "created" for r in results)
+            await kernel.settle()
             engine = kernel.engine_handle()
             pictured, plain = results[0][1], results[1][1]
             # The resolvable image embedded under the note's key; the missing
@@ -521,6 +524,7 @@ class TestLiveTwoSpaceEndToEnd:
                 "error",
             )
             image_note = results[0][1]
+            await kernel.settle()
 
             # The image landed in the CLIP space's ImageOnly index.
             assert kernel.embed_space_count() == 2
@@ -624,6 +628,7 @@ class TestRebuildIndex:
             await kernel.upsert_notes(
                 [(basic, 1, [f"note {i}", "b"], []) for i in range(3)], "error"
             )
+            await kernel.settle()
             backend.calls.clear()
             total = await kernel.rebuild_index()
             assert total == 3
@@ -671,6 +676,7 @@ class TestNamedUpsert:
             )
             assert created[0]["status"] == "created"
             nid = created[0]["id"]
+            await kernel.settle()
             assert engine.contains(nid), "create maintained the index"
             vec_before = engine.get(nid)
 
@@ -683,6 +689,7 @@ class TestNamedUpsert:
                 )
             )
             assert updated[0]["status"] == "updated"
+            await kernel.settle()
             assert engine.get(nid) != vec_before, "update re-embedded the note"
             assert not await kernel.reindex_if_needed(), "watermarks current"
 

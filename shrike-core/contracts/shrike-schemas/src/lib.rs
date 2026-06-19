@@ -192,27 +192,6 @@ pub struct SearchMatch {
     pub provenance: Vec<SignalContribution>,
 }
 
-/// A similar-note candidate attached to an upsert result.
-/// Neighbors are search results — a created/updated note's neighbors are a
-/// `search_notes` of its own content — so a neighbor mirrors a search match.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-pub struct Neighbor {
-    /// The neighbor note's id.
-    pub id: i64,
-    /// Cosine similarity when semantically ranked; None for an exact-text-only
-    /// hit (no meaningful cosine to report).
-    #[serde(default)]
-    pub score: Option<f64>,
-    #[serde(default)]
-    /// The neighbor's tags.
-    pub tags: Vec<String>,
-    /// Which signals surfaced the candidate — the search-provenance
-    /// shape: ANY search signal (`text`, `exact`, `image`, `tag`,
-    /// `fuzzy`), not just text.
-    #[serde(default)]
-    pub provenance: Vec<SignalContribution>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 /// A card template as returned in note-type detail.
 pub struct TemplateInfo {
@@ -392,23 +371,11 @@ pub enum UpsertNoteResult {
     Created {
         /// The created/updated note's id.
         id: i64,
-        #[serde(default)]
-        /// Similar existing notes (the dedup signal).
-        neighbors: Vec<Neighbor>,
-        #[serde(default)]
-        /// True if neighbors couldn't be computed (index unavailable).
-        neighbors_unavailable: bool,
     },
     /// The note was updated.
     Updated {
         /// The created/updated note's id.
         id: i64,
-        #[serde(default)]
-        /// Similar existing notes (the dedup signal).
-        neighbors: Vec<Neighbor>,
-        #[serde(default)]
-        /// True if neighbors couldn't be computed (index unavailable).
-        neighbors_unavailable: bool,
     },
     /// A dry-run outcome: validated, nothing written.
     Ok {
@@ -1554,8 +1521,8 @@ pub struct ServerStatus {
     #[serde(default = "default_true")]
     /// Whether the collection lock is currently held.
     pub collection_held: bool,
-    /// Dedup best-match statistics — None until the first upsert with
-    /// neighbors runs.
+    /// Dedup/activation best-match statistics — None until the first search
+    /// records a sample.
     #[serde(default)]
     pub dedup: Option<DedupStats>,
     /// Per-engine recognition state: a map keyed by source
@@ -1891,7 +1858,6 @@ catalog![
     ("FuzzyMatch", FuzzyMatch),
     ("SignalContribution", SignalContribution),
     ("SearchMatch", SearchMatch),
-    ("Neighbor", Neighbor),
     ("TemplateInfo", TemplateInfo),
     ("FieldDetail", FieldDetail),
     ("NoteTypeDetail", NoteTypeDetail),
@@ -1990,11 +1956,7 @@ mod tests {
 
     #[test]
     fn tagged_union_wire_shape() {
-        let created = UpsertNoteResult::Created {
-            id: 7,
-            neighbors: vec![],
-            neighbors_unavailable: false,
-        };
+        let created = UpsertNoteResult::Created { id: 7 };
         let json = serde_json::to_string(&created).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["status"], "created");
@@ -2147,8 +2109,8 @@ mod tests {
     #[test]
     fn unknown_keys_are_ignored() {
         // Pydantic's extra="ignore": a newer server's field doesn't break us.
-        let json = r#"{"id":1,"score":0.9,"tags":[],"brand_new_field":123}"#;
-        assert!(serde_json::from_str::<Neighbor>(json).is_ok());
+        let json = r#"{"signal":"text","rank":1,"brand_new_field":123}"#;
+        assert!(serde_json::from_str::<SignalContribution>(json).is_ok());
     }
 
     // The numeric-bound parity the advertised schema must declare: the

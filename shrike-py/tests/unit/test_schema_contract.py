@@ -336,16 +336,11 @@ ROUNDTRIP_CASES: list[tuple[str, dict]] = [
     ),
     (
         "UpsertNoteResult",
-        {"status": "created", "id": 9, "neighbors": [], "neighbors_unavailable": False},
+        {"status": "created", "id": 9},
     ),
     (
         "UpsertNoteResult",
-        {
-            "status": "updated",
-            "id": 9,
-            "neighbors": [{"id": 1, "score": 0.9, "tags": []}],
-            "neighbors_unavailable": False,
-        },
+        {"status": "updated", "id": 9},
     ),
     ("UpsertNoteResult", {"status": "ok", "index": 0, "action": "create"}),
     ("UpsertNoteResult", {"status": "skipped", "index": 1, "reason": "duplicate"}),

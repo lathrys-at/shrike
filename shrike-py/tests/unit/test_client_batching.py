@@ -31,7 +31,6 @@ class TestUpsertNotesBatching:
             "upsert_notes",
             {
                 "notes": notes,
-                "top_k_neighbors": 5,
                 "on_duplicate": "error",
                 "dry_run": False,
             },

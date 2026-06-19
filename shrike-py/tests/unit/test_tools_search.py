@@ -623,135 +623,6 @@ class TestDerivedSearch:
         assert len(res["results"][0]["matches"]) == 8
 
 
-class TestUpsertNeighbors:
-    def test_neighbors_attached_on_create(self, kharness, mcp_sem):
-        existing = kharness.seed_note("Q", back="A")
-        _plant(kharness, [(existing, 0.2)])
-        result = _upsert(kharness, mcp_sem, [BASIC_NOTE])
-        r = result["results"][0]
-        assert r["status"] == "created"
-        assert "neighbors" in r
-        assert len(r["neighbors"]) == 1
-        assert r["neighbors"][0]["id"] == existing
-        assert r["neighbors"][0]["score"] == 0.8
-
-    def test_neighbors_have_tags(self, kharness, mcp_sem):
-        existing = kharness.seed_note("Q", back="A", tags=["science", "physics"])
-        _plant(kharness, [(existing, 0.1)])
-        result = _upsert(kharness, mcp_sem, [BASIC_NOTE])
-        neighbors = result["results"][0]["neighbors"]
-        assert set(neighbors[0]["tags"]) == {"science", "physics"}
-
-    def test_below_semantic_floor_is_not_a_neighbor(self, kharness, mcp_sem):
-        # A candidate below the search semantic floor (0.5) and with no
-        # exact/fuzzy overlap is not similarity-backed → not a neighbor. There
-        # is no neighbor_threshold; the search floor + similarity gate
-        # decide. (distance 0.7 → cosine 0.3 < 0.5.)
-        existing = kharness.seed_note("Q", back="A")
-        _plant(kharness, [(existing, 0.7)])
-        result = _upsert(kharness, mcp_sem, [BASIC_NOTE])
-        assert result["results"][0].get("neighbors", []) == []
-
-    def test_above_semantic_floor_is_a_neighbor(self, kharness, mcp_sem):
-        # The companion: a candidate above the 0.5 floor IS similarity-backed
-        # (semantic) → kept, with its cosine reported. (distance 0.15 → cosine
-        # 0.85.) It clears the 0.5 floor with margin, no brittle 0.6 cliff to flip.
-        existing = kharness.seed_note("Q", back="A")
-        _plant(kharness, [(existing, 0.15)])
-        result = _upsert(kharness, mcp_sem, [BASIC_NOTE])
-        neighbors = result["results"][0]["neighbors"]
-        assert [n["id"] for n in neighbors] == [existing]
-        assert neighbors[0]["score"] == 0.85
-
-    def test_top_k_limits_neighbors(self, kharness, mcp_sem):
-        ids = [kharness.seed_note(f"E{i}", back="A") for i in range(5)]
-        _plant(kharness, [(nid, 0.1) for nid in ids])
-        result = _upsert(kharness, mcp_sem, [BASIC_NOTE], top_k_neighbors=2)
-        assert len(result["results"][0]["neighbors"]) == 2
-
-    def test_excludes_batch_notes_from_neighbors(self, kharness, qbackend):
-        # Notes embed IDENTICALLY to the query vector here, so the two batch
-        # notes are each other's nearest neighbours (distance 0) — the
-        # exclusion (and the over-fetch window that funds it) must drop them
-        # while the genuinely-existing planted note still surfaces.
-        kharness.attach_embedder(_AlignedBackend())
-        view = _StatsView(kharness.kernel, SimpleNamespace(backend=qbackend))
-        mcp = FastMCP("test")
-        register_tools(mcp, kharness.wrapper, index=view, kernel=kharness.kernel)
-        existing = kharness.seed_note("pre-existing card", back="A")
-        result = _upsert(kharness, mcp, [BASIC_NOTE, BASIC_NOTE])
-        batch_ids = {r["id"] for r in result["results"]}
-        for r in result["results"]:
-            neighbor_ids = {n["id"] for n in r["neighbors"]}
-            assert neighbor_ids == {existing}, "batch mates and self are excluded"
-            assert not (neighbor_ids & batch_ids)
-
-    def test_no_neighbors_without_index(self, kharness, mcp_no_index):
-        result = _upsert(kharness, mcp_no_index, [BASIC_NOTE])
-        # No embedding service: the success variant carries an empty neighbor list.
-        assert result["results"][0]["neighbors"] == []
-
-    def test_neighbor_failure_doesnt_fail_upsert(self, kharness, mcp_sem, qbackend):
-        qbackend.embed_texts.side_effect = RuntimeError("embedding service down")
-        result = _upsert(kharness, mcp_sem, [BASIC_NOTE])
-        assert result["results"][0]["status"] == "created"
-
-    def test_neighbor_failure_flags_retry(self, kharness, mcp_sem, qbackend):
-        """A neighbor-search hiccup flags the result and hints the retry path."""
-        qbackend.embed_texts.side_effect = RuntimeError("embedding service down")
-        result = _upsert(kharness, mcp_sem, [BASIC_NOTE])
-        r = result["results"][0]
-        nid = r["id"]
-        assert r["status"] == "created"
-        assert r["neighbors"] == []
-        assert r["neighbors_unavailable"] is True
-        assert f"search_notes(ids=[{nid}])" in result["message"]
-
-    def test_note_texts_failure_doesnt_fail_upsert(self, kharness, mcp_sem):
-        """If note_embed_inputs raises, the already-committed notes must
-        still report created — not a NameError-driven false failure."""
-
-        async def boom(_ids):
-            raise RuntimeError("embedding text build failed")
-
-        kharness.wrapper.note_embed_inputs = boom
-        result = _upsert(kharness, mcp_sem, [BASIC_NOTE])
-        r = result["results"][0]
-        assert r["status"] == "created"
-        assert r["neighbors"] == []
-        assert r["neighbors_unavailable"] is True
-        assert f"search_notes(ids=[{r['id']}])" in result["message"]
-
-    def test_no_retry_hint_on_success(self, kharness, mcp_sem):
-        """Successful neighbor computation carries no retry flag or message."""
-        result = _upsert(kharness, mcp_sem, [BASIC_NOTE])
-        r = result["results"][0]
-        assert r["neighbors"] == []
-        assert r["neighbors_unavailable"] is False
-        assert result["message"] is None
-
-    def test_neighbors_on_update(self, kharness, mcp_sem, kbasic_note):
-        other = kharness.seed_note("Q", back="A")
-        _plant(kharness, [(other, 0.3)])
-        result = _upsert(kharness, mcp_sem, [{"id": kbasic_note, "fields": {"Front": "Updated"}}])
-        r = result["results"][0]
-        assert r["status"] == "updated"
-        assert "neighbors" in r
-
-    def test_error_results_have_no_neighbors(self, kharness, mcp_sem):
-        result = _upsert(
-            kharness,
-            mcp_sem,
-            [BASIC_NOTE, {"note_type": "Nonexistent", "fields": {"X": "Y"}}],
-        )
-        ok = [r for r in result["results"] if r.get("status") == "created"]
-        err = [r for r in result["results"] if r.get("status") == "error"]
-        assert len(ok) == 1
-        assert len(err) == 1
-        # The error variant has no neighbors field at all (discriminated union).
-        assert "neighbors" not in err[0]
-
-
 class TestDeleteIndexUpdate:
     def test_removes_from_index(self, kharness, mcp_sem, kbasic_note):
         assert kharness.engine.contains(kbasic_note)
@@ -867,126 +738,9 @@ class TestTwoTierSearch:
         assert b in [m["id"] for m in result["results"][0]["matches"]]
 
 
-class TestDedupNeighbors:
-    """The generation-dedup hardening: the lexical-overlap signal, the
-    precision-oriented threshold, and per-signal provenance on upsert
-    neighbors."""
-
-    @pytest.fixture()
-    def derived(self, tmp_path):
-        from shrike.harness.derived import DerivedTextStore
-
-        s = DerivedTextStore(path=tmp_path / "shrike.db")
-        yield s
-        s.close()
-
-    @pytest.fixture()
-    def mcp_dedup(self, kharness, sem_view, derived):
-        mcp = FastMCP("test")
-        register_tools(
-            mcp, kharness.wrapper, index=sem_view, derived=derived, kernel=kharness.kernel
-        )
-        return mcp
-
-    def _neighbors(self, result: dict[str, Any]) -> list[dict[str, Any]]:
-        return result["results"][0].get("neighbors", [])
-
-    def test_fuzzy_only_hit_is_not_a_neighbor(self, kharness, mcp_dedup, derived):
-        # Similarity gate: an existing near-verbatim card planted
-        # semantically FAR (cosine 0) so ONLY the trigram overlap can catch it.
-        # A fuzzy-trigram-only hit is a lexical coincidence, NOT real
-        # content-similarity, so it does NOT qualify as a neighbor — neighbors
-        # are similarity-backed (semantic or exact) results.
-        existing = kharness.seed_note("the krebs cycle produces atp in mitochondria")
-        _build_derived(kharness, derived)
-        _plant(kharness, [(existing, 1.0)])  # distance 1.0 → cosine 0
-
-        result = _upsert(
-            kharness,
-            mcp_dedup,
-            [
-                {
-                    "deck": "Test",
-                    "note_type": "Basic",
-                    "fields": {
-                        "Front": "the krebs cycle produces atp in mitochondria!",
-                        "Back": "y",
-                    },
-                }
-            ],
-        )
-        assert existing not in {n["id"] for n in self._neighbors(result)}
-
-    def test_semantic_neighbor_carries_text_provenance(self, kharness, mcp_dedup, derived):
-        existing = kharness.seed_note("photosynthesis overview")
-        _build_derived(kharness, derived)
-        _plant(kharness, [(existing, 0.1)])  # cosine 0.9 ≥ the 0.5 search floor
-
-        result = _upsert(
-            kharness,
-            mcp_dedup,
-            [
-                {
-                    "deck": "Test",
-                    "note_type": "Basic",
-                    "fields": {"Front": "zz completely different words zz", "Back": "y"},
-                }
-            ],
-        )
-        neighbors = self._neighbors(result)
-        hit = next(n for n in neighbors if n["id"] == existing)
-        assert hit["score"] == 0.9
-        assert {p["signal"] for p in hit["provenance"]} == {"text"}
-
-    def test_both_signals_merge_on_one_candidate(self, kharness, mcp_dedup, derived):
-        # A semantic-backed candidate (cosine 0.9) that ALSO has trigram
-        # overlap: it qualifies (semantic), and its provenance carries both
-        # signals — the widened provenance (any search signal).
-        existing = kharness.seed_note("glycolysis happens in the cytoplasm")
-        _build_derived(kharness, derived)
-        _plant(kharness, [(existing, 0.1)])
-
-        result = _upsert(
-            kharness,
-            mcp_dedup,
-            [
-                {
-                    "deck": "Test",
-                    "note_type": "Basic",
-                    "fields": {"Front": "glycolysis happens in the cytoplasm too", "Back": "y"},
-                }
-            ],
-        )
-        hit = next(n for n in self._neighbors(result) if n["id"] == existing)
-        assert hit["score"] == 0.9
-        assert {p["signal"] for p in hit["provenance"]} == {"text", "fuzzy"}
-
-    def test_below_floor_unrelated_is_not_a_neighbor(self, kharness, mcp_dedup, derived):
-        # Cosine 0.45 < the 0.5 search semantic floor, and lexically
-        # unrelated — no similarity signal backs it, so it is not a neighbor.
-        # (There is no neighbor_threshold knob; the search floor +
-        # similarity gate decide.)
-        existing = kharness.seed_note("qq unrelated wording qq")
-        _build_derived(kharness, derived)
-        _plant(kharness, [(existing, 0.55)])  # cosine 0.45 < 0.5 floor
-
-        result = _upsert(
-            kharness,
-            mcp_dedup,
-            [
-                {
-                    "deck": "Test",
-                    "note_type": "Basic",
-                    "fields": {"Front": "zz different thing zz", "Back": "y"},
-                }
-            ],
-        )
-        assert existing not in {n["id"] for n in self._neighbors(result)}
-
-
 class TestDedupStats:
-    """The calibration feedstock: one best-semantic-match sample per
-    upsert draft, recorded from dedup's OWN traffic (never the activation gate)."""
+    """The calibration feedstock: one best-semantic-match sample per search
+    query group, recorded from the search path (never the activation gate)."""
 
     def test_recorder_buckets_and_no_match(self):
         from shrike.harness.harness import DedupStatsRecorder
@@ -1018,20 +772,13 @@ class TestDedupStats:
         )
         return mcp
 
-    def test_upsert_records_a_sample(self, kharness, mcp_dedup_stats, stats):
+    def test_search_records_a_sample(self, kharness, mcp_dedup_stats, stats):
+        # The sampler rides the search path now (#848): one best-semantic-match
+        # sample per query group, the same scores the dropped neighbor self-
+        # search produced.
         existing = kharness.seed_note("anchor card")
         _plant(kharness, [(existing, 0.1)])  # best match 0.9
-        _upsert(
-            kharness,
-            mcp_dedup_stats,
-            [
-                {
-                    "deck": "Test",
-                    "note_type": "Basic",
-                    "fields": {"Front": "zz new card zz", "Back": "y"},
-                }
-            ],
-        )
+        kharness.call_tool(mcp_dedup_stats, "search_notes", {"queries": ["zz new card zz"]})
         snap = stats.snapshot()
         assert snap["samples"] == 1
         assert snap["buckets"][18] == 1  # 0.9 → [0.90, 0.95)

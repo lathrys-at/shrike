@@ -256,11 +256,7 @@ impl CollectionCore {
             None => self.adapter.add_deck(&deck_name)?,
         };
         let id = self.adapter.add_note(&note, deck_id)?;
-        Ok(UpsertNoteResult::Created {
-            id,
-            neighbors: Vec::new(),
-            neighbors_unavailable: false,
-        })
+        Ok(UpsertNoteResult::Created { id })
     }
 
     fn update_note_named(
@@ -358,11 +354,7 @@ impl CollectionCore {
             self.adapter.set_card_deck(&card_ids, deck_id)?;
         }
 
-        Ok(UpsertNoteResult::Updated {
-            id: nid,
-            neighbors: Vec::new(),
-            neighbors_unavailable: false,
-        })
+        Ok(UpsertNoteResult::Updated { id: nid })
     }
 
     /// Edit tags on a note set — `set_tags` is a full replace (mutually

@@ -202,10 +202,15 @@ class KernelHarness:
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)
 
     def call_tool(self, mcp: Any, name: str, args: dict[str, Any] | None = None) -> Any:
-        """Call a registered MCP tool on the kernel loop; returns the structured result."""
+        """Call a registered MCP tool on the kernel loop; returns the structured
+        result. Settles the kernel ingest drain afterward so a tool's
+        maintenance (the index/derived effects of a write) is visible to the
+        test's assertions — writes are fire-and-forget and drain in the
+        background. A no-op for read-only tools (the queue is empty)."""
 
         async def _go() -> Any:
             _, structured = await mcp.call_tool(name, args or {})
+            await self.kernel.settle()
             return structured
 
         return self.run(_go())
@@ -243,16 +248,30 @@ class KernelHarness:
 
         self.run(_go())
 
+    def settle(self) -> None:
+        """Await the kernel ingest drain — the deterministic visibility barrier.
+        Writes are fire-and-forget (the maintenance drains in the background), so
+        a test asserting on the index/derived effects of a write settles first.
+        """
+
+        async def _go() -> None:
+            await self.kernel.settle()
+
+        self.run(_go())
+
     def upsert_notes(
         self, notes: list[dict], on_duplicate: str = "allow", dry_run: bool = False
     ) -> list[dict]:
         """Seed/edit notes through the kernel's maintained op (index + derived
-        + watermarks ride along, exactly like the served upsert path)."""
+        + watermarks ride along, exactly like the served upsert path). Settles
+        the drain so the seeded state is visible to the test's assertions."""
 
         async def _go() -> Any:
-            return json.loads(
+            results = json.loads(
                 await self.kernel.upsert_notes_json(json.dumps(notes), on_duplicate, dry_run)
             )
+            await self.kernel.settle()
+            return results
 
         return self.run(_go())
 
