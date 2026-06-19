@@ -1,4 +1,4 @@
-"""The perf corpus generator (#865): deterministic, production-shaped collections
+"""The perf corpus generator: deterministic, production-shaped collections
 built through the real native write path.
 
 Manual lane (off the per-PR critical path); it builds only tiny collections, so

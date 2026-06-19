@@ -164,8 +164,11 @@ Input bounds (`limit` 1–200, `top_k` 1–50, batch sizes ≤100/≤10) are dec
 
 ### Performance
 
-Ground performance decisions at a **100k-note collection**. These rules came out of the
-kernel performance audit; the recurring failure modes and the rules that prevent them:
+Ground performance decisions at scale: the perf harness benchmarks at **500/5k/50k-note
+collections** (50k the heaviest standard run); run it via `scripts/perf.sh` (see
+[`docs/dev/testing.md`](docs/dev/testing.md) — the Performance lane). These rules came out
+of the kernel performance audit (reasoned at 100k); the recurring failure modes and the
+rules that prevent them:
 
 - **No collection reads inside per-item loops.** The N+1 is the repeat offender: a
   singleton `note_dicts`/`note_texts` per candidate pays two SQL queries plus a full

@@ -65,6 +65,49 @@ tag registry), use the `isolated_server` / `isolated_mcp` / `isolated_runner`
 fixtures, which spawn a dedicated collection. Embedding tests use their own
 `collection_server` and are untouched by the reset.
 
+## Performance lane
+
+The perf harness (#865) is a **manual** lane — off the per-PR critical path — that
+times gold workflows against deterministic corpora and reports latency
+distributions. Run it by name:
+
+```bash
+# kernel-isolation run (the #445 hotspot class, no model inference):
+scripts/build-native.sh --release --synthetic   # OPTIMIZED (-c opt) + synthetic
+scripts/perf.sh --profile stub --size 5000 --variant text --workloads search,rebuild,ingest
+
+# end-to-end run (real onnx + CLIP; models fetched to the model cache):
+scripts/build-native.sh --release                # optimized extension
+scripts/perf.sh --profile real --size 5000 --variant text+image --workloads search
+```
+
+**Build optimized.** The runner times whatever extension is staged in the venv, and
+the default `build-native.sh` is `fastbuild` (unoptimized — meaningless for perf).
+Pass `--release` (`-c opt`); the runner records whether the build was optimized in
+the result conditions (and warns + refuses to diff a debug run against a release
+one), so a debug-build number can't be mistaken for a real one.
+
+Both modes boot the **same** harness from a config profile
+(`tests/manual/perf/profiles/perf-{stub,real}.yml`); the only difference is the
+embedder, and the two are comparable because they share the modality shape.
+`--profile stub` selects `runtime: synthetic`, which a lean build refuses — hence
+the `--synthetic` extension build.
+
+- **Sizes** 500 / 5k / 50k notes; **variants** `text` and `text+image`. Corpora
+  are deterministic, built through the real write path, and cached + gitignored
+  under `.cache/perf/corpora/`.
+- **Results** are distributions (p50/p90/p99/max) plus the conditions they were
+  taken under (machine, build, corpus, mode), written to `.cache/perf/runs/`.
+  `--baseline <result.json>` diffs a prior run and refuses to compare across
+  mismatched conditions.
+- The pure pieces (distribution math, the artifact, the diff) are unit-tested on
+  the per-PR lane (`//shrike-py/tests/manual/perf:pure_test`); the corpus and the
+  boot+drive are `manual` Bazel targets (the latter needs `--define
+  shrike_synthetic=on`).
+
+A profiler-attach seam (flamegraphs / span timing) is the next child (#866);
+budgets + regression gating are #869.
+
 ## The native (Rust) workspace
 
 The Rust workspace lives in `shrike-core/` (run `cargo` from there for

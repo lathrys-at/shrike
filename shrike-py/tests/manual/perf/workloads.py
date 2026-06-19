@@ -1,0 +1,132 @@
+"""The gold workloads the perf harness times.
+
+A workload is one operation, repeated against a booted harness over a fixed
+corpus: run a search, rebuild the index, ingest a batch. This slice ships a
+representative few to prove the runner; the full gold set (bulk delete,
+reconcile/sync, OCR sweeps) is the benchmarks child (#867).
+
+``mutates`` marks a workload that changes the collection (ingest); the runner
+orders read-only workloads first so a single boot stays representative.
+"""
+
+from __future__ import annotations
+
+import random
+
+from tests.manual.perf.driver import Booted
+
+# A small fixed vocabulary for synthetic queries and ingest notes (no external
+# data); deterministic so a workload's inputs are identical across runs.
+_VOCAB = [
+    "mitochondria",
+    "enzyme",
+    "synthesis",
+    "gradient",
+    "membrane",
+    "catalyst",
+    "photon",
+    "entropy",
+    "vector",
+    "matrix",
+    "tensor",
+    "manifold",
+    "lemma",
+    "theorem",
+    "neuron",
+    "synapse",
+    "cortex",
+    "receptor",
+    "ribosome",
+    "codon",
+    "orbital",
+    "valence",
+    "isotope",
+    "reaction",
+    "reagent",
+    "solvent",
+    "epoch",
+    "latency",
+    "throughput",
+    "cache",
+    "pipeline",
+    "kernel",
+]
+
+
+class SearchWorkload:
+    """Drive the real ``search_notes`` action over a fixed bank of synthetic
+    queries — the headline read path (embed the query, fan out, fuse)."""
+
+    name = "search"
+    mutates = False
+
+    def __init__(self, *, n_queries: int = 64, limit: int = 20) -> None:
+        self._limit = limit
+        rng = random.Random(0x5EED)
+        self._queries = [
+            " ".join(rng.choice(_VOCAB) for _ in range(rng.randint(1, 4))) for _ in range(n_queries)
+        ]
+
+    async def setup(self, booted: Booted) -> None:
+        return None
+
+    async def run_one(self, booted: Booted, iteration: int) -> int:
+        resp = await booted.search(self._queries[iteration % len(self._queries)], limit=self._limit)
+        groups = resp.get("results", [])
+        return sum(len(g.get("matches", [])) for g in groups)
+
+
+class RebuildWorkload:
+    """Rebuild the whole vector index — the O(collection) maintenance path a perf
+    audit watches for full-collection scans."""
+
+    name = "rebuild"
+    mutates = False
+
+    async def setup(self, booted: Booted) -> None:
+        return None
+
+    async def run_one(self, booted: Booted, iteration: int) -> int:
+        await booted.harness.kernel.rebuild_index()
+        return 1  # one full-collection rebuild
+
+
+class IngestWorkload:
+    """Upsert a batch of fresh notes through the real write path — the bulk-write
+    path (one transaction, embed + index the new notes).
+
+    Note: each timed iteration ADDS a batch, so the collection grows across the
+    run — the recorded ``corpus_size`` condition is the *starting* size, not the
+    size during the later iterations. Comparisons stay valid (identical
+    deterministic growth on both sides); the absolute number is "ingest into a
+    growing collection seeded at corpus_size", not "into a fixed corpus_size"."""
+
+    name = "ingest"
+    mutates = True
+
+    def __init__(self, *, batch: int = 200) -> None:
+        self._batch = batch
+
+    async def setup(self, booted: Booted) -> None:
+        return None
+
+    async def run_one(self, booted: Booted, iteration: int) -> int:
+        notes = [self._note(iteration, j) for j in range(self._batch)]
+        await booted.harness.wrapper.upsert_notes(notes)
+        return len(notes)
+
+    def _note(self, iteration: int, j: int) -> dict:
+        # A fresh deck/tag so ingested notes never collide with the corpus; the
+        # text is deterministic per (iteration, j).
+        rng = random.Random((iteration << 20) ^ j)
+        body = " ".join(rng.choice(_VOCAB) for _ in range(12))
+        return {
+            "deck": "Perf::Ingest",
+            "note_type": "Basic",
+            "tags": ["perf-ingest"],
+            "fields": {"Front": f"ingest {iteration}-{j}", "Back": body},
+        }
+
+
+#: name → workload class (instantiated with defaults by the runner).
+WORKLOADS = {w.name: w for w in (SearchWorkload, RebuildWorkload, IngestWorkload)}

@@ -1,4 +1,4 @@
-"""Deterministic synthetic corpus generator for the performance harness (#865).
+"""Deterministic synthetic corpus generator for the performance harness.
 
 Builds repeatable Anki collections at the sizes that matter — 500, 5k, and 50k
 notes — in ``text`` and ``text+image`` variants, through the REAL native write path
@@ -301,10 +301,14 @@ def ensure_corpus(spec: CorpusSpec, cache_root: Path | None = None) -> BuiltCorp
     marker = dest / ".complete"
     anki2 = dest / "collection.anki2"
     if marker.is_file() and anki2.is_file():
-        wrapper = CollectionWrapper(str(anki2))
-        media_dir = Path(wrapper.media_dir)
-        wrapper.close()
-        return BuiltCorpus(spec=spec, anki2_path=anki2, media_dir=media_dir, note_count=spec.notes)
+        # media_dir is a purely lexical derivation (<stem>.media, matching
+        # CollectionWrapper.media_dir) — no need to open the collection on reuse.
+        return BuiltCorpus(
+            spec=spec,
+            anki2_path=anki2,
+            media_dir=anki2.with_suffix(".media"),
+            note_count=spec.notes,
+        )
     built = build_corpus(spec, dest)
     marker.write_text(f"{spec.dirname}\n{built.note_count} notes\n")
     return built

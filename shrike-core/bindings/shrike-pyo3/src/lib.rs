@@ -341,6 +341,10 @@ fn build_features() -> Vec<&'static str> {
         (cfg!(feature = "engine-apple"), "engine-apple"),
         (cfg!(feature = "engine-synthetic"), "engine-synthetic"),
         (cfg!(feature = "manage-llama"), "manage-llama"),
+        // Not a feature: a build-profile marker. Present on an unoptimized
+        // (fastbuild/debug) build, absent under `-c opt`. The perf harness records
+        // it so a debug-build latency is never mistaken for a release one.
+        (cfg!(debug_assertions), "debug-assertions"),
     ]
     .into_iter()
     .filter_map(|(compiled, name)| compiled.then_some(name))
