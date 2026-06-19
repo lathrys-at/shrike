@@ -348,6 +348,24 @@ impl AsyncKernel {
         })
     }
 
+    /// Drive recognition sweeps to quiescence INSIDE the kernel — awaitable. One
+    /// FFI crossing instead of one per batch: the while-loop (drained /
+    /// no-progress / `max_batches`) runs in Rust. Returns the final JSON report
+    /// (`{status, recognized, stored, remaining, total_stored, batches}`).
+    /// `max_batches=None` runs until drained or a no-progress batch.
+    fn recognize_all_pending<'py>(
+        &self,
+        py: Python<'py>,
+        max_items: usize,
+        max_batches: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let report = inner.recognize_all_pending(max_items, max_batches).await?;
+            Ok::<_, shrike_error::NativeError>(report.to_json().to_string())
+        })
+    }
+
     /// Create a batch of notes (the duplicate policy per item) and index
     /// them — ONE collection job, ONE read job, batched embeds (an awaitable;
     /// per-item results, one bad note never sinks the batch).

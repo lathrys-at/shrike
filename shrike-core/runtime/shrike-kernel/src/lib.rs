@@ -1359,6 +1359,80 @@ impl Kernel {
         }
     }
 
+    /// Drive bounded recognition sweeps to quiescence INSIDE the kernel: loop
+    /// [`recognize_pending`](Self::recognize_pending) (each call keeps the
+    /// bounded-batch yield so other actor jobs interleave) until nothing is
+    /// pending, a no-progress batch, or `max_batches`. One FFI crossing instead
+    /// of one per batch; the "stored ⇒ visible" boundary lives in the runtime
+    /// that owns both stores. The loop logic — and its stop conditions — are the
+    /// Python harness driver's, ported verbatim:
+    ///
+    /// - status != `ran` (Idle/Unavailable) OR `remaining == 0` → drained.
+    /// - `recognized == 0` → no-progress STOP (an unreadable prefix of the
+    ///   pending order; skipped items stay pending, so re-taking the same
+    ///   window would loop forever — a later sweep trigger retries when the read
+    ///   may have healed). Keyed on `recognized == 0`, NOT `stored == 0`: a
+    ///   batch that recognized items but gated them all out did real work.
+    /// - `batches >= max_batches` → ceiling (may leave pending).
+    ///
+    /// The per-purpose chunk-Err-aborts-before-persist contract is preserved by
+    /// `recognize_pending`'s own `?`-propagation: a down endpoint aborts the run
+    /// with its backlog intact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a batch's collection read, recognizer call, or
+    /// persist/re-embed fails (aborting before persist, backlog intact).
+    pub async fn recognize_all_pending(
+        &self,
+        batch_size: usize,
+        max_batches: Option<usize>,
+    ) -> NativeResult<recognize::SweepRunReport> {
+        let mut total_stored = 0usize;
+        let mut batches = 0usize;
+        loop {
+            let report = self.recognize_pending(batch_size).await?;
+            match report {
+                recognize::SweepReport::Ran {
+                    recognized,
+                    stored,
+                    remaining,
+                } => {
+                    total_stored += stored;
+                    batches += 1;
+                    let drained = remaining == 0;
+                    let no_progress = recognized == 0;
+                    let ceiling = max_batches.is_some_and(|mb| batches >= mb);
+                    if drained || no_progress || ceiling {
+                        if no_progress && !drained {
+                            tracing::warn!(
+                                remaining,
+                                "recognition sweep stopped on a no-progress batch (unreadable prefix)"
+                            );
+                        }
+                        return Ok(recognize::SweepRunReport {
+                            last: recognize::SweepReport::Ran {
+                                recognized,
+                                stored,
+                                remaining,
+                            },
+                            total_stored,
+                            batches,
+                        });
+                    }
+                }
+                // status != "ran" (Idle / Unavailable) — the loop's other stop.
+                other => {
+                    return Ok(recognize::SweepRunReport {
+                        last: other,
+                        total_stored,
+                        batches,
+                    });
+                }
+            }
+        }
+    }
+
     /// One bounded recognition sweep for a SINGLE purpose — the
     /// per-engine routing of the sweep. Pending = a resolvable
     /// media ref of this purpose's media kind with no row for THIS source AND

@@ -190,6 +190,37 @@ pub enum SweepReport {
     },
 }
 
+/// What a full `recognize_all_pending` run did: the LAST batch's outcome plus
+/// the run totals. The drive-to-quiescence while-loop lives in the kernel now
+/// (one FFI crossing, not one per batch); this is the report the host's driver
+/// consumed when that loop lived in Python — same shape, with the totals merged
+/// in. The no-progress stop (`Ran { recognized: 0, .. }`) and the
+/// per-purpose abort the batch op enforces are preserved verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SweepRunReport {
+    /// The last batch's report (`unavailable` / `idle` / `ran`).
+    pub last: SweepReport,
+    /// Total items stored across every batch this run.
+    pub total_stored: usize,
+    /// How many kernel sweep batches this run made — the observable that
+    /// distinguishes the no-progress STOP from a livelock regression.
+    pub batches: usize,
+}
+
+impl SweepRunReport {
+    /// The host-facing JSON: the last batch's `{status, …}` fields with
+    /// `total_stored` + `batches` merged in (the shape the Python driver built).
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut v = serde_json::to_value(&self.last).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("total_stored".into(), self.total_stored.into());
+            obj.insert("batches".into(), self.batches.into());
+        }
+        v
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

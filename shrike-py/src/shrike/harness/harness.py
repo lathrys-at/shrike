@@ -803,53 +803,23 @@ class Harness:
     ) -> dict[str, Any]:
         """Drive bounded recognition sweeps until nothing is pending.
 
-        Each kernel call recognizes at most ``batch_size`` images then yields
-        the executor, so collection ops interleave; the harness runs this as
-        a background task (the reindex discipline). Returns the final report
-        plus the total stored across the run."""
-        total_stored = 0
-        batches = 0
-        while True:
-            report: dict[str, Any] = json.loads(await self.kernel.recognize_pending(batch_size))
-            total_stored += int(report.get("stored", 0))
-            batches += 1
-            # ``batches`` is the count of kernel sweep calls this run made — the
-            # observable that distinguishes the no-progress STOP (returns after
-            # one no-progress batch) from a livelock REGRESSION (would re-take
-            # the same window every call). Surfaced so a test can assert the
-            # driver stopped by logic, not by a wall-clock timeout.
-            if report.get("status") != "ran" or int(report.get("remaining", 0)) == 0:
-                report["total_stored"] = total_stored
-                report["batches"] = batches
-                if total_stored:
-                    logger.info(
-                        "Recognition sweep stored %d item(s) over %d batch(es)",
-                        total_stored,
-                        batches,
-                    )
-                return report
-            if int(report.get("recognized", 0)) == 0:
-                # No progress: nothing in this batch was drainable (an
-                # unreadable prefix of the pending order — skipped items stay
-                # pending, so the next batch would re-take the same window
-                # forever). Stop here; the next sweep trigger (boot, /reload,
-                # cooperative re-acquire) retries when the read may have
-                # healed. Keyed on recognized == 0, NOT stored == 0: a batch
-                # that recognized items but gated them all out did real work
-                # (the reads drained, recognition ran) and must not stop the
-                # sweep.
-                report["total_stored"] = total_stored
-                report["batches"] = batches
-                logger.warning(
-                    "Recognition sweep stopped on a no-progress batch "
-                    "(%d item(s) still pending, unreadable)",
-                    int(report.get("remaining", 0)),
-                )
-                return report
-            if max_batches is not None and batches >= max_batches:
-                report["total_stored"] = total_stored
-                report["batches"] = batches
-                return report
+        The drive-to-quiescence loop lives in the KERNEL now
+        (``recognize_all_pending``): one FFI crossing instead of one per batch,
+        with the no-progress STOP and the per-purpose abort decided in the
+        runtime that owns both stores. Each internal batch keeps the bounded-
+        batch yield so collection ops interleave. Returns the final report plus
+        the run totals (``total_stored``, ``batches``)."""
+        report: dict[str, Any] = json.loads(
+            await self.kernel.recognize_all_pending(batch_size, max_batches)
+        )
+        total_stored = int(report.get("total_stored", 0))
+        if total_stored:
+            logger.info(
+                "Recognition sweep stored %d item(s) over %d batch(es)",
+                total_stored,
+                int(report.get("batches", 0)),
+            )
+        return report
 
     def start_recognition(self, kind: str) -> None:
         """Construct + attach an OCR backend by kind and launch a background
