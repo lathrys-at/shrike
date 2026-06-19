@@ -246,6 +246,13 @@ class RemoteEmbedder:
     def model_info(self) -> tuple[str | None, str]: ...
 
 @final
+class SyntheticEmbedder:
+    def __new__(cls, *, dim: int) -> SyntheticEmbedder: ...
+    def embed_chunk(self, texts: list[str]) -> list[list[float]]: ...
+    def embed_image_chunk(self, images: list[bytes]) -> list[list[float]]: ...
+    def dim(self) -> int | None: ...
+
+@final
 class NativeEmbedder:
     @staticmethod
     def from_remote(
@@ -267,6 +274,14 @@ class NativeEmbedder:
     @staticmethod
     def from_clip(
         engine: ClipEmbedder,
+        *,
+        fingerprint: str | None,
+        dim: int | None,
+        safe_batch: int,
+    ) -> NativeEmbedder: ...
+    @staticmethod
+    def from_synthetic(
+        engine: SyntheticEmbedder,
         *,
         fingerprint: str | None,
         dim: int | None,

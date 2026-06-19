@@ -17,6 +17,11 @@
 //!   — the swiftc toolchain rides THERE (pulled only when `engine-apple` is on),
 //!   so this crate stays `build.rs`-free. This layer parses the glue's raw JSON
 //!   into engine-api types.
+//! - [`synthetic`] (feature `engine-synthetic`): a deterministic,
+//!   dependency-free embedder for benchmarking and fast deterministic tests —
+//!   vectors are a pure function of the input bytes, no model. Non-default and
+//!   never in a release build, so a production config naming it is refused by
+//!   the host's capability resolution.
 //!
 //! Pure Rust — NO pyo3; bound to Python in
 //! `shrike-pyo3`, to the C ABI in the mobile binding.
@@ -36,3 +41,6 @@ pub mod remote;
 
 #[cfg(feature = "engine-apple")]
 pub mod apple;
+
+#[cfg(feature = "engine-synthetic")]
+pub mod synthetic;

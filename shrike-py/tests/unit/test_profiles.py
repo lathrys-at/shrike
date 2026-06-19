@@ -1319,3 +1319,58 @@ class TestRouterMode:
         assert dicts[2]["endpoint"] == "https://api.example.com/v1"
         assert "router" in dicts[0] and "router" in dicts[1]
         assert "router" not in dicts[2]
+
+
+# ── runtime: synthetic (the benchmark/test embedder, #865) ───────────────────
+
+
+SERVER_SYNTH = SERVER + ("engine-synthetic",)
+
+
+class TestSynthetic:
+    """The deterministic synthetic embedder: parsed like any space, gated on the
+    `engine-synthetic` build feature, and mapped onto the `synthetic` backend."""
+
+    def test_entry_parses_with_no_model(self):
+        caps = parse_capabilities(
+            {"embedders": [{"modalities": ["text", "image"], "runtime": "synthetic"}]}
+        )
+        assert caps.embedders == (EmbedderEntry(modalities=("text", "image"), runtime="synthetic"),)
+
+    def test_resolves_when_the_feature_is_compiled(self):
+        config = {"embedders": [{"modalities": ["text", "image"], "runtime": "synthetic"}]}
+        plan = resolve_profile(parse_capabilities(config), SERVER_SYNTH)
+        assert plan_to_runtime_params(plan) == {
+            "backend": "synthetic",
+            "modalities": frozenset({"text", "image"}),
+        }
+
+    def test_refused_when_the_feature_is_absent(self):
+        # The two-layer rule: a release/server build does not compile
+        # engine-synthetic, so the declaration is refused — never a silent no-op.
+        config = {"embedders": [{"modalities": ["text"], "runtime": "synthetic"}]}
+        with pytest.raises(ProfileError, match="engine-synthetic"):
+            resolve_profile(parse_capabilities(config), SERVER)
+
+    def test_model_is_rejected(self):
+        with pytest.raises(ProfileError, match="model does not apply to runtime: synthetic"):
+            parse_capabilities(
+                {"embedders": [{"modalities": ["text"], "runtime": "synthetic", "model": "m"}]}
+            )
+
+    def test_pooling_is_rejected(self):
+        with pytest.raises(ProfileError, match="pooling does not apply to runtime: synthetic"):
+            parse_capabilities(
+                {"embedders": [{"modalities": ["text"], "runtime": "synthetic", "pooling": "mean"}]}
+            )
+
+    def test_batch_size_is_rejected(self):
+        with pytest.raises(ProfileError, match="batch_size does not apply to runtime: synthetic"):
+            parse_capabilities(
+                {"embedders": [{"modalities": ["text"], "runtime": "synthetic", "batch_size": 8}]}
+            )
+
+    def test_text_only_entry_maps_to_a_text_synthetic_space(self):
+        config = {"embedders": [{"modalities": ["text"], "runtime": "synthetic"}]}
+        plan = resolve_profile(parse_capabilities(config), SERVER_SYNTH)
+        assert plan_to_runtime_params(plan)["modalities"] == frozenset({"text"})

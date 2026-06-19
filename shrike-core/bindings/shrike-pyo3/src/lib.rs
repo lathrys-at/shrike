@@ -338,6 +338,7 @@ fn build_features() -> Vec<&'static str> {
         (cfg!(feature = "engine-ort"), "engine-ort"),
         (cfg!(feature = "engine-remote"), "engine-remote"),
         (cfg!(feature = "engine-apple"), "engine-apple"),
+        (cfg!(feature = "engine-synthetic"), "engine-synthetic"),
         (cfg!(feature = "manage-llama"), "manage-llama"),
     ]
     .into_iter()
@@ -615,6 +616,66 @@ impl RemoteEmbedder {
             let meta = serde_json::Value::Object(info.meta).to_string();
             (info.id, meta)
         })
+    }
+}
+
+/// The deterministic synthetic engine (#865) under the `SyntheticBackend`
+/// facade: a `dim`-dimensional unit vector computed purely from the input
+/// bytes — no model, negligible cost. Behind `engine-synthetic`, absent from a
+/// release build, so a config naming `runtime: synthetic` is refused by
+/// capability resolution. For benchmarking and fast deterministic tests; the
+/// vectors carry no semantics.
+#[cfg(feature = "engine-synthetic")]
+#[pyclass(frozen)]
+pub(crate) struct SyntheticEmbedder {
+    inner: std::sync::Arc<shrike_engine::synthetic::SyntheticEmbedder>,
+}
+
+#[cfg(feature = "engine-synthetic")]
+impl SyntheticEmbedder {
+    /// The engine, shared (see the ort engines' `engine_arc`).
+    pub(crate) fn engine_arc(&self) -> std::sync::Arc<shrike_engine::synthetic::SyntheticEmbedder> {
+        std::sync::Arc::clone(&self.inner)
+    }
+}
+
+#[cfg(feature = "engine-synthetic")]
+#[pymethods]
+impl SyntheticEmbedder {
+    #[new]
+    #[pyo3(signature = (*, dim))]
+    fn new(dim: usize) -> Self {
+        Self {
+            inner: std::sync::Arc::new(shrike_engine::synthetic::SyntheticEmbedder::new(dim)),
+        }
+    }
+
+    /// Embed one chunk of texts (one unit vector per input). Pure sync compute,
+    /// GIL released — the direct path for the facade's probe/`embed_texts`; the
+    /// kernel slot rides the `NativeEmbedder` composition instead.
+    fn embed_chunk(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Vec<Vec<f32>>> {
+        use shrike_engine_api::EmbedText as _;
+        py.detach(|| self.inner.embed_chunk(&texts))
+            .map_err(to_py_err)
+    }
+
+    /// Embed one chunk of images (encoded bytes in, one vector per image).
+    fn embed_image_chunk(&self, py: Python<'_>, images: Vec<Vec<u8>>) -> PyResult<Vec<Vec<f32>>> {
+        use shrike_engine_api::EmbedImages as _;
+        py.detach(|| {
+            let items: Vec<shrike_engine_api::MediaItem> = images
+                .into_iter()
+                .map(shrike_engine_api::MediaItem::untyped)
+                .collect();
+            self.inner.embed_image_chunk(&items)
+        })
+        .map_err(to_py_err)
+    }
+
+    /// The fixed embedding dimension (known up front — no probe needed).
+    fn dim(&self) -> Option<usize> {
+        use shrike_engine_api::EmbedText as _;
+        self.inner.dim()
     }
 }
 
@@ -1119,6 +1180,8 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     #[cfg(feature = "engine-remote")]
     m.add_class::<RemoteEmbedder>()?;
+    #[cfg(feature = "engine-synthetic")]
+    m.add_class::<SyntheticEmbedder>()?;
     #[cfg(feature = "manage-llama")]
     m.add_class::<LlamaServerManager>()?;
     m.add_class::<NativeIndexEngine>()?;

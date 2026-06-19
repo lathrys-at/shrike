@@ -266,6 +266,7 @@ py_library(
         "harness/engines/embedding/onnx.py",
         "harness/engines/embedding/onnx_common.py",
         "harness/engines/embedding/runtime.py",
+        "harness/engines/embedding/synthetic.py",
     ],
     imports = [".."],
     deps = [

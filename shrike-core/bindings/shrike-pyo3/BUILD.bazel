@@ -52,12 +52,16 @@ rust_shared_library(
         # NO engine-apple: platform engines are never in the server build, on
         # any OS (docs/distribution.md).
         "manage-llama",
-    ],
+        # engine-synthetic is OFF here (the wheel/CI default); `--define
+        # shrike_synthetic=on` adds it for a dev/benchmark extension (#865).
+    ] + select({
+        ":synthetic_enabled": ["engine-synthetic"],
+        "//conditions:default": [],
+    }),
     deps = [
         "//shrike-core/runtime/shrike-cache:shrike_cache",
         "//shrike-core/runtime/shrike-collection:shrike_collection",
         "//shrike-core/runtime/shrike-derived:shrike_derived",
-        "//shrike-core/engines/shrike-engine:shrike_engine",
         "//shrike-core/contracts/shrike-engine-api:shrike_engine_api",
         "//shrike-core/contracts/shrike-error:shrike_error",
         "//shrike-core/contracts/shrike-store:shrike_store",
@@ -76,7 +80,12 @@ rust_shared_library(
         "@crates//:tracing",
         "@crates//:tracing-error",
         "@crates//:tracing-subscriber",
-    ],
+    ] + select({
+        # The synthetic-enabled extension must link the engine built WITH
+        # `engine-synthetic` — Bazel feature sets don't unify across targets.
+        ":synthetic_enabled": ["//shrike-core/engines/shrike-engine:shrike_engine_synthetic"],
+        "//conditions:default": ["//shrike-core/engines/shrike-engine:shrike_engine"],
+    }),
 )
 
 # Python imports `shrike_native._native` from a file literally named
@@ -126,6 +135,15 @@ py_test(
         ":shrike_native",
         requirement("mypy"),
     ],
+)
+
+# `--define shrike_synthetic=on` adds the deterministic synthetic embedder
+# (#865) to the extension. OFF by default, so the release wheel and the per-PR
+# `//...` lane build the lean extension and a config naming `runtime: synthetic`
+# is refused by capability resolution; a dev/benchmark build opts in.
+config_setting(
+    name = "synthetic_enabled",
+    values = {"define": "shrike_synthetic=on"},
 )
 
 # Platform config_settings for the //shrike-py:wheel platform tag (the

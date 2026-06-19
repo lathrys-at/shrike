@@ -26,7 +26,7 @@ use shrike_engine_api::{Embedder, ImageEmbedder};
 // remote engines are route-2 async-direct (`AsyncWithPolicy`, no `Blocking`).
 #[cfg(feature = "engine-remote")]
 use shrike_engine_api::AsyncWithPolicy;
-#[cfg(feature = "engine-ort")]
+#[cfg(any(feature = "engine-ort", feature = "engine-synthetic"))]
 use shrike_engine_api::WithPolicy;
 
 /// The assembled native embedder the kernel slot takes: the text half always,
@@ -110,6 +110,32 @@ impl NativeEmbedder {
     #[pyo3(signature = (engine, *, fingerprint, dim, safe_batch))]
     fn from_clip(
         engine: PyRef<'_, crate::ClipEmbedder>,
+        fingerprint: Option<String>,
+        dim: Option<usize>,
+        safe_batch: usize,
+    ) -> Self {
+        let tuned = Arc::new(WithPolicy::new(
+            engine.engine_arc(),
+            fingerprint,
+            dim,
+            safe_batch,
+        ));
+        let adapted = Arc::new(crate::compute_dispatch::blocking(tuned));
+        Self {
+            text: Arc::clone(&adapted) as Arc<dyn Embedder>,
+            images: Some(adapted as Arc<dyn ImageEmbedder>),
+        }
+    }
+
+    /// Compose the deterministic synthetic engine (#865) — Route-1 sync, the
+    /// same shape as [`NativeEmbedder::from_clip`]: one engine serves both the
+    /// text and image halves behind `WithPolicy` + `Blocking`. Gated on
+    /// `engine-synthetic`, so a release build can't compose it.
+    #[cfg(feature = "engine-synthetic")]
+    #[staticmethod]
+    #[pyo3(signature = (engine, *, fingerprint, dim, safe_batch))]
+    fn from_synthetic(
+        engine: PyRef<'_, crate::SyntheticEmbedder>,
         fingerprint: Option<String>,
         dim: Option<usize>,
         safe_batch: usize,

@@ -41,7 +41,7 @@ from shrike.harness.engines.embedding.text import EMBED_TEXT_VERSION
 # Embedding backend kinds the runtime can construct (see EmbeddingRuntime).
 # The onnx/clip backends run the native (Rust) engines; "onnx-rs"/"clip-rs"
 # remain accepted as aliases so existing configs keep working.
-SUPPORTED_BACKENDS = ("llama", "onnx", "clip")
+SUPPORTED_BACKENDS = ("llama", "onnx", "clip", "synthetic")
 BACKEND_ALIASES = {"onnx-rs": "onnx", "clip-rs": "clip"}
 DEFAULT_BACKEND = "llama"
 
@@ -739,8 +739,13 @@ class EmbeddingRuntime:
     @property
     def _configured(self) -> bool:
         # A remote backend is configured by its endpoint alone (the endpoint's
-        # default model is a valid choice); every other kind needs a model.
-        return bool(self._model) or (self._backend_kind == "remote" and bool(self._endpoint))
+        # default model is a valid choice); the synthetic backend loads no model
+        # at all; every other kind needs a model.
+        return (
+            bool(self._model)
+            or (self._backend_kind == "remote" and bool(self._endpoint))
+            or self._backend_kind == "synthetic"
+        )
 
     def health(self) -> dict[str, Any]:
         info: dict[str, Any] = (
@@ -867,6 +872,13 @@ class EmbeddingRuntime:
                 # fingerprint; harmless (and None) for any non-router remote.
                 pooling=self._pooling if self._router_managed else None,
             )
+        if self._backend_kind == "synthetic":
+            # No model, no external deps: a deterministic in-process embedder for
+            # benchmarks and fast tests. Gated to non-release builds — the config
+            # layer has already refused it where `engine-synthetic` is absent.
+            from shrike.harness.engines.embedding.synthetic import SyntheticBackend
+
+            return SyntheticBackend(modalities=self._modalities)
         assert self._model is not None  # callers check before constructing
         if self._backend_kind == "onnx":
             from shrike.harness.engines.embedding.onnx import OnnxBackend

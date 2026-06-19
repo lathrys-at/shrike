@@ -124,6 +124,9 @@ _EMBEDDING = [
     "test_embedding_clip.py",
     "test_embedding_onnx.py",
     "test_embedding_remote.py",
+    # Skips on the lean build (engine-synthetic is non-default); runs locally
+    # after `scripts/build-native.sh --synthetic`.
+    "test_embedding_synthetic.py",
 ]
 
 _ACTIONS = [

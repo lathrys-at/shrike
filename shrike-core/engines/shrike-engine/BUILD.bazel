@@ -78,6 +78,47 @@ rust_library(
     deps = ENGINE_COMMON_DEPS + ENGINE_REMOTE_DEPS,
 )
 
+# The SERVER+SYNTHETIC target: the server set plus the deterministic synthetic
+# engine (#865). The synthetic-enabled native extension links THIS instead of
+# `:shrike_engine` (Bazel feature sets don't unify across targets, so the
+# extension's `engine-synthetic` needs an engine built with it too). `manual`:
+# only a dev/benchmark extension build names it; the per-PR `//...` lane and the
+# release wheel build the lean `:shrike_engine`.
+rust_library(
+    name = "shrike_engine_synthetic",
+    srcs = ENGINE_SRCS,
+    crate_name = "shrike_engine",
+    crate_features = [
+        "onnx",
+        "remote",
+        "cuda",
+        "directml",
+        "tensorrt",
+        "engine-synthetic",
+    ],
+    edition = "2021",
+    tags = ["manual"],
+    deps = ENGINE_COMMON_DEPS + ENGINE_ONNX_DEPS + ENGINE_REMOTE_DEPS,
+)
+
+# The synthetic engine in isolation (no onnx/remote deps) — a cheap rlib whose
+# only job is to run synthetic.rs's unit tests on the per-PR lane. Pure Rust,
+# so it costs a single small crate compile.
+rust_library(
+    name = "shrike_engine_synthetic_only",
+    srcs = ENGINE_SRCS,
+    crate_name = "shrike_engine",
+    crate_features = ["engine-synthetic"],
+    edition = "2021",
+    deps = ENGINE_COMMON_DEPS,
+)
+
+rust_test(
+    name = "shrike_engine_synthetic_test",
+    size = "small",
+    crate = ":shrike_engine_synthetic_only",
+)
+
 # The crate's unit tests run on the full server feature set (onnx + remote) so
 # both cones' tests execute on the per-PR `//...` lane — the remote dedup's
 # byte-equivalence (SSRF/api-key/retry vectors) and the onnx pooling logic.

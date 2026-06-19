@@ -52,6 +52,13 @@ from shrike_native._native import (
 with contextlib.suppress(ImportError):
     from shrike_native._native import AppleVisionRecognizer  # noqa: F401
 
+# Feature-gated: present only in `engine-synthetic` builds (#865) — the perf
+# lane and fast deterministic tests, never the release wheel. Outside __all__;
+# the SyntheticBackend facade imports it directly, and a lean build refuses
+# `runtime: synthetic` at config resolution, so this is never reached there.
+with contextlib.suppress(ImportError):
+    from shrike_native._native import SyntheticEmbedder  # noqa: F401
+
 # Feature-gated: present only in `anki-core` builds (the
 # scripts/build-native.sh default). Deliberately outside __all__ — the parity
 # harness (tests/native) imports it explicitly; on a build without the feature

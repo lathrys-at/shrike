@@ -9,6 +9,12 @@ shrike_native._native.CollectionCore
 # tracks binding coverage).
 shrike_native.AppleVisionRecognizer
 shrike_native._native.AppleVisionRecognizer
+# engine-synthetic builds only (#865 — the perf lane + fast deterministic
+# tests, never the release wheel). Absent from the default/server build stubtest
+# runs against; `--define shrike_synthetic=on` adds them.
+shrike_native.SyntheticEmbedder
+shrike_native._native.SyntheticEmbedder
+shrike_native._native.NativeEmbedder.from_synthetic
 # pyo3 auto-generates _native.__all__ from the registered names, so its VALUE
 # differs between build variants (anki-core adds CollectionCore) and can't
 # match one static stub. Allowlisting only the __all__ comparison keeps every

@@ -51,6 +51,11 @@ engine-remote = ["dep:shrike-engine", "shrike-engine/remote"]
 # recognizer rows, #502). Binding-path test coverage while #504 is pending is
 # tracked in #514.
 engine-apple = ["dep:shrike-engine", "shrike-engine/engine-apple"]
+# Deterministic, dependency-free embedder for benchmarks and fast tests (#865).
+# NON-DEFAULT: a release build omits it, so `build_features()` does not list it
+# and a config naming `runtime: synthetic` is refused. A dev/benchmark build
+# opts in (Bazel: `--define shrike_synthetic=on`; cargo: `--features ...`).
+engine-synthetic = ["dep:shrike-engine", "shrike-engine/engine-synthetic"]
 # llama-server lifecycle manager (manage-class, not an engine).
 manage-llama = ["dep:shrike-llama-server"]
 

@@ -573,3 +573,38 @@ so it doesn't sit behind the debounce), and a coalesced re-run `window`. `delay 
 recovers the pure coalesce-loop. The synchronous shutdown write stays the host's own path
 (`DebouncedSaver::flush` calls `cancel` then writes inline), so `close()` returns only after the
 write lands.
+
+## Performance engineering
+
+### Stub-vs-real embedding is a profile choice, via a first-class `synthetic` runtime (#865)
+
+The performance harness runs each gold workflow in two modes: against the real embedding
+backends (end-to-end, including inference) and against a deterministic stub (isolating the
+kernel/IO/orchestration cost). Both modes boot the **same** real `Harness` from a config profile;
+the only difference is which profile. The stub is not attached out-of-band by the harness — that
+would bypass the real config→boot path it exists to measure. Instead it is a first-class embedder
+runtime, `runtime: synthetic`, selected like any other backend.
+
+Isolating the kernel is the primary instrument because the failure modes a perf harness must catch
+— per-op full-collection scans, lock-held file writes, N+1 hydration (the #445 findings) — are all
+kernel-side and model-independent. A stub whose own cost is negligible makes those costs the signal
+instead of drowning them in model-inference noise. The real-backend mode then measures the
+end-to-end number a user sees.
+
+The synthetic embedder is a **native** engine (`shrike-engine`, behind the `engine-synthetic`
+feature), not a Python shim: it maps an input's bytes to a deterministic unit vector (a hashed
+`splitmix64` stream, L2-normalized) with no model and negligible cost, and composes through the
+exact `NativeEmbedder` attach path the ort engines use — so the stub mode exercises the real native
+embed/attach machinery, isolating only inference. The vectors carry no semantics; it is never a
+search-quality backend.
+
+Gating keeps it out of production by construction. `engine-synthetic` is a **non-default** Cargo
+feature; the release wheel and the per-PR `//...` lane build the lean extension, so
+`shrike_native.build_features()` does not list it and profile resolution refuses a config naming
+`runtime: synthetic` with the same two-layer capability error as any uncompiled runtime — never a
+silent no-op. A dev/benchmark build opts in with `--define shrike_synthetic=on`
+(`scripts/build-native.sh --synthetic`), which the Bazel target selects into the extension's
+features and swaps the linked engine variant for the one built with synthetic (Bazel feature sets do
+not unify across targets). A dev-only *second* extension target was rejected as heavier and against
+the single-build-graph principle; one toggled target is enough. The capability is reusable beyond
+perf — a config-selectable deterministic embedder is what fast, model-free tests want too.

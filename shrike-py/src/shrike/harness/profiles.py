@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from typing import Any
 
 MODALITIES = ("text", "image", "audio")
-EMBEDDER_RUNTIMES = ("onnx", "remote", "platform")
+EMBEDDER_RUNTIMES = ("onnx", "remote", "platform", "synthetic")
 RECOGNIZER_SOURCES = ("ocr", "asr", "describe")
 RECOGNIZER_RUNTIMES = ("onnx", "remote", "platform")
 MANAGE_MODES = ("auto", "attach", "off")
@@ -46,6 +46,11 @@ _RUNTIME_FEATURE = {
     "onnx": "engine-ort",
     "remote": "engine-remote",
     "platform": "engine-apple",
+    # A deterministic, dependency-free in-process embedder for benchmarks and
+    # fast tests (#865). Behind the non-default `engine-synthetic` feature, so a
+    # release build does not list it in `build_features()` and a config naming
+    # `runtime: synthetic` is refused here — the same two-layer rule as the rest.
+    "synthetic": "engine-synthetic",
 }
 
 
@@ -317,6 +322,19 @@ def _parse_embedder(raw: Any, index: int) -> EmbedderEntry:
         raise ProfileError(
             f"{where}.model is required for runtime: onnx (the model dir/file to load)"
         )
+    if entry.runtime == "synthetic":
+        # The synthetic engine loads no model, has no pooling, and embeds at a
+        # fixed internal chunk size — an inapplicable knob is an error, not
+        # silent cross-talk (endpoint/api_key/providers are already rejected
+        # above for any non-remote/non-onnx runtime).
+        if entry.model is not None:
+            raise ProfileError(
+                f"{where}.model does not apply to runtime: synthetic (it loads no model)"
+            )
+        if entry.pooling is not None:
+            raise ProfileError(f"{where}.pooling does not apply to runtime: synthetic")
+        if entry.batch_size is not None:
+            raise ProfileError(f"{where}.batch_size does not apply to runtime: synthetic")
     if entry.batch_size is not None and entry.batch_size < 1:
         raise ProfileError(f"{where}.batch_size must be >= 1 (got {entry.batch_size})")
     return entry
@@ -883,6 +901,10 @@ def _entry_to_runtime_params(
     # The space's modalities flow to the backend: an image space composes the
     # image half + reports image coverage.
     modalities = frozenset(e.modalities)
+    if e.runtime == "synthetic":
+        # No model, no endpoint, no policy knobs — the runtime constructs a
+        # `SyntheticBackend` with the declared modalities and a fixed dim.
+        return {"backend": "synthetic", "modalities": modalities}
     if e.runtime == "onnx":
         backend = "clip" if "image" in e.modalities else "onnx"
         return {

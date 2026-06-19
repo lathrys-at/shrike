@@ -32,6 +32,11 @@ remote = [
 ]
 # ── apple (platform recognizers over shrike-platform's Swift/C-ABI glue) ──────
 engine-apple = ["dep:shrike-platform", "shrike-platform/engine-apple"]
+# ── synthetic (deterministic, dependency-free embedder for benchmarks/tests) ──
+# Pure Rust, no deps. Non-default: only a dev/test/benchmark build compiles it,
+# so it is absent from `build_features()` in a release build and the host's
+# capability resolution refuses a config that names it.
+engine-synthetic = []
 
 # Pure Rust — NO pyo3 (epic #265 convention 5); bound to Python in shrike-pyo3.
 [dependencies]
