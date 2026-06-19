@@ -126,6 +126,10 @@ def test_exit_without_close_is_clean(tmp_path) -> None:
                 [(basic, 1, ["teardown pin", "no close"], [])], "error"
             )
             assert all(r[0] == "created" for r in results)
+            # The write is decoupled from indexing (the ingest actor embeds +
+            # indexes off the collection write), so settle before searching —
+            # "ops run to COMPLETION" now includes the async index drain.
+            await kernel.settle()
             hits = await kernel.search("teardown", 3)
             assert hits
             # Deliberately NO kernel.close(): the unclean exit path.
