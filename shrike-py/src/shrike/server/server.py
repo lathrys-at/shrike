@@ -1470,6 +1470,12 @@ def main() -> None:
             # Per-call collection routing: the manager resolves a selector to the
             # right collection's bundle, lazily assembling it.
             resolver=manager.resolve_bundle,
+            # The data-plane gate (Theme C / #833): every action awaits the boot
+            # collection's readiness barrier, so the data plane serves only once
+            # boot/reload/re-acquire maintenance has settled. The operational
+            # routes (/status, /reload, /shutdown, /embedding/*) are the control
+            # plane and bypass this — they are not actions.
+            readiness=harness.await_ready,
         )
         # The uvicorn Server is created after route registration, so the
         # /shutdown route reaches it through this late-bound holder.

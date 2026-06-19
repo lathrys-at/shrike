@@ -9,6 +9,7 @@ surface (tools/list schemas, behaviour) is byte-identical.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -51,6 +52,7 @@ def register_tools(
     server_purely_local: bool = False,
     registry: Any | None = None,
     resolver: Any | None = None,
+    readiness: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Tool]:
     """Build the action registry against this server's context and bind it to MCP.
 
@@ -61,6 +63,10 @@ def register_tools(
     enumeration reads; None means an empty registry. ``resolver`` is the
     per-call collection router: an async ``selector -> CollectionBundle``;
     None keeps single-collection mode (the fixed handles are the one bundle).
+    ``readiness`` is the data-plane gate (the harness ``await_ready``): every
+    action awaits it before running, so the data plane serves only once
+    boot/reload/re-acquire maintenance has settled (Theme C / #833). None
+    disables the gate (standalone / tests).
 
     Returns the ``name -> Tool`` map for the actions-over-HTTP edge, built
     from the *same* action registry as the MCP binding — so the host can register
@@ -83,5 +89,5 @@ def register_tools(
         resolver=resolver,
     )
     actions = build_actions(context)
-    register_actions(mcp, actions)
-    return build_action_tools(actions)
+    register_actions(mcp, actions, readiness)
+    return build_action_tools(actions, readiness)

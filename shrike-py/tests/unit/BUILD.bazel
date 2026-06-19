@@ -138,6 +138,7 @@ _ACTIONS = [
 # always-collected tests keeps it green while still running where it can.
 _TOOLS = [
     "test_collection_busy.py",
+    "test_readiness_gate.py",
     "test_recognition.py",
     "test_tool_logging.py",
     "test_tools_busy.py",
