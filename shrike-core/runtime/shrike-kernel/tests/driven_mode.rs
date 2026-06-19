@@ -201,6 +201,10 @@ fn full_flow_on_a_driven_runtime() {
     let (search_tx, search_rx) = mpsc::channel();
     let k = Arc::clone(&kernel);
     submit(async move {
+        // Upsert indexes via the async ingest drain (the derived/FTS write rides the
+        // compute pool), so a search immediately after an upsert is eventual-consistency
+        // racy — settle the drain before the lexical search.
+        k.settle().await;
         let hits = k.search("mitochondria", 5).await?;
         let _ = search_tx.send(hits.len());
         Ok(())
