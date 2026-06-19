@@ -125,13 +125,20 @@ fn full_flow_fires_callbacks_under_the_current_thread_driver() {
     assert_eq!(info.get("note_count").and_then(|v| v.as_i64()), Some(1));
 
     // search — the lexical signal finds the note (the callback fires, which is
-    // the property under test).
-    let hits = ok(op(
-        handle,
-        "search",
-        &serde_json::json!({ "query": "mitochondria", "top_k": 5 }).to_string(),
-    ));
-    let hits = hits.as_array().expect("hit array");
+    // the property under test). The upsert's derived (FTS5) row lands off the
+    // drain on the compute pool, so a search issued right after the upsert races
+    // it; the public C ABI exposes no settle op, so poll the search (the
+    // read-side settle equivalent) until the lexical hit lands.
+    let search = serde_json::json!({ "query": "mitochondria", "top_k": 5 }).to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let hits = loop {
+        let hits = ok(op(handle, "search", &search));
+        let arr = hits.as_array().expect("hit array");
+        if !arr.is_empty() || std::time::Instant::now() >= deadline {
+            break arr.clone();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
     assert!(!hits.is_empty(), "lexical search found the note");
     assert_eq!(hits[0][0].as_i64(), Some(nid), "the note is the top hit");
 

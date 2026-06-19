@@ -600,6 +600,9 @@ class TestEmbedderSlot:
                 [(basic, 1, ["paris is the capital of france", "geo"], [])], "error"
             )
             assert results[0][0] == "created"
+            # The lexical (derived) row lands off the drain on the compute pool;
+            # settle the maintained tail before the read-after-write search.
+            await kernel.settle()
             hits = await kernel.search("capital of france", 5)
             assert hits[0][0] == results[0][1]
             assert all(s != "text" for s, _ in hits[0][2])

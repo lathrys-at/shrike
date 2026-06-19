@@ -20,6 +20,8 @@ from tests.integration.conftest import (
     ServerInfo,
     requires_onnxruntime,
     requires_shrike_native,
+    search_until,
+    wait_for_index_ready,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedding]
@@ -79,24 +81,26 @@ class TestFullyNativeServer:
         assert all(r["status"] == "created" for r in result["results"])
 
         httpx.post(f"{base}/index/rebuild", timeout=60.0)
-        deadline = time.monotonic() + 60.0
-        while time.monotonic() < deadline:
-            idx = httpx.get(f"{base}/status", timeout=5.0).json()["index"]
-            if idx.get("state") == "ready" and idx.get("size", 0) >= 3:
-                break
-            time.sleep(0.05)
-        else:
-            pytest.fail("index did not become ready")
+        idx = wait_for_index_ready(srv)
 
         # The native engine's fingerprint namespace shows up as the index
         # model_id.
         assert idx["model_id"].startswith("onnx-rs:")
 
-        res = mcp(
-            "search_notes",
-            {"queries": ["calculus accumulation"], "limit": 3, "threshold": 0.0},
+        # The rebuild runs as a background task, so `ready` can flip true on the
+        # per-op index add before the rebuild's drop→re-embed window closes;
+        # retry the search (the read-side `settle` equivalent) until the semantic
+        # `text` signal lands for the integral note, then assert on the result.
+        matches = search_until(
+            mcp,
+            ["calculus accumulation"],
+            lambda ms: (
+                bool(ms)
+                and "integral" in ms[0]["content"]["Front"]
+                and any(p["signal"] == "text" for p in ms[0]["provenance"])
+            ),
+            limit=3,
         )
-        matches = res["results"][0]["matches"]
         assert matches
         assert "integral" in matches[0]["content"]["Front"]
         # Provenance flows through the native fusion identically.
