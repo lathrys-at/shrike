@@ -6316,15 +6316,31 @@ mod no_cpython_smoke {
                 .upsert_notes(notes, DuplicatePolicy::Error)
                 .await
                 .unwrap();
+            // Settle so the field rows are durably in the derived store BEFORE
+            // the concurrent rebuild — the searches below assert those rows stay
+            // findable THROUGHOUT the rebuild (no full-recall cliff), so they
+            // must be present to begin with.
+            kernel.settle().await;
 
             let searcher = Arc::clone(&kernel);
             let search_loop = async move {
+                let mut min_hits = usize::MAX;
                 for _ in 0..200 {
-                    let _ = searcher.search("mitochondria", 5).await;
+                    let hits = searcher.search("mitochondria", 5).await.unwrap();
+                    min_hits = min_hits.min(hits.len());
                 }
+                min_hits
             };
-            let (rebuilt, _) = futures::join!(kernel.rebuild_derived(), search_loop);
+            let (rebuilt, min_hits) = futures::join!(kernel.rebuild_derived(), search_loop);
             rebuilt.unwrap();
+            // Replace-in-place: the rebuild never wholesale-clears the field
+            // index, so EVERY search mid-rebuild still finds the notes. A
+            // delete-all-then-insert rebuild would let a search land in the empty
+            // window and return zero (the full-recall cliff this guards against).
+            assert!(
+                min_hits > 0,
+                "a search during the rebuild returned no hits — recall cliff"
+            );
 
             kernel.close().await.unwrap();
             std::fs::remove_dir_all(dir).ok();

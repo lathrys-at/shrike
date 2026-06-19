@@ -593,73 +593,56 @@ impl DerivedEngine {
         // `search_fuzzy` THROUGH that same actor and takes THIS lock, so holding
         // it across the actor-dependent pull would wedge the actor on the lock
         // while the build waits on the actor — a circular deadlock. So the lock
-        // is taken per phase (reset, each chunk insert, prune+stamp) and dropped
-        // around every `next()`. The build is therefore NOT one transaction: a
-        // crash mid-rebuild leaves a partial store at the OLD col_mod (stamped
-        // LAST), which reads as drift on the next boot and rebuilds — the
-        // rebuildable-cache contract. The store reports BUILDING throughout, so a
-        // search landing mid-rebuild may see a partial index (it falls back),
-        // never a hang.
-
-        // Phase 1 — reset the field rows (own transaction, lock dropped after).
-        self.reset_field_rows()?;
-
-        // Phase 2 — pull chunks OFF-lock, insert each under a short lock.
+        // is taken per phase (each chunk replace, then the final prune+stamp) and
+        // dropped around every `next()`.
+        //
+        // The rebuild is REPLACE-IN-PLACE, NOT delete-all-then-insert: there is
+        // no up-front wholesale field clear, so a concurrent search NEVER sees an
+        // emptied index mid-rebuild (no full-recall cliff). Each chunk, in its
+        // own transaction, replaces ONLY its notes' field rows — a note's old
+        // rows stay searchable until that chunk overwrites them — and the final
+        // pass deletes field rows for any note this rebuild did NOT refresh
+        // (deleted notes, or live notes whose fields all went blank). Because the
+        // build is many transactions, a crash mid-rebuild leaves a partial store
+        // at the OLD col_mod (stamped LAST), which reads as drift next boot and
+        // rebuilds — the rebuildable-cache contract.
         let mut total = 0usize;
+        let mut refreshed: std::collections::HashSet<i64> = std::collections::HashSet::new();
         while let Some(chunk) = next() {
             let chunk = chunk?;
-            total += self.insert_chunk(&chunk)?;
+            total += self.replace_field_chunk(&chunk, &mut refreshed)?;
         }
-
-        // Phase 3 — prune dead-note recognition rows + stamp col_mod (own
-        // transaction). Stamping LAST keeps the rebuild crash-safe: until it
-        // lands, drift still fires.
-        self.prune_and_stamp(live_notes, col_mod)?;
+        self.prune_and_stamp(live_notes, &refreshed, col_mod)?;
         Ok(total)
     }
 
-    /// Phase 1 of the streaming rebuild: clear the `field` rows in one short
-    /// transaction (lock released on return). When NO recognition rows exist
-    /// (the common case) the FTS5 table is dropped + recreated — 40× faster than
-    /// a whole-table DELETE at 50k rows (per-row tombstones), and FTS5's
-    /// delete-all shortcut is unavailable on a content-ful table. DDL is
-    /// transactional, and the recreate reuses the schema's own DDL string.
-    fn reset_field_rows(&self) -> NativeResult<()> {
+    /// Replace ONE chunk's field rows in a short transaction (lock released on
+    /// return, so the actor-dependent pulls between chunks never block on it).
+    /// Replace-in-place: for each note PRESENT in this chunk, its old `field`
+    /// rows are deleted and the new ones inserted within the same transaction —
+    /// so a concurrent search sees either the old rows or the new, never an empty
+    /// gap. Records every refreshed note id in `refreshed` (the final pass uses
+    /// it to drop field rows for notes this rebuild never touched). Returns the
+    /// rows seen (blank text skipped). The idx↔rowmap pairing rides
+    /// `last_insert_rowid()` on this connection — sound under the single mutexed
+    /// connection, and a concurrent read takes the lock but never inserts.
+    fn replace_field_chunk(
+        &self,
+        chunk: &[(i64, String, String, String)],
+        refreshed: &mut std::collections::HashSet<i64>,
+    ) -> NativeResult<usize> {
+        // The distinct note ids this chunk carries — their old field rows are
+        // replaced wholesale (a note's fields are re-read together per chunk).
+        let chunk_ids: Vec<i64> = {
+            let mut ids: Vec<i64> = chunk.iter().map(|(id, _, _, _)| *id).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
-        let has_other: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM rowmap WHERE source != 'field')",
-                [],
-                |r| r.get(0),
-            )
-            .map_err(db_err)?;
-        if has_other {
-            tx.execute(
-                "DELETE FROM idx WHERE rowid IN (SELECT rowid FROM rowmap WHERE source = 'field')",
-                [],
-            )
-            .map_err(db_err)?;
-            tx.execute("DELETE FROM rowmap WHERE source = 'field'", [])
-                .map_err(db_err)?;
-        } else {
-            tx.execute("DROP TABLE idx", []).map_err(db_err)?;
-            tx.execute(Self::IDX_DDL, []).map_err(db_err)?;
-            tx.execute("DELETE FROM rowmap", []).map_err(db_err)?;
-        }
-        tx.commit().map_err(db_err)
-    }
-
-    /// Phase 2 of the streaming rebuild: insert ONE chunk's rows under a short
-    /// lock (one transaction per chunk so the lock is released between the
-    /// actor-dependent pulls). Returns the rows SEEN (blank text skipped). The
-    /// idx↔rowmap pairing rides `last_insert_rowid()` on this connection — sound
-    /// because every write rides the single mutexed connection (the module
-    /// invariant), and a concurrent read takes the lock but never inserts, so it
-    /// can't perturb the pairing between the two statements here.
-    fn insert_chunk(&self, chunk: &[(i64, String, String, String)]) -> NativeResult<usize> {
-        let mut conn = self.lock();
-        let tx = conn.transaction().map_err(db_err)?;
+        // Drop ONLY these notes' field rows (not the whole table), then re-insert.
+        Self::delete_field_rows(&tx, &chunk_ids)?;
         let mut seen = 0usize;
         {
             let mut ins_idx = tx
@@ -683,19 +666,68 @@ impl DerivedEngine {
             }
         }
         tx.commit().map_err(db_err)?;
+        refreshed.extend(chunk_ids);
         Ok(seen)
     }
 
-    /// Phase 3 of the streaming rebuild: prune recognition rows (and their
-    /// segments + below-gate markers) for notes no longer in the collection,
-    /// then stamp `col_mod` — in one short transaction (lock released after).
-    /// The authoritative note set is `live_notes` (the collection), NOT the
-    /// field rows: a note can be live yet contribute no field rows (all-blank
-    /// fields, or a snapshot taken before it was written), and its recognition
-    /// rows must survive.
-    fn prune_and_stamp(&self, live_notes: &[i64], col_mod: i64) -> NativeResult<()> {
+    /// Delete only the `field`-source rows (idx + rowmap) for `note_ids` — the
+    /// replace half of [`Self::replace_field_chunk`]. Leaves recognition rows
+    /// (`ocr`/`asr`/…) and below-gate markers untouched.
+    fn delete_field_rows(conn: &Connection, note_ids: &[i64]) -> NativeResult<()> {
+        if note_ids.is_empty() {
+            return Ok(());
+        }
+        let (id_clause, id_params) = Self::note_id_clause(conn, "note_id", note_ids)?;
+        let clause = format!("{id_clause} AND source = 'field'");
+        let params: Vec<&dyn rusqlite::ToSql> = id_params
+            .iter()
+            .map(|n| n as &dyn rusqlite::ToSql)
+            .collect();
+        conn.execute(
+            &format!("DELETE FROM idx WHERE rowid IN (SELECT rowid FROM rowmap WHERE {clause})"),
+            rusqlite::params_from_iter(params.iter().copied()),
+        )
+        .map_err(db_err)?;
+        conn.execute(
+            &format!("DELETE FROM rowmap WHERE {clause}"),
+            rusqlite::params_from_iter(params.iter().copied()),
+        )
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// The final pass of the streaming rebuild (one short transaction): drop the
+    /// `field` rows for any note this rebuild did NOT refresh (a deleted note, or
+    /// a live note whose fields all went blank — neither appeared in the stream),
+    /// prune recognition rows + segments + below-gate markers for notes no longer
+    /// in the collection, then stamp `col_mod` LAST (so until it lands, drift
+    /// still fires — crash-safe). The authoritative note set for the RECOGNITION
+    /// prune is `live_notes` (the collection): a note can be live yet contribute
+    /// no field rows, and its recognition rows must survive.
+    fn prune_and_stamp(
+        &self,
+        live_notes: &[i64],
+        refreshed: &std::collections::HashSet<i64>,
+        col_mod: i64,
+    ) -> NativeResult<()> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
+        // Field rows for notes the rebuild never refreshed are stale (the note is
+        // gone, or now all-blank) — drop them. `refreshed` is the set that got
+        // new field rows this pass.
+        let stale_field: Vec<i64> = {
+            let mut stmt = tx
+                .prepare("SELECT DISTINCT note_id FROM rowmap WHERE source = 'field'")
+                .map_err(db_err)?;
+            let ids: Vec<i64> = stmt
+                .query_map([], |r| r.get(0))
+                .map_err(db_err)?
+                .collect::<Result<_, _>>()
+                .map_err(db_err)?;
+            ids.into_iter().filter(|n| !refreshed.contains(n)).collect()
+        };
+        Self::delete_field_rows(&tx, &stale_field)?;
+        // Recognition rows + gated markers for notes no longer in the collection.
         let live: std::collections::HashSet<i64> = live_notes.iter().copied().collect();
         let stale: Vec<i64> = {
             let mut stmt = tx
@@ -1495,6 +1527,83 @@ mod tests {
         let hits = e.match_rows("\"gamma\"", 10, false, None, &[]).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, 2);
+        assert_eq!(e.get_col_mod(), Some(2));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn streamed_rebuild_never_empties_the_index_mid_build() {
+        // The no-recall-cliff guarantee: a streamed rebuild replaces field rows
+        // IN PLACE (per chunk), never wholesale-clearing them up front, so a
+        // search landing mid-rebuild always finds rows — old ones until their
+        // note's chunk overwrites them, new ones after. Probe the store from
+        // INSIDE the chunk stream (between chunk transactions, the lock is free)
+        // and assert every note remains searchable at every step.
+        let (e, dir) = store();
+        // Seed three notes, each its own searchable term.
+        build_snapshot_live(
+            &e,
+            &[
+                (1, "field".into(), "F".into(), "alpha unique".into()),
+                (2, "field".into(), "F".into(), "beta unique".into()),
+                (3, "field".into(), "F".into(), "gamma unique".into()),
+            ],
+            1,
+        )
+        .unwrap();
+
+        // Rebuild streaming ONE note per chunk, probing between chunks. The new
+        // text keeps each note's term so it stays findable across the swap.
+        let chunks = std::cell::RefCell::new(
+            vec![
+                vec![(
+                    1i64,
+                    "field".to_string(),
+                    "F".to_string(),
+                    "alpha unique".to_string(),
+                )],
+                vec![(
+                    2,
+                    "field".to_string(),
+                    "F".to_string(),
+                    "beta unique".to_string(),
+                )],
+                vec![(
+                    3,
+                    "field".to_string(),
+                    "F".to_string(),
+                    "gamma unique".to_string(),
+                )],
+            ]
+            .into_iter(),
+        );
+        #[allow(clippy::type_complexity)]
+        let mut next = || -> Option<NativeResult<Vec<(i64, String, String, String)>>> {
+            // BEFORE handing the next chunk, every seeded note must still match —
+            // proof that no prior step emptied the index.
+            for term in ["alpha", "beta", "gamma"] {
+                let hits = e
+                    .search_substring(term, 10, None, &[])
+                    .unwrap()
+                    .unwrap_or_default();
+                assert!(
+                    !hits.is_empty(),
+                    "'{term}' was not searchable mid-rebuild — recall cliff"
+                );
+            }
+            chunks.borrow_mut().next().map(Ok)
+        };
+        let live = [1i64, 2, 3];
+        e.build_streamed(&mut next, &live, 2).unwrap();
+
+        // After the rebuild all three remain, at the new col_mod.
+        for term in ["alpha", "beta", "gamma"] {
+            assert!(!e
+                .search_substring(term, 10, None, &[])
+                .unwrap()
+                .unwrap_or_default()
+                .is_empty());
+        }
         assert_eq!(e.get_col_mod(), Some(2));
         std::fs::remove_dir_all(dir).ok();
     }
