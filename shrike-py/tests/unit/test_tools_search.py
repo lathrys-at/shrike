@@ -205,9 +205,9 @@ class _GatedBackend(_NoteBackend):
 
 
 class TestSearchNotesFreshness:
-    """The stale-read advisory (#862): a search carries `stale=True` when the
-    kernel was not settled as it ran (a write still draining through the embed
-    queue), and `stale=False` once settled."""
+    """The stale-read advisory: a search carries `stale=True` when the kernel
+    was not settled as it ran (a write still draining through the embed queue),
+    and `stale=False` once settled."""
 
     def test_settled_search_is_not_stale(self, kharness, mcp_sem):
         # The harness settles after the seed, so the kernel is quiescent.
