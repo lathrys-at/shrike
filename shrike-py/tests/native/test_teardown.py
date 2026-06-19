@@ -234,6 +234,10 @@ def test_driven_runtime_boot_serve_and_clean_shutdown(tmp_path) -> None:
                 [(basic, 1, ["driven flip", "served"], [])], "error"
             )
             assert all(r[0] == "created" for r in results), results
+            # The write is decoupled from indexing (the ingest actor drains off
+            # the collection write), so settle before searching — otherwise the
+            # search can race the background drain under load.
+            await kernel.settle()
             hits = await kernel.search("driven", 3)
             assert hits, "the bridge served a search under the driven runtime"
             # Clean shutdown: close drains the actor (a kernel op, still driven

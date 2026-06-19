@@ -1,4 +1,4 @@
-"""Regression: two concurrent re-acquires must still open the readiness gate.
+"""Regression: two concurrent settle markers must still open the readiness gate.
 
 Each cooperative re-acquire (or a /reload mid-boot) begins a new readiness
 generation and spawns a `_settle_and_mark_ready` marker task. A marker's
@@ -39,28 +39,52 @@ async def _assemble(tmp_path) -> Harness:
     )
 
 
-def test_two_concurrent_reacquires_still_open_the_gate(tmp_path) -> None:
+def test_two_concurrent_settle_markers_still_open_the_gate(tmp_path) -> None:
+    # Two concurrent readiness generations each begin a generation and spawn a
+    # `_settle_and_mark_ready` marker. The markers run `settle_background`, which
+    # must NOT gather a sibling marker — otherwise marker-1 awaits marker-2 and
+    # marker-2 awaits marker-1 (cyclic await), neither sets `_ready`, and the
+    # data plane is gated forever. The maintenance each marker actually waits on
+    # is a trivial controllable task here, so the test exercises the
+    # marker-exclusion logic deterministically without a real-kernel re-acquire
+    # (whose rebuild churn is orthogonal to this asyncio-level cycle).
     async def flow() -> None:
         harness = await _assemble(tmp_path)
         await harness.boot(start_embedding=False)
         assert harness.is_ready
 
-        col_mod = await harness.wrapper.col_mod()
-        harness._spawn_reacquire_tasks(col_mod)
-        harness._spawn_reacquire_tasks(col_mod)
+        gate = asyncio.Event()
 
-        for _ in range(1000):
-            await asyncio.sleep(0)
-            if harness.is_ready and all(t.done() for t in harness._bg_tasks):
-                break
+        async def maintenance() -> None:
+            await gate.wait()
 
-        # The gate must be open and every marker/maintenance task settled — the
-        # pre-fix cycle left two markers hung forever (is_ready False, tasks
-        # never done). close() drains anything still in flight either way.
-        gated = not harness.is_ready
+        # Two overlapping generations: each clears `_ready`, queues a maintenance
+        # task, and spawns its marker (the exact shape of two back-to-back
+        # re-acquires, minus the kernel ops).
+        for _ in range(2):
+            harness._begin_generation()
+            harness._spawn_bg(maintenance())
+            harness._spawn_marker(harness._generation)
+
+        assert not harness.is_ready, "the overlapping generations cleared the gate"
+        # Let the markers reach their settle_background await, then release the
+        # maintenance both wait on. With the cycle present, the markers would be
+        # awaiting EACH OTHER, so releasing the maintenance would not free them.
+        await asyncio.sleep(0)
+        gate.set()
+
+        try:
+            await asyncio.wait_for(harness.await_ready(), timeout=30)
+            gated = False
+        except TimeoutError:
+            gated = True
+
+        await harness.settle_background()
+        await asyncio.sleep(0)
         settled = all(t.done() for t in harness._bg_tasks)
+
         await harness.close()
-        assert not gated, "data plane gated forever after two re-acquires"
-        assert settled, "re-acquire tasks left hung (settle-marker cycle)"
+        assert not gated, "data plane gated forever after two concurrent markers"
+        assert settled, "marker tasks left hung (settle-marker cycle)"
 
     asyncio.run(flow())
