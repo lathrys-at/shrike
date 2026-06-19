@@ -308,8 +308,7 @@ impl IngestHandle {
     /// normal operation; non-zero signals a degraded sole writer (the `/status`
     /// observability hook for [`drain_loop`]'s panic boundary).
     pub fn drain_panics(&self) -> u64 {
-        self.drain_panics
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.drain_panics.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -667,15 +666,119 @@ impl Ingestor {
 
     /// Persist a recognition sweep's text + segments + below-gate markers and
     /// re-embed the affected notes — all on the actor, so the write serializes
-    /// with rebuild (#828 closed). Recognition is orthogonal to the `col.mod`
-    /// watermark (it stores media-derived text, which never bumps `col.mod`), so
-    /// the re-embed re-certifies the CURRENT `col.mod` for the affected notes.
+    /// with rebuild (#828 closed).
+    ///
+    /// Two invariants set recognition apart from the maintained text tail:
+    ///
+    /// - **Orthogonal to the `col.mod` watermark (C1).** Recognition stores
+    ///   media-derived text, which never changes `col.mod`. Advancing the text
+    ///   watermark here would certify a concurrent, still-queued user write whose
+    ///   `col.mod` the recognition Job happened to read — over-certifying it, so a
+    ///   later failure of that write can't be re-detected by drift. So the
+    ///   re-embed NEVER touches `set_col_mod`/the watermark floors.
+    /// - **Vector-durable before the done-marker (C2).** The pending-sweep diff
+    ///   treats a `(note, ref)` as done once its derived TEXT row exists. So the
+    ///   re-embedded vector is made durable (the index saver is FLUSHED) BEFORE
+    ///   the durable text rows are written. A crash before the flush leaves no
+    ///   text row → the item stays pending → the next sweep re-recognizes and
+    ///   re-embeds it. The old order (text row first, then a debounced save)
+    ///   could lose the vector to a crash yet mark the item done — silent,
+    ///   unrecoverable (recognition never bumps `col.mod`, so drift can't heal).
     ///
     /// # Errors
     ///
-    /// Returns an error if a derived write fails. The re-embed tail is
-    /// best-effort (a failed embed leaves the index watermark behind to heal).
+    /// Returns an error if a derived write fails. A failed embed leaves the
+    /// derived rows unwritten so the item is retried, not silently half-stored.
     pub async fn store_recognition(&self, write: RecognitionWrite) -> NativeResult<()> {
+        // Re-embed the affected notes with the freshly recognized text, durably,
+        // BEFORE persisting the derived rows. Without an embedder there is no
+        // vector to lose, so the rows are written directly (lexical-only mode).
+        if !write.affected.is_empty() {
+            if let Some(svc) = self.embed_service() {
+                self.embed_recognition_durably(&write, &svc).await?;
+            }
+        }
+        // The derived rows are the pending-sweep's "done" marker: write them only
+        // now, after any vector is durable.
+        self.write_recognition_derived(&write)
+    }
+
+    /// Re-embed the recognition-affected notes and FLUSH the index durably, so
+    /// the vectors survive a crash before the derived rows (the done-marker) are
+    /// written. The recognized text comes from the in-memory `touched` payload
+    /// (not yet in the durable store) overlaid on the other sources' stored text.
+    /// Advances NO watermark (recognition ⟂ `col.mod`).
+    async fn embed_recognition_durably(
+        &self,
+        write: &RecognitionWrite,
+        svc: &EmbedService,
+    ) -> NativeResult<()> {
+        let ids = write.affected.clone();
+        let raw_inputs = match self
+            .collection
+            .run(move |core| core.note_embed_inputs(&ids))
+            .await
+            .and_then(|r| r)
+        {
+            Ok(v) => v,
+            Err(e) => {
+                // The item stays pending (no derived rows written) — surfaced so
+                // the caller leaves its backlog for the next sweep.
+                return Err(e);
+            }
+        };
+        // Overlay the in-memory recognized text for THIS source (vector-worthy
+        // only) onto the other sources' durable text, then add atomically per
+        // note. compose pulls other sources from the store; this map supplies the
+        // current source's not-yet-durable text.
+        let mut overlay: std::collections::HashMap<i64, Vec<String>> =
+            std::collections::HashMap::new();
+        for (note_id, refs_text) in &write.touched {
+            for (_ref, text) in refs_text {
+                if self.recognition_gate.vector_worthy(text) {
+                    overlay.entry(*note_id).or_default().push(text.clone());
+                }
+            }
+        }
+        let written: Vec<i64> = raw_inputs.iter().map(|(id, _, _)| *id).collect();
+        let inputs = compose_embed_inputs_with_overlay(
+            &*self.derived,
+            &self.recognition_gate,
+            raw_inputs,
+            Some(&written),
+            &write.source,
+            &overlay,
+        );
+        self.index_set
+            .primary()
+            .add(&inputs, &*svc.embedder, svc.images_pair())
+            .await?;
+        if let Some((iorch, isvc)) = self.image_only_route() {
+            if let Some((ie, r)) = isvc.images_pair() {
+                iorch
+                    .add_with_mode(
+                        &inputs,
+                        &*isvc.embedder,
+                        Some((ie, r)),
+                        index_orchestrator::WriteMode::ImageOnly,
+                    )
+                    .await?;
+            }
+        }
+        // Make the vectors durable BEFORE the done-marker rows land (C2). The
+        // recognized text changed the affected notes' tag-relevant vectors, so
+        // refresh the tag centroids off the tail (coalesced).
+        self.flush_durable();
+        if self.tag_keys.any_member_of(&written) {
+            self.tag_refresh.request();
+        }
+        Ok(())
+    }
+
+    /// Write a recognition sweep's durable derived rows: the text rows (the
+    /// pending-sweep done-marker), the per-segment structure, and the below-gate
+    /// judged-once markers.
+    fn write_recognition_derived(&self, write: &RecognitionWrite) -> NativeResult<()> {
         for (note_id, refs_text) in &write.touched {
             self.derived.ingest(*note_id, &write.source, refs_text)?;
         }
@@ -683,33 +786,7 @@ impl Ingestor {
             self.derived
                 .put_segments(*note_id, &write.source, name, json)?;
         }
-        self.derived.mark_gated(&write.source, &write.gated)?;
-
-        if write.affected.is_empty() {
-            return Ok(());
-        }
-        // Re-read current col.mod + the affected notes' content in one job, then
-        // index + advance (recognition mints vectors at the current col.mod).
-        let ids = write.affected.clone();
-        let read = self
-            .collection
-            .run(move |core| -> NativeResult<_> {
-                let col_mod = core.col_mod()?;
-                let inputs = core.note_embed_inputs(&ids)?;
-                let rows = core.derived_field_rows(&ids)?;
-                Ok((col_mod, inputs, rows))
-            })
-            .await;
-        let (col_mod, raw_inputs, rows) = match read.and_then(|r| r) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "recognition re-embed read failed; leaving the watermark behind");
-                return Ok(());
-            }
-        };
-        self.apply_maintenance(&raw_inputs, &rows, &[], col_mod, col_mod)
-            .await;
-        Ok(())
+        self.derived.mark_gated(&write.source, &write.gated)
     }
 
     /// Whole-collection drift reconcile of the index (the boot/reload/import
@@ -1059,12 +1136,49 @@ pub(crate) fn compose_embed_inputs(
     raw: Vec<(i64, String, Vec<String>)>,
     only_notes: Option<&[i64]>,
 ) -> Vec<EmbedInput> {
+    compose_embed_inputs_with_overlay(
+        derived,
+        gate,
+        raw,
+        only_notes,
+        "",
+        &std::collections::HashMap::new(),
+    )
+}
+
+/// [`compose_embed_inputs`] with the durable store read for `overlay_source`
+/// REPLACED by `overlay` (the recognized text for that source held in memory,
+/// not yet committed). The recognition re-embed (C2) needs the new vectors
+/// durable before its derived rows are written, so it embeds from the in-memory
+/// payload for the current source while still folding the OTHER sources' stored
+/// text. `overlay` carries already-vector-worthy text; the store reads still
+/// re-judge worthiness. An empty `overlay_source` (the default) reads every
+/// source from the store, recovering the plain compose.
+pub(crate) fn compose_embed_inputs_with_overlay(
+    derived: &dyn DerivedStore,
+    gate: &RecognitionGate,
+    raw: Vec<(i64, String, Vec<String>)>,
+    only_notes: Option<&[i64]>,
+    overlay_source: &str,
+    overlay: &std::collections::HashMap<i64, Vec<String>>,
+) -> Vec<EmbedInput> {
     let mut recognized_map: std::collections::HashMap<i64, Vec<String>> =
         std::collections::HashMap::new();
     // One query per source (a small fixed set — ocr/vlm/asr), each bounded by
     // rows that EXIST for that source (most notes have none), so this is
     // proportional to recognized-content volume, not 3× the collection.
     for source in crate::Kernel::vector_minting_sources() {
+        if source == overlay_source {
+            // Use the in-memory text for this source instead of the store (whose
+            // rows for it are not written yet). Already vector-worthy-gated.
+            for (nid, texts) in overlay {
+                recognized_map
+                    .entry(*nid)
+                    .or_default()
+                    .extend(texts.clone());
+            }
+            continue;
+        }
         let texts = match only_notes {
             Some(ids) => derived.texts_for_source_for_notes(source, ids),
             None => derived.texts_for_source(source),

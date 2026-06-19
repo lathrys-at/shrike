@@ -4516,6 +4516,76 @@ mod no_cpython_smoke {
     }
 
     #[test]
+    fn recognition_does_not_advance_the_index_or_derived_col_mod_watermark() {
+        // C1: recognition stores media-derived text, which never changes
+        // col.mod, so a recognition sweep must NOT advance the index/derived
+        // col.mod watermark — advancing it would over-certify a concurrent,
+        // still-queued user write whose col.mod the sweep happened to read, and
+        // recognition never bumps col.mod, so drift could never re-detect it.
+        crate::runtime::testing::run_with_sync(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+
+            let notes = vec![serde_json::json!({"note_type": "Basic", "deck": "Default",
+                "fields": {"Front": "diagram <img src=\"krebs.png\">", "Back": "b"}})];
+            upsert_wire(
+                &kernel,
+                serde_json::json!(notes).to_string(),
+                "error".to_string(),
+                false,
+            )
+            .await;
+            kernel.reindex_if_needed().await.unwrap();
+
+            // The watermarks the reindex stamped — recognition must leave them
+            // exactly here (it certifies no text indexing).
+            let index_before = kernel.index().status().col_mod;
+            let derived_before = kernel.derived.get_col_mod();
+
+            let mut media = std::collections::HashMap::new();
+            media.insert(
+                "krebs.png".to_string(),
+                b"the krebs cycle produces energy carriers".to_vec(),
+            );
+            kernel.attach_recognizer(Arc::new(StubRecognizer), Arc::new(MapResolver::new(media)));
+            let report = kernel.recognize_pending(10).await.unwrap();
+            assert!(
+                matches!(report, recognize::SweepReport::Ran { stored: 1, .. }),
+                "the sweep stored the recognized text + vector"
+            );
+            // Settle the coalesced tag refresh the re-embed requested.
+            kernel.settle().await;
+
+            assert_eq!(
+                kernel.index().status().col_mod,
+                index_before,
+                "recognition must NOT advance the index col.mod watermark"
+            );
+            assert_eq!(
+                kernel.derived.get_col_mod(),
+                derived_before,
+                "recognition must NOT advance the derived col.mod watermark"
+            );
+            // The recognized vector still landed (orthogonal to the watermark):
+            // a non-literal query surfaces the note through its OCR vector.
+            let sem = kernel.search("carriers energy", 5).await.unwrap();
+            assert!(
+                !sem.is_empty(),
+                "the OCR vector is searchable despite the unchanged watermark"
+            );
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+
+    #[test]
     fn one_sweep_call_drains_a_multi_chunk_backlog_enumerating_once() {
         // A single recognize_pending(batch) call DRAINS the whole pending
         // backlog in internal bounded chunks — so the O(collection) image-ref
