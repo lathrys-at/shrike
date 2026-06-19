@@ -143,6 +143,15 @@ pub trait Embedder: Send + Sync + 'static {
     /// Embed a batch of texts, order-preserving, one vector per input. The
     /// batch may be arbitrarily large — conforming implementations chunk
     /// internally (route 1 adapters do this; route 2 engines own it).
+    ///
+    /// The call MUST eventually resolve — `Ok` or `Err` in bounded time. The
+    /// kernel awaits `embed` on the single-flight ingest drain with no
+    /// per-embed timeout and trusts every attached embedder to honor this. A
+    /// future that never resolves (and never errors) wedges the sole writer
+    /// permanently: the drain watermark never advances, and `flush`/`shutdown`
+    /// block behind it. Every shipping backend honors the contract — bounded
+    /// local compute, or a bounded transport timeout plus retry — and a custom
+    /// embedder must too.
     fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>>;
 
     /// Stable engine identity (model fingerprint) — drives index drift

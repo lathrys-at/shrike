@@ -337,6 +337,30 @@ blocklist.
 
 ## Architecture
 
+### The serial ingest drain has no per-embed timeout
+
+The ingest drain is single-flight: `process_batch` awaits `embedder.embed` with no
+`tokio::time::timeout` on the path, and the drain's panic boundary
+(`AssertUnwindSafe(work).catch_unwind().await`) does not cover a hang — a `Pending`-forever
+future never returns control to be caught. So an `embed` future that never resolves (and
+never errors) wedges the sole writer: the watermark never advances and `flush`/`shutdown`
+block behind it.
+
+We deliberately do **not** add a per-embed timeout. Every shipping embedder resolves in
+bounded time — ONNX is bounded local compute; the llama-server backend has a 60s HTTP
+timeout plus bounded retry, so a wedged server surfaces as a transport *error*, not a hang —
+which makes the unbounded-hang case unreachable through any production path. It needs a
+custom embedder whose future never resolves *and* never errors (the `PyEmbedder` test/custom
+escape hatch, on no production path). A drain-side timeout would be an untunable guess (set
+too low it self-wedges under load on a slow large batch) and could not reclaim a route-1 job
+already running on the compute pool; it would add complexity to the most ordering-critical
+path to defend a non-production hazard. The contract is documented on the `Embedder` trait
+instead (#886).
+
+The only thing that recovers a *real* wedge is the recovery side — watch `is_settled()`
+staying false with outstanding writes, surface it as a degraded `/status`, and let the host
+restart the embedder. That is filed as low-priority defense-in-depth (#891), not built here.
+
 ### The engine-plugin architecture: a pure kernel
 
 The kernel composes engines it is *given* — never naming one. Contracts live in the leaf crate
