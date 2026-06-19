@@ -529,3 +529,23 @@ consumers speak the actions-over-HTTP edge, never MCP.
 - **Accepted cost** — Leptos has no list virtualization, so the collection browser needs a
   hand-rolled windowing component at the 100k-note baseline. Revisit only if `shrike-schemas` stops
   compiling to wasm32, or the component-ecosystem gap proves a sustained drag.
+
+### Read-phase parallelism is foreclosed by anki's exclusive lock (the #853 spike)
+
+The pipeline-sanity epic asked whether the read phase of a bulk op (the 100k boot scan, search
+candidate hydration) could shard across K read connections in parallel, since SQLite WAL supports
+concurrent readers. The spike's answer is **no, definitively** — not because anki lacks a read-only
+handle, but because anki opens the collection with `locking_mode = exclusive` (rslib
+`storage/sqlite.rs`) on top of `journal_mode = wal`. In exclusive locking mode SQLite never releases
+its file lock for the life of the connection, so **no second connection can read the database while
+anki holds it** — WAL's concurrent-reader property does not apply. anki's backend is a single
+exclusive owner by construction (its own single-process model depends on it), and it exposes no
+read-only / second-connection API; the `db_rows` DB-proxy is read-only SQL but still serializes
+through the one backend.
+
+Consequence: the read phase of a bulk op cannot be parallelised without either patching anki to drop
+exclusive locking (which would break its own assumptions) or replicating anki's field/notetype
+decoding against a raw read-only `rusqlite` connection (fragile, and still blocked by the exclusive
+lock while anki is open). Theme B's streamed read — the single `drive_sync` thread, pipelined
+against the embed (`read(k+1) ‖ embed(k)`) — is therefore the read-phase design, and the
+downstream read-parallelism work the spike gated is closed as not-feasible against the current anki.
