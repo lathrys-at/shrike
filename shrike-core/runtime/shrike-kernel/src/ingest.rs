@@ -1465,14 +1465,7 @@ mod tests {
     fn temp_recording_derived(
         fail_ingest: bool,
     ) -> (RecordingDerived, CallLog, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "shrike-ingest-derived-thread-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::test_support::collision_proof_dir("shrike-ingest-derived-thread");
         std::fs::create_dir_all(&dir).unwrap();
         let inner = shrike_derived::DerivedEngine::open(
             dir.join("shrike.db").to_str().unwrap(),
@@ -1658,14 +1651,7 @@ mod tests {
     /// input, so its vector reflects all of its recognized content.
     #[test]
     fn overlay_compose_folds_in_memory_source_with_other_durable_sources() {
-        let dir = std::env::temp_dir().join(format!(
-            "shrike-ingest-overlay-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::test_support::collision_proof_dir("shrike-ingest-overlay");
         std::fs::create_dir_all(&dir).unwrap();
         let derived = shrike_derived::DerivedEngine::open(
             dir.join("shrike.db").to_str().unwrap(),

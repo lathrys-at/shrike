@@ -826,12 +826,7 @@ mod tests {
     }
 
     fn temp_orchestrator() -> Arc<IndexOrchestrator> {
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "shrike-orch-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        let dir = crate::test_support::collision_proof_dir("shrike-orch");
         let engine = Arc::new(MultiModalIndex::new(vec!["text".to_owned()]).unwrap());
         Arc::new(IndexOrchestrator::open(dir, engine))
     }
@@ -913,8 +908,12 @@ mod tests {
         let saver = DebouncedSaver::new(orch, 0.05, 100);
         saver.request_save();
         assert_eq!(saver.pending_changes(), 1);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while saver.pending_changes() != 0 && std::time::Instant::now() < deadline {
+        // Await the REAL flush event (pending drops to 0), unbounded — no
+        // wall-clock deadline to race a starved io thread. A debounce that never
+        // fires hangs and Bazel's per-test timeout catches it; a slow one just
+        // takes another poll. (This IS the "the idle timer fires" assertion, so
+        // waiting for it to fire is the test, not a guess.)
+        while saver.pending_changes() != 0 {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(saver.pending_changes(), 0, "the idle debounce flushed");
@@ -1684,12 +1683,7 @@ mod op_tests {
     }
 
     fn temp_orch() -> Arc<IndexOrchestrator> {
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "shrike-orch-ops-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        let dir = crate::test_support::collision_proof_dir("shrike-orch-ops");
         let engine =
             Arc::new(MultiModalIndex::new(vec![TEXT.to_owned(), "image".to_owned()]).unwrap());
         Arc::new(IndexOrchestrator::open(dir, engine))
@@ -2498,12 +2492,7 @@ mod op_tests {
     }
 
     fn temp_dir_unique() -> PathBuf {
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        std::env::temp_dir().join(format!(
-            "shrike-orch-owner-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ))
+        crate::test_support::collision_proof_dir("shrike-orch-owner")
     }
 
     fn engine() -> Arc<MultiModalIndex> {

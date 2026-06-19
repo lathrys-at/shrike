@@ -37,7 +37,13 @@ impl Embedder for FailingEmbedder {
 fn temp_dir() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static C: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    // Root at Bazel's per-action $TEST_TMPDIR (unique per process/run) when
+    // present, so a recycled PID + restarted counter can't reopen a prior run's
+    // lingering dir; fall back to $TMPDIR for a bare `cargo test`.
+    let root = std::env::var_os("TEST_TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = root.join(format!(
         "shrike-s6-repro-{}-{}",
         std::process::id(),
         C.fetch_add(1, Ordering::Relaxed)

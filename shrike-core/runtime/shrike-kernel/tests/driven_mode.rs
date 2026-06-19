@@ -13,8 +13,8 @@
 //!      thread (via `spawn_op` — whose inner future runs eagerly on the runtime,
 //!      driven by `drive_io` — plus a channel back to the request thread, the
 //!      threaded analogue of the asyncio bridge). A regression that fails to
-//!      drive the runtime or drain a pool would hang (caught as a recv timeout,
-//!      never an infinite hang).
+//!      drive the runtime or drain a pool hangs, which the bazel per-target
+//!      `test_timeout` turns into a real failure.
 //!
 //!   2. **Sync runs on `drive_sync`, OFF the runtime.** A collection job reports
 //!      the thread it ran on; it is the `drive_sync` thread, never a runtime
@@ -33,8 +33,8 @@
 //!      return) and trips the `drive_io_until_shutdown` signal, so all N+2
 //!      committed threads return and are joined — the binding's shutdown
 //!      sequencing in its kernel form. A regression that fails to close a queue
-//!      or wake the IO thread hangs a join, caught by the join deadline below,
-//!      never an infinite hang.
+//!      or wake the IO thread hangs a join, which the bazel per-target
+//!      `test_timeout` turns into a real failure.
 //!
 //! Lexical-only (no embedder): the degenerate kernel is lexical-only, exactly
 //! like `current_thread.rs`. The point is the threading model, not the ranking.
@@ -42,7 +42,6 @@
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 use shrike_error::NativeResult;
 use shrike_kernel::{
@@ -50,11 +49,12 @@ use shrike_kernel::{
     spawn_op, submit_blocking, submit_compute, Kernel,
 };
 
-/// Receive with a TIMEOUT so a runtime that never drives the op (the bug this
-/// guards) fails as a timeout, not an infinite hang.
+/// Receive the op's REAL completion, unbounded — no in-test wall-clock budget,
+/// which would flake a slow-but-not-hung run. A runtime that never drives the op
+/// hangs and Bazel's per-target `test_timeout` (the single global hang guard)
+/// fails it.
 fn recv<T>(rx: &mpsc::Receiver<T>) -> T {
-    rx.recv_timeout(Duration::from_secs(30))
-        .expect("the driven runtime must complete the op (no hang)")
+    rx.recv().expect("the driven runtime must complete the op")
 }
 
 /// Submit a kernel future onto the runtime and forget the observer: `spawn_op`
@@ -131,13 +131,26 @@ fn full_flow_on_a_driven_runtime() {
     let compute_threads: Vec<_> = (0..2)
         .map(|_| {
             compute_id_rx
-                .recv_timeout(Duration::from_secs(10))
+                .recv()
                 .expect("a compute thread registered its id")
         })
         .collect();
 
     // ── The request thread submits ops and observes completion via channels ──
-    let dir = std::env::temp_dir().join(format!("shrike-driven-{}", std::process::id()));
+    // Root at Bazel's per-action $TEST_TMPDIR (unique per process/run) when
+    // present, so a recycled PID can't reopen a prior run's lingering dir; fall
+    // back to $TMPDIR for a bare `cargo test`.
+    let root = std::env::var_os("TEST_TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = root.join(format!(
+        "shrike-driven-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let collection = dir.join("collection.anki2").to_string_lossy().into_owned();
     let cache = dir.join("cache").to_string_lossy().into_owned();
@@ -240,9 +253,10 @@ fn full_flow_on_a_driven_runtime() {
             let b = Arc::clone(&barrier);
             thread::spawn(move || {
                 submit_blocking(move || {
-                    // wait_timeout isn't on Barrier; the outer join has the
-                    // deadline. Both jobs must be on the pool simultaneously to
-                    // pass this rendezvous.
+                    // The barrier is the structural proof both jobs are on the
+                    // pool simultaneously: each blocks until the other arrives. If
+                    // the pool can't run both at once the rendezvous never
+                    // completes and the bazel `test_timeout` catches it.
                     b.wait();
                     Ok::<thread::ThreadId, shrike_error::NativeError>(thread::current().id())
                 })
@@ -290,7 +304,7 @@ fn full_flow_on_a_driven_runtime() {
         let _ = sc_tx.send(thread::current().id());
     }));
     let sc_ran_on = sc_rx
-        .recv_timeout(Duration::from_secs(10))
+        .recv()
         .expect("submit_compute scheduled the job on the compute pool");
     assert_ne!(
         sc_ran_on, request_thread,
@@ -342,25 +356,18 @@ fn full_flow_on_a_driven_runtime() {
     drop(kernel);
 
     // The kernel is quiesced, so closing the pool queues (and tripping the IO
-    // signal) lets every committed thread return promptly. Joining proves the
-    // shutdown is clean — a queue left open or an un-woken IO thread would hang
-    // a join, which a watchdog turns into a test failure instead of a hang.
+    // signal) lets every committed thread return. Joining proves the shutdown is
+    // clean — a queue left open or an un-woken IO thread hangs a join, and Bazel's
+    // per-target `test_timeout` (the single global hang guard) fails it. The joins
+    // are direct and unbounded — no in-test wall-clock budget to flake a slow run.
     shutdown_driven_pools();
 
-    let threads = std::iter::once(io)
+    for t in std::iter::once(io)
         .chain(std::iter::once(sync))
-        .chain(compute);
-    let (joined_tx, joined_rx) = mpsc::channel();
-    let joiner = thread::spawn(move || {
-        for t in threads {
-            t.join().expect("a committed drive thread joins cleanly");
-        }
-        let _ = joined_tx.send(());
-    });
-    joined_rx
-        .recv_timeout(Duration::from_secs(30))
-        .expect("shutdown_driven_pools lets all N+2 committed threads join (no hang)");
-    joiner.join().expect("the join watchdog thread finishes");
+        .chain(compute)
+    {
+        t.join().expect("a committed drive thread joins cleanly");
+    }
 
     let _ = std::fs::remove_dir_all(dir);
 }

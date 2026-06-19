@@ -795,6 +795,22 @@ impl Kernel {
         self.ingest.refresh_tag_centroids().await
     }
 
+    /// Await the background tag refresher fully quiescent — no run armed, in
+    /// flight, or pending a coalesced re-run. A test barrier: it guarantees no
+    /// late background recompute can still fire and read a collection mutation
+    /// the test makes AFTER this returns. (The recompute reads the collection
+    /// BEFORE taking its exclusion lock, so a synchronous `refresh_tag_centroids`
+    /// alone can't fence a not-yet-started background run.)
+    #[cfg(test)]
+    async fn await_tag_quiesce(&self) {
+        // Await the REAL quiescence event, unbounded — no iteration cap to race a
+        // starved scheduler. A refresher that never settles hangs and Bazel's
+        // per-test timeout catches it; a slow one just takes another poll.
+        while !self.tag_refresh.is_idle() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
     /// Attach an embedding service (embedding start / model swap) — the N=1
     /// convenience over [`attach_embedder_space`]. The space key is read from
     /// the embedder's own fingerprint (the CONTENT fingerprint), so a
@@ -2771,6 +2787,234 @@ impl Kernel {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    //! Shared collision-proof, self-cleaning scratch dirs for the kernel's
+    //! ~143-test shared binary.
+    //!
+    //! The original `{env::temp_dir()}/...-{pid}-{seq}` helpers had a
+    //! deterministic test-isolation bug (reproducible at N=1, no concurrency
+    //! needed): macOS recycles pids and the per-process seq counter restarts at
+    //! 0, so a later process regenerates an EARLIER run's path. They also never
+    //! deleted the dir, and `CollectionCore::open` is open-or-create — so the new
+    //! process reopens the leftover `c.anki2` and `count(*)` returns the old rows
+    //! plus its own (the #880 count-doubling cluster).
+    //!
+    //! Two properties fix it:
+    //!
+    //! - **Random leaf, never the pid.** The per-test dir name is a random
+    //!   128-bit token (see [`random_token`]), so it can't collide with a
+    //!   lingering dir from any other process — the bug is structurally gone, not
+    //!   just made rarer. `$TEST_TMPDIR`/`$TMPDIR` is only the BASE dir.
+    //! - **Cleanup.** [`ScratchDir`] removes its tree on drop, so even a panicking
+    //!   test leaves nothing behind.
+
+    use std::path::{Path, PathBuf};
+
+    /// The base dir for scratch dirs: Bazel's `$TEST_TMPDIR` when present, else
+    /// the shared `$TMPDIR` for a bare `cargo test`. This is only the BASE —
+    /// uniqueness comes from the random leaf below, never from the base, so a
+    /// shared `$TMPDIR` across many `cargo test` processes is safe.
+    fn scratch_root() -> PathBuf {
+        std::env::var_os("TEST_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
+    /// A RANDOM, unique scratch path WITHOUT a cleanup guard — for the few
+    /// helpers that hand the dir to a long-lived owner (an orchestrator) and so
+    /// can't tie its lifetime to a local [`ScratchDir`].
+    ///
+    /// The leaf is a random 128-bit token, deliberately NOT derived from
+    /// `std::process::id()`: pids RECYCLE across processes and the per-process
+    /// counter restarts from 0, so a `{pid}-{seq}` leaf regenerates an IDENTICAL
+    /// path in a later process — and because `CollectionCore::open` is
+    /// open-or-create, that path reopens the earlier run's leftover `c.anki2` and
+    /// `count(*)` returns its rows plus the new ones (the exact #880 count
+    /// doubling, deterministic at N=1). A random leaf can't collide even when a
+    /// prior run's dir lingers.
+    pub(crate) fn collision_proof_dir(prefix: &str) -> PathBuf {
+        scratch_root().join(format!("{prefix}-{}", random_token()))
+    }
+
+    /// A 128-bit random hex token, unique per call. Seeds from the OS via
+    /// `RandomState` (a fresh non-deterministic hasher per call) and mixes in a
+    /// monotonic counter + a nanosecond stamp, so two calls in the same process
+    /// — and the same call across processes — never coincide. No `process::id()`
+    /// anywhere (its recycling is the whole bug). Std-only, so no new crate edge
+    /// for the Bazel crate-universe to splice.
+    fn random_token() -> String {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let mix = |salt: u64| -> u64 {
+            let mut h = RandomState::new().build_hasher();
+            h.write_u64(salt);
+            h.write_u64(SEQ.fetch_add(1, Ordering::Relaxed));
+            h.write_u64(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0),
+            );
+            h.finish()
+        };
+        format!(
+            "{:016x}{:016x}",
+            mix(0xA5A5_A5A5_A5A5_A5A5),
+            mix(0x5A5A_5A5A_5A5A_5A5A)
+        )
+    }
+
+    /// A scratch directory that deletes itself (and everything under it) on drop.
+    /// Deref-es to its [`Path`], so it stands in for a `PathBuf` at call sites.
+    pub(crate) struct ScratchDir {
+        path: PathBuf,
+    }
+
+    impl ScratchDir {
+        /// Create a fresh scratch dir with the given prefix, unique across
+        /// processes and runs. The prefix only aids debugging — uniqueness comes
+        /// from the random leaf (see [`collision_proof_dir`]), never the pid.
+        pub(crate) fn new(prefix: &str) -> Self {
+            let dir = collision_proof_dir(prefix);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self { path: dir }
+        }
+
+        /// A child path under the scratch dir (e.g. `c.anki2`, `cache`).
+        pub(crate) fn join(&self, child: impl AsRef<Path>) -> PathBuf {
+            self.path.join(child)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl AsRef<Path> for ScratchDir {
+        fn as_ref(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.path).ok();
+        }
+    }
+
+    #[cfg(test)]
+    mod acceptance {
+        //! Deterministic plant-toggle proofs for the #880 count-doubling mode —
+        //! no concurrency or oversubscription needed.
+
+        use super::*;
+        use shrike_collection::{Collection, CollectionCore, DuplicatePolicy};
+
+        fn add_one(core: &dyn Collection, front: &str) {
+            let req = serde_json::json!([
+                {"note_type": "Basic", "deck": "D", "fields": {"Front": front, "Back": "b"}}
+            ]);
+            let notes: Vec<shrike_schemas::NoteInput> = serde_json::from_value(req).unwrap();
+            core.upsert_notes(&notes, DuplicatePolicy::Allow, false)
+                .unwrap();
+        }
+
+        fn note_count(core: &CollectionCore) -> i64 {
+            core.query("", false, 1000).unwrap().notes.len() as i64
+        }
+
+        /// The BUG, pinned: reopening the SAME path over a populated, undeleted
+        /// `c.anki2` reads the leftover rows PLUS the new one — open-or-create
+        /// preserves rows. This is what a recycled `{pid}-{seq}` path did across
+        /// processes; it must stay reproducible so the fix's value is provable.
+        #[test]
+        fn reopening_a_leftover_collection_pollutes_the_count() {
+            let dir = ScratchDir::new("plant-leftover");
+            let path = dir.join("c.anki2");
+            let path_str = path.to_str().unwrap();
+
+            // Run 1: leave 2 notes behind WITHOUT removing the dir.
+            let first = CollectionCore::open(path_str).unwrap();
+            add_one(&first, "one");
+            add_one(&first, "two");
+            assert_eq!(note_count(&first), 2);
+            first.close().unwrap();
+
+            // Run 2 reusing the path: a fresh test that adds ONE note now sees 3
+            // — the leftover pollution the random-leaf fix prevents.
+            let second = CollectionCore::open(path_str).unwrap();
+            assert_eq!(
+                note_count(&second),
+                2,
+                "open-or-create reopened the leftover"
+            );
+            add_one(&second, "three");
+            assert_eq!(
+                note_count(&second),
+                3,
+                "leftover (2) + own (1) = the count-doubling symptom"
+            );
+            second.close().unwrap();
+        }
+
+        /// The FIX: independent helper calls never share a path, so one test's
+        /// leftover can never be another's slot — even if a prior dir lingers.
+        #[test]
+        fn independent_scratch_dirs_never_collide() {
+            // Many calls, all distinct — the random leaf, not a recycled pid+seq.
+            let n = 200;
+            let dirs: Vec<PathBuf> = (0..n)
+                .map(|_| collision_proof_dir("plant-unique"))
+                .collect();
+            let unique: std::collections::BTreeSet<&PathBuf> = dirs.iter().collect();
+            assert_eq!(unique.len(), n, "every scratch path is unique");
+
+            // A populated leftover at one path does NOT pollute a fresh one.
+            let leftover = ScratchDir::new("plant-toggle");
+            let lpath = leftover.join("c.anki2");
+            let c = CollectionCore::open(lpath.to_str().unwrap()).unwrap();
+            add_one(&c, "stale");
+            c.close().unwrap();
+
+            let fresh = ScratchDir::new("plant-toggle");
+            assert_ne!(fresh.path, leftover.path, "fresh dir is a different path");
+            let fc = CollectionCore::open(fresh.join("c.anki2").to_str().unwrap()).unwrap();
+            assert_eq!(
+                note_count(&fc),
+                0,
+                "fresh collection is empty — no pollution"
+            );
+            fc.close().unwrap();
+        }
+
+        /// The structural guarantee: the leaf is `{prefix}-{32 hex}`, i.e. a pure
+        /// random token, NOT the `{prefix}-{pid}-{seq}` shape whose pid recycling
+        /// was the root cause. A regression that reintroduces a pid/seq leaf
+        /// changes this shape and fails here regardless of scheduling.
+        #[test]
+        fn scratch_leaf_is_a_random_hex_token_not_pid_seq() {
+            for _ in 0..50 {
+                let p = collision_proof_dir("plant-shape");
+                let leaf = p.file_name().unwrap().to_string_lossy();
+                let token = leaf
+                    .strip_prefix("plant-shape-")
+                    .unwrap_or_else(|| panic!("unexpected leaf shape {leaf}"));
+                assert_eq!(token.len(), 32, "token is a 128-bit hex string: {leaf}");
+                assert!(
+                    token.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "token is pure hex (no pid/seq decimals): {leaf}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod no_cpython_smoke {
     //! The acceptance smoke: link the kernel WITHOUT Python and run one
     //! flow end to end — open → upsert (duplicate policy live) → search with a
@@ -2836,29 +3080,19 @@ mod no_cpython_smoke {
         serde_json::to_string(&results).unwrap()
     }
 
-    fn temp_dir() -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "shrike-kernel-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir() -> crate::test_support::ScratchDir {
+        crate::test_support::ScratchDir::new("shrike-kernel")
     }
 
-    /// The op-tail tag refresh is a coalesced background task —
-    /// poll until the tag state reaches the expected shape (an isolated
-    /// op's first fire runs immediately, so this resolves in milliseconds).
+    /// Await the op-tail (coalesced background) tag refresh reaching the expected
+    /// tag-state shape. Unbounded — no iteration cap to race a starved scheduler:
+    /// a refresh that never reaches the shape hangs and Bazel's per-test timeout
+    /// catches it; a slow one just takes another poll. The poll exists only
+    /// because the background refresh exposes no completion channel to await.
     async fn wait_for_tags(kernel: &Kernel, pred: impl Fn(&tag_centroids::TagKeyMap) -> bool) {
-        for _ in 0..500 {
-            if pred(kernel.tag_keys()) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        while !pred(kernel.tag_keys()) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        panic!("tag state never reached the expected shape");
     }
 
     /// Compile-time pin: every kernel future is Send, so a harness may spawn
@@ -2899,7 +3133,6 @@ mod no_cpython_smoke {
             // torn down mid-flight.
             let _stamp = collection.run(|core| core.col_mod()).await.unwrap();
             collection.shutdown().await;
-            let _ = std::fs::remove_dir_all(dir);
         });
     }
 
@@ -2924,7 +3157,6 @@ mod no_cpython_smoke {
             futures::future::join_all(futures).await;
             assert_eq!(*log.lock().unwrap(), (0..16).collect::<Vec<_>>());
             collection.shutdown().await;
-            let _ = std::fs::remove_dir_all(dir);
         });
     }
 
@@ -2983,7 +3215,6 @@ mod no_cpython_smoke {
             // Idempotent: a second close after the actor drained is
             // already-closed, not an actor-gone error.
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -3082,7 +3313,6 @@ mod no_cpython_smoke {
             assert!(kernel.embed_service().is_none());
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -3177,7 +3407,6 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -3328,7 +3557,6 @@ mod no_cpython_smoke {
             // The text space's engine holds NO image-space vector for the note
             // beyond its own (text-space image modality is unused here).
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(&dir).ok();
         });
     }
 
@@ -3471,7 +3699,6 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(&dir).ok();
         });
     }
 
@@ -3515,7 +3742,6 @@ mod no_cpython_smoke {
                 "gone from image space too (fan-out)"
             );
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(&dir).ok();
         });
     }
 
@@ -3588,7 +3814,6 @@ mod no_cpython_smoke {
             assert!(!kernel.reindex_if_needed().await.unwrap());
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -3646,7 +3871,6 @@ mod no_cpython_smoke {
                 "the lexical signal carried the hit"
             );
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(&dir).ok();
         });
     }
 
@@ -3683,7 +3907,6 @@ mod no_cpython_smoke {
                 "the CLIP space is a separate engine; neighbors never read it"
             );
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(&dir).ok();
         });
     }
 
@@ -3739,7 +3962,6 @@ mod no_cpython_smoke {
             assert_eq!(hits[0].note_id, nid);
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -3841,7 +4063,6 @@ mod no_cpython_smoke {
             assert!(!kernel.reindex_if_needed().await.unwrap());
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -3932,7 +4153,6 @@ mod no_cpython_smoke {
             assert!(!kernel.reindex_if_needed().await.unwrap());
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -3992,6 +4212,14 @@ mod no_cpython_smoke {
                 k.lookup(tag_centroids::tag_key("alpha")).is_some()
             })
             .await;
+            // Drain step 1's background refresh to QUIESCENCE before the
+            // out-of-band beta write. The recompute reads the collection BEFORE
+            // taking its exclusion lock, so a not-yet-started background run could
+            // otherwise read the collection AFTER the beta write and pull beta in
+            // with no tag op — beta appearing spuriously under a starved scheduler
+            // (#880). Awaiting idle fences that: once it returns, no step-1
+            // refresh can still read a later collection state.
+            kernel.await_tag_quiesce().await;
             let beta = tag_centroids::tag_key("beta");
             assert!(
                 kernel.tag_keys().lookup(beta).is_none(),
@@ -4013,8 +4241,7 @@ mod no_cpython_smoke {
 
             // A METADATA-ONLY op: a deck create. With the fix it passes
             // membership_may_have_changed=false → no recompute → "beta" stays
-            // invisible to the centroid map. Give the coalescing refresher
-            // ample time to run if it were going to (it must not).
+            // invisible to the centroid map.
             kernel
                 .upsert_decks(vec![shrike_schemas::DeckInput {
                     id: None,
@@ -4022,9 +4249,15 @@ mod no_cpython_smoke {
                 }])
                 .await
                 .unwrap();
-            for _ in 0..20 {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
+            // Deterministic barriers instead of a fixed sleep window: settle()
+            // drains the deck op's ingest tail (where a wrongly-triggered
+            // `tag_refresh.request()` would fire), and await_tag_quiesce() then
+            // lets any such refresh RUN TO COMPLETION. So a deck op that wrongly
+            // recomputed would have pulled beta in by now and the assertion fires;
+            // a correct one leaves beta absent. A fixed sleep raced a late refresh
+            // under starvation and spuriously populated beta (#880); this can't.
+            kernel.settle().await;
+            kernel.await_tag_quiesce().await;
             assert!(
                 kernel.tag_keys().lookup(beta).is_none(),
                 "DEFECT (#600): a deck op fired a full tag-centroid recompute \
@@ -4041,7 +4274,6 @@ mod no_cpython_smoke {
             wait_for_tags(&kernel, |k| k.lookup(beta).is_some()).await;
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -4175,7 +4407,6 @@ mod no_cpython_smoke {
             assert!(!kernel.reindex_if_needed().await.unwrap());
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -4221,7 +4452,6 @@ mod no_cpython_smoke {
             assert!(results.contains("\"created\""), "got: {results}");
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -4305,7 +4535,6 @@ mod no_cpython_smoke {
             wait_for_tags(&kernel, |k| k.lookup(cell_key).is_none()).await;
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -4369,7 +4598,6 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -4527,7 +4755,6 @@ mod no_cpython_smoke {
             assert!(sem2.iter().any(|h| h.note_id == diagram_id));
 
             kernel2.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -4597,7 +4824,6 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -4659,7 +4885,6 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -4758,7 +4983,6 @@ mod no_cpython_smoke {
             assert_eq!(idle, recognize::SweepReport::Idle);
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -4841,7 +5065,6 @@ mod no_cpython_smoke {
             assert_eq!(idle, recognize::SweepReport::Idle);
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -4967,7 +5190,6 @@ mod no_cpython_smoke {
             assert_eq!(seen(), 4);
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -5036,7 +5258,6 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -5219,7 +5440,6 @@ mod no_cpython_smoke {
             assert!(still.iter().any(|h| h.note_id == photo_id));
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -5350,17 +5570,24 @@ mod no_cpython_smoke {
             assert_eq!(idle, recognize::SweepReport::Idle);
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
     /// A recognizer that records the PEAK number of `recognize()` calls
-    /// in-flight at once — the probe for the slow-recognition concurrency
-    /// bound. Each call holds for a beat (so concurrent calls actually
-    /// overlap) and transcribes the bytes.
+    /// in-flight at once — the probe for the slow-recognition concurrency bound.
+    ///
+    /// Each call rendezvous on a barrier sized to the bound: it blocks until
+    /// exactly `SLOW_RECOGNITION_CONCURRENCY` calls are in flight together, then
+    /// all release. This makes the observed overlap DETERMINISTIC rather than a
+    /// bet that one fixed sleep window outlasts io-thread scheduling delay — the
+    /// permitted batch is held open until the full batch arrives, so peak reaches
+    /// the bound on every run. If a regression dropped the limit BELOW the
+    /// barrier width, the batch could never fill and the wait would block; the
+    /// timeout turns that into a clean test failure instead of a hang.
     struct ConcurrencyProbeRecognizer {
         in_flight: Arc<std::sync::atomic::AtomicUsize>,
         peak: Arc<std::sync::atomic::AtomicUsize>,
+        rendezvous: Arc<tokio::sync::Barrier>,
     }
 
     impl Recognizer for ConcurrencyProbeRecognizer {
@@ -5370,10 +5597,16 @@ mod no_cpython_smoke {
         ) -> BoxFuture<'_, NativeResult<Vec<Recognition>>> {
             let in_flight = Arc::clone(&self.in_flight);
             let peak = Arc::clone(&self.peak);
+            let rendezvous = Arc::clone(&self.rendezvous);
             Box::pin(async move {
                 let now = in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
-                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                // Hold the permitted batch open until the whole batch is present:
+                // the barrier RELEASE is the structural proof that exactly the
+                // bound's worth overlapped. No timeout — if the limit regressed
+                // below the barrier width the batch can't fill and the test hangs
+                // (Bazel's per-test timeout catches that), never a flaky window.
+                rendezvous.wait().await;
                 in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(items
                     .iter()
@@ -5410,8 +5643,10 @@ mod no_cpython_smoke {
             kernel.reindex_if_needed().await.unwrap();
 
             // Several audio notes so concurrent single-item sweeps pick
-            // distinct items (the pending diff hands each a different ref).
-            let n = 6;
+            // distinct items (the pending diff hands each a different ref). A
+            // whole multiple of the bound, so every permitted batch exactly
+            // fills the rendezvous barrier (no half-batch left waiting).
+            let n = SLOW_RECOGNITION_CONCURRENCY * 3;
             let mut media = std::collections::HashMap::new();
             let notes: Vec<serde_json::Value> = (0..n)
                 .map(|i| {
@@ -5439,6 +5674,7 @@ mod no_cpython_smoke {
                 Arc::new(ConcurrencyProbeRecognizer {
                     in_flight: Arc::clone(&in_flight),
                     peak: Arc::clone(&peak),
+                    rendezvous: Arc::new(tokio::sync::Barrier::new(SLOW_RECOGNITION_CONCURRENCY)),
                 }),
                 Arc::new(MapResolver::new(media)),
             );
@@ -5458,14 +5694,14 @@ mod no_cpython_smoke {
                 h.await.unwrap().unwrap();
             }
 
+            // The rendezvous holds each permitted batch open until it is full, so
+            // the peak is exactly the bound: a regression to a HIGHER limit lets
+            // more than the bound overlap (peak > bound), and a regression to a
+            // LOWER limit can't fill the barrier (the timeout fires, peak < bound).
             let observed_peak = peak.load(std::sync::atomic::Ordering::SeqCst);
-            assert!(
-                observed_peak >= 2,
-                "the probe should have observed real overlap (peak {observed_peak})"
-            );
-            assert!(
-                observed_peak <= SLOW_RECOGNITION_CONCURRENCY,
-                "slow-recognition concurrency must be bounded by \
+            assert_eq!(
+                observed_peak, SLOW_RECOGNITION_CONCURRENCY,
+                "slow-recognition concurrency must be bounded at exactly \
                  SLOW_RECOGNITION_CONCURRENCY={SLOW_RECOGNITION_CONCURRENCY}, saw peak \
                  {observed_peak}"
             );
@@ -5475,7 +5711,6 @@ mod no_cpython_smoke {
                 .close()
                 .await
                 .unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -5635,7 +5870,6 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -5733,7 +5967,6 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -5861,7 +6094,6 @@ mod no_cpython_smoke {
         let hits = kernel2.search("newton laws of motion", 5).await.unwrap();
         assert!(!hits.is_empty());
         kernel2.close().await.unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
     /// The derived rebuild's collect→commit window vs concurrent
     /// writes. The first half DEMONSTRATES the hazard mechanically (a build
@@ -6069,6 +6301,14 @@ mod no_cpython_smoke {
             embedder.gate.notify_one(); // release op B → it ERRORS, bravo never indexed
             let _ = op_b.await;
 
+            // Settle to the deterministic barrier before reading index state: op
+            // A's index tail (embed → index add) runs asynchronously after its
+            // upsert returns, so without this the "alpha indexed" sanity check
+            // races the tail and spuriously fails when the runtime is starved
+            // (#880). settle() returns once every enqueued tail — A's success and
+            // B's failure — is fully processed.
+            kernel.settle().await;
+
             let all_ids = kernel
                 .collection()
                 .run(|core| core.find_notes(""))
@@ -6104,7 +6344,6 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -6208,7 +6447,6 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -6272,7 +6510,6 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
     }
 
@@ -6285,28 +6522,16 @@ mod no_cpython_smoke {
     /// chunk pulls, the search would wedge the actor on the lock while the
     /// rebuild waited on the actor for its next chunk — a circular wait that
     /// hangs the whole kernel. The rebuild drops the lock around every pull, so
-    /// the two interleave. The watchdog is a liveness guard: it aborts the
-    /// process if the run wedges, so a regression fails loudly instead of hanging
-    /// CI. With the fix the run completes in well under a second.
+    /// the two interleave.
+    ///
+    /// The deadlock guard is STRUCTURAL: the test awaits the real completion of
+    /// BOTH the rebuild and the search loop (`futures::join!`). A regression that
+    /// wedges them never completes the join, so the test hangs and Bazel's
+    /// per-test timeout fails it — no in-test wall-clock watchdog whose budget
+    /// could trip on a slow-but-live run (and whose `process::abort` would kill
+    /// the whole 143-test binary).
     #[test]
     fn rebuild_derived_does_not_deadlock_against_concurrent_search() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let done = Arc::new(AtomicBool::new(false));
-        let wd = Arc::clone(&done);
-        std::thread::spawn(move || {
-            for _ in 0..300 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                if wd.load(Ordering::SeqCst) {
-                    return;
-                }
-            }
-            eprintln!(
-                "DEADLOCK: rebuild_derived wedged against a concurrent search on the derived lock"
-            );
-            std::process::abort();
-        });
-
-        let done_set = Arc::clone(&done);
         crate::runtime::testing::run_with_sync(async move {
             let dir = temp_dir();
             let kernel = Arc::new(
@@ -6360,8 +6585,6 @@ mod no_cpython_smoke {
             );
 
             kernel.close().await.unwrap();
-            std::fs::remove_dir_all(dir).ok();
         });
-        done_set.store(true, Ordering::SeqCst);
     }
 }

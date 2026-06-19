@@ -582,7 +582,6 @@ fn driven_missing() -> NativeError {
 pub mod testing {
     use std::sync::OnceLock;
     use std::thread;
-    use std::time::Duration;
 
     use super::*;
 
@@ -628,7 +627,10 @@ pub mod testing {
                 let _ = tx.send(());
                 Ok(())
             }));
-            rx.recv_timeout(Duration::from_secs(30))
+            // Block on the REAL "IO thread is driving" event, no wall-clock
+            // budget — see submit_and_wait. A never-starting IO thread hangs and
+            // is caught by Bazel's per-test timeout, not an in-test guess.
+            rx.recv()
                 .expect("the IO thread drives the runtime (the startup barrier)");
 
             for i in 0..COMPUTE_THREADS {
@@ -653,16 +655,22 @@ pub mod testing {
 
     /// Submit `fut` onto the driven runtime and block the calling test thread on
     /// its completion (the threaded-host submission shape — the request thread
-    /// must not `block_on` the runtime the IO thread owns). A timeout turns a
-    /// regression that fails to drive the op into a bounded failure, not a hang.
+    /// must not `block_on` the runtime the IO thread owns).
     fn submit_and_wait<T: Send + 'static>(fut: impl Future<Output = T> + Send + 'static) -> T {
         let (tx, rx) = std::sync::mpsc::sync_channel::<T>(1);
         drop(spawn_op(async move {
             let _ = tx.send(fut.await);
             Ok(())
         }));
-        rx.recv_timeout(Duration::from_secs(60))
-            .expect("the driven runtime completed the test future (no hang)")
+        // Block on the REAL completion event (the future finished and sent), with
+        // NO wall-clock budget: pass/fail can't hinge on a timeout-vs-load race, so
+        // an oversubscribed host just waits rather than flaking. `recv` errors only
+        // if the sender dropped without sending — the future panicked — which
+        // surfaces here as the test failure it is. A genuine deadlock hangs and is
+        // caught by Bazel's per-test timeout (the outer bound), not an in-test
+        // wall-clock guess.
+        rx.recv()
+            .expect("the driven runtime ran the test future to completion")
     }
 
     /// Run a kernel future on the driven runtime with **1 io + N compute**
@@ -821,8 +829,11 @@ mod leaf_invariant {
         submit_compute(Box::new(move || {
             let _ = tx.send(std::thread::current().id());
         }));
+        // Block on the REAL "the job ran" event (it sends its thread id), no
+        // wall-clock budget: a starved compute pool just waits instead of flaking;
+        // a never-scheduled job hangs and Bazel's per-test timeout catches it.
         let ran_on = rx
-            .recv_timeout(std::time::Duration::from_secs(10))
+            .recv()
             .expect("submit_compute scheduled the job on the compute pool");
         assert_ne!(
             ran_on, caller,

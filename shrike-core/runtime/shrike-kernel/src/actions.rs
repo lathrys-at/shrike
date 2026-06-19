@@ -129,17 +129,8 @@ mod tests {
     use super::*;
     use shrike_collection::CollectionCore;
 
-    pub(super) fn temp_collection() -> (std::path::PathBuf, CollectionCore) {
-        // Process id + a process-wide counter: parallel test threads can land
-        // on the same nanosecond stamp (observed under the Bazel sandbox), and
-        // two cores on one path fail with "Anki already open".
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "shrike-kernel-actions-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+    pub(super) fn temp_collection() -> (crate::test_support::ScratchDir, CollectionCore) {
+        let dir = crate::test_support::ScratchDir::new("shrike-kernel-actions");
         let path = dir.join("c.anki2");
         let core = CollectionCore::open(path.to_str().unwrap()).unwrap();
         (dir, core)
@@ -1606,8 +1597,6 @@ mod search_tests {
 
         let fuzzy_ids: Vec<i64> = groups[1].matches.iter().map(|m| m.note.id).collect();
         assert_eq!(fuzzy_ids, vec![inside], "fuzzy: in-scope only");
-
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -1817,7 +1806,6 @@ mod search_tests {
             "a derived-read failure must surface, never silently field-fall-back \
              (the field scan can't serve OCR text)"
         );
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -1846,7 +1834,6 @@ mod search_tests {
             "a sub-trigram literal still hits via the field-text fallback"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2065,7 +2052,7 @@ mod search_tests {
         // the gate's behaviour; the production `FloorAdmit` would instead drop
         // the off-topic space by the floor, but this test exercises the relative
         // path explicitly.
-        let (dir, core) = temp_collection();
+        let (_dir, core) = temp_collection();
         let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
         let image_note = add_note(&core, "unrelated filler card", "misc");
 
@@ -2115,7 +2102,6 @@ mod search_tests {
             "off-topic image note stayed out"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2130,7 +2116,7 @@ mod search_tests {
         // ON-TOPIC for text; the off-topic image's vision cosine is BELOW the
         // text-target's, so the relative gate keeps it OUT; ungated (or under
         // floor-admit with no floor) it floods.
-        let (dir, core) = temp_collection();
+        let (_dir, core) = temp_collection();
         let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
         let off_topic_image = add_note(
             &core,
@@ -2213,7 +2199,6 @@ mod search_tests {
             "gated: the off-topic image note is kept out (vision < text → closed)"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2224,7 +2209,7 @@ mod search_tests {
         // the relative gate OPENS and the image-bearing note joins the fusion
         // via its `image#clip` signal. (Without cross-space, the text-only
         // primary never sees it.)
-        let (dir, core) = temp_collection();
+        let (_dir, core) = temp_collection();
         let weak_text = add_note(&core, "a loosely related text card", "text");
         let image_note = add_note(&core, "card whose answer is only in the picture", "img");
 
@@ -2276,7 +2261,6 @@ mod search_tests {
             "the match carries its vision space's per-space provenance"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     // ── The cross-space intra-modal floor (the over-return leak) ─────────────
@@ -2297,7 +2281,7 @@ mod search_tests {
     fn empty_primary_scenario(
         primary_text_cos: f32,
     ) -> (
-        std::path::PathBuf,
+        crate::test_support::ScratchDir,
         shrike_collection::CollectionCore,
         MultiModalIndex,
         i64,
@@ -2319,7 +2303,7 @@ mod search_tests {
         // `v(0.2) >= p(0.0)` is trivially OPEN and the weak off-topic image
         // leaks into the results. The leak the floor closes — pinned here so the
         // floor variants below have a positive baseline to beat.
-        let (dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
+        let (_dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
         let mut a = cross_args(10);
         // The space carries its own floor (0.5), but V0 never consults it.
         a.cross_space = vec![vision_space_floored(
@@ -2344,7 +2328,6 @@ mod search_tests {
             "V0 leaks the weak off-topic image (the relative gate inverts under an empty primary)"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2353,7 +2336,7 @@ mod search_tests {
         // OWN intra-modal floor (0.5) → the floor hard-drops the space's image
         // ranking. The weak off-topic image never enters. The relative gate is
         // still satisfied (empty primary) — the floor is the backstop.
-        let (dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
+        let (_dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
         let mut a = cross_args(10);
         a.cross_space = vec![vision_space_floored(
             "clip",
@@ -2377,7 +2360,6 @@ mod search_tests {
             "V0+floor closes the leak: cos 0.20 ≤ floor 0.50 → the vision space is dropped"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2385,7 +2367,7 @@ mod search_tests {
         // The floor must NOT over-suppress: a vision space whose best image
         // cosine (0.92) CLEARS its own floor (0.5) still contributes, even
         // under an empty primary — the floor drops only the genuinely-weak best.
-        let (dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
+        let (_dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
         let mut a = cross_args(10);
         a.cross_space = vec![vision_space_floored(
             "clip",
@@ -2409,7 +2391,6 @@ mod search_tests {
             "V0+floor keeps an above-floor image (0.92 > 0.50): no over-suppression"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2419,7 +2400,7 @@ mod search_tests {
         // in the ranking its RRF mass is negligible — it does not out-rank the
         // primary's own (weak) text hit. With a tiny τ this approaches the hard
         // floor; here we assert the weak image is demoted below the text card.
-        let (dir, core, index, weak_text, image_note) = empty_primary_scenario(0.30);
+        let (_dir, core, index, weak_text, image_note) = empty_primary_scenario(0.30);
         let mut a = cross_args(10);
         a.cross_space = vec![vision_space_floored(
             "clip",
@@ -2452,7 +2433,6 @@ mod search_tests {
             "V2 tapers the weak image's weight to near-zero → it ranks below the text card"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2463,7 +2443,7 @@ mod search_tests {
         // V1 is the CONTROL: it does NOT consult the intra-modal floor, so it
         // STILL leaks the weak image. This proves the leak is intra-modal, not
         // relative.
-        let (dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
+        let (_dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
         let mut a = cross_args(10);
         a.cross_space = vec![vision_space_floored(
             "clip",
@@ -2488,7 +2468,6 @@ mod search_tests {
             "V1 (soft-relative) still leaks: it never consults the intra-modal floor"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2499,7 +2478,7 @@ mod search_tests {
         // does NOT drop them — but the RELATIVE gate closes them (vision 0.70 <
         // text 0.80). The composition (floor AND relative) keeps the text-target
         // at rank-1: the floor never re-opens what the relative gate closed.
-        let (dir, core) = temp_collection();
+        let (_dir, core) = temp_collection();
         let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
         let off_topic_image = add_note(&core, "an off-topic but confident diagram", "img");
         let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
@@ -2537,7 +2516,6 @@ mod search_tests {
             "the off-topic image stays out (relative gate closed, floor did not re-open it)"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     // ── Floor-based admission (drop the relative gate) ───────────────────────
@@ -2561,7 +2539,7 @@ mod search_tests {
         // floor (0.50), so floor-admission ADMITS the CLIP hit: the card carries
         // its `image#clip` provenance (the corroborating vote the relative gate
         // discarded).
-        let (dir, core) = temp_collection();
+        let (_dir, core) = temp_collection();
         let image_card = add_note(&core, "card whose answer is in heart.png", "img");
         let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
         // Primary text wins on the filename token (cos 0.95).
@@ -2623,7 +2601,6 @@ mod search_tests {
             "FloorAdmit: the on-topic CLIP hit corroborates the card even though text won"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2635,7 +2612,7 @@ mod search_tests {
         // the card may still surface via its filename text hit, but it carries NO
         // `image#clip` (the floor is the SOLE discriminator now that the relative
         // gate is gone — this is the load-bearing test for the thesis).
-        let (dir, core) = temp_collection();
+        let (_dir, core) = temp_collection();
         let lying_card = add_note(&core, "card with jaguar.png but the image is a car", "img");
         let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
         index
@@ -2672,7 +2649,6 @@ mod search_tests {
              the lying filename does not summon a spurious CLIP vote"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2681,7 +2657,7 @@ mod search_tests {
         // ∅-gold query, empty primary, one weak off-topic image (cos 0.20 < floor
         // 0.50). With no relative gate the floor is the only guard — and it holds
         // (0.20 ≤ 0.50 → dropped). Same outcome as RelativeFloor, different path.
-        let (dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
+        let (_dir, core, index, _weak_text, image_note) = empty_primary_scenario(0.0);
         let mut a = cross_args(10);
         a.cross_space = vec![vision_space_floored(
             "clip",
@@ -2705,7 +2681,6 @@ mod search_tests {
             "FloorAdmit closes the over-return leak: cos 0.20 ≤ floor 0.50 → dropped"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2719,7 +2694,7 @@ mod search_tests {
         // IMPOSSIBLE (only one image space exists), so the budget is moot there —
         // WHY the relative gate can be dropped: not because floor-admission
         // handles N≥2, but because N≥2 image spaces never occur.
-        let (dir, core) = temp_collection();
+        let (_dir, core) = temp_collection();
         let text_target = add_note(&core, "the krebs cycle oxidizes acetyl coa", "biology");
         let off_topic_image = add_note(&core, "an off-topic but confident diagram", "img");
         let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
@@ -2774,7 +2749,6 @@ mod search_tests {
             "FloorAdmitBudget holds the N=2 negative control: the split budget can't out-fuse text"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2783,7 +2757,7 @@ mod search_tests {
         // penalize it — N=1 keeps full weight under FloorAdmitBudget (the budget
         // only divides when N≥2). The on-topic CLIP hit corroborates at full
         // strength exactly like FloorAdmit.
-        let (dir, core) = temp_collection();
+        let (_dir, core) = temp_collection();
         let weak_text = add_note(&core, "a loosely related text card", "text");
         let image_note = add_note(&core, "card whose answer is only in the picture", "img");
         let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
@@ -2820,7 +2794,6 @@ mod search_tests {
             "N=1 FloorAdmitBudget: the lone image space keeps full weight (no budget penalty)"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2831,7 +2804,7 @@ mod search_tests {
         // its provenance (the graceful form still corroborates), and a clearly
         // sub-floor hit (cos 0.20) gets a near-zero weight so it cannot out-rank
         // a real text card — the soft analogue of the hard floor's drop.
-        let (dir, core) = temp_collection();
+        let (_dir, core) = temp_collection();
         let weak_text = add_note(&core, "a loosely related text card", "text");
         let image_note = add_note(&core, "card whose answer is only in the picture", "img");
         let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
@@ -2868,7 +2841,6 @@ mod search_tests {
             "SoftFloorAdmit: a confident hit (cos 0.92 ≫ floor) corroborates at ≈full weight"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     // ── Per-note image floor (drop the below-floor tail) ─────────────────────
@@ -2881,7 +2853,7 @@ mod search_tests {
         // filter keeps the above-floor card's `image#clip` and DROPS the
         // below-floor one — the latter no longer rides in on the rank-1's
         // coat-tails (a per-space gate would admit the whole ranking).
-        let (dir, core) = temp_collection();
+        let (_dir, core) = temp_collection();
         let weak_text = add_note(&core, "a loosely related text card", "text");
         let above = add_note(&core, "card whose image strongly matches", "img");
         let below = add_note(&core, "card whose image barely matches", "img");
@@ -2922,7 +2894,6 @@ mod search_tests {
             "#582: the below-floor tail card carries no image#clip (per-note floor dropped it)"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2933,7 +2904,7 @@ mod search_tests {
         // 0.20, floor 0.50). The above-floor card surfaces via `image`; the
         // below-floor one does NOT (a per-space gate would admit the whole
         // ranking iff the rank-1 cleared the floor).
-        let (dir, core) = temp_collection();
+        let (_dir, core) = temp_collection();
         let above = add_note(&core, "card whose image strongly matches", "imgA");
         let below = add_note(&core, "card whose image barely matches", "imgB");
         let index = MultiModalIndex::new(vec!["text".to_owned(), "image".to_owned()]).unwrap();
@@ -2968,6 +2939,5 @@ mod search_tests {
             "#582: the below-floor card carries no primary image signal (per-note floor)"
         );
         core.close().unwrap();
-        std::fs::remove_dir_all(dir).ok();
     }
 }

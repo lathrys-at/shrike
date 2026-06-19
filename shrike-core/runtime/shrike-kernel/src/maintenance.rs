@@ -183,13 +183,26 @@ impl Maintenance {
     pub fn shutdown(&self) {
         self.cancel();
     }
+
+    /// Whether the job is fully quiescent: no run armed, in flight, or pending a
+    /// coalesced re-run. The deterministic "the background work has settled"
+    /// signal a test awaits instead of betting a sleep window outlasts a starved
+    /// scheduler.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal state mutex is poisoned (a prior holder panicked).
+    #[cfg(test)]
+    pub fn is_idle(&self) -> bool {
+        let st = self.state.lock().expect("maintenance poisoned");
+        st.phase == Phase::Idle && !st.dirty
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
-    use std::time::Instant;
 
     /// A run closure incrementing `counter`, optionally sleeping `run_ms` so a
     /// request can land mid-run (to exercise coalescing deterministically).
@@ -206,11 +219,40 @@ mod tests {
         })
     }
 
-    fn wait_until(deadline_secs: u64, mut done: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(deadline_secs);
-        while !done() && Instant::now() < deadline {
+    /// Spin until `done` — a real maintenance event (a run fired, the counter
+    /// advanced). Unbounded, no wall-clock deadline: pass/fail can't hinge on a
+    /// budget-vs-load race, so a starved run just waits. A run that never fires
+    /// hangs and Bazel's per-test timeout catches it (the outer deadlock bound).
+    fn wait_until(mut done: impl FnMut() -> bool) {
+        while !done() {
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// A run closure whose body BLOCKS on a gate, signalling when it has begun.
+    /// Lets a test pin the "a request landed mid-run" ordering deterministically
+    /// instead of betting a sleep window outlasts scheduling delay: hold the gate,
+    /// drive the coalescing requests once the run is provably in flight, then open
+    /// it. `started` counts run entries (so a test can wait for run K to begin);
+    /// `gate` releases every blocked run at once.
+    fn gated_run(
+        counter: &Arc<AtomicU64>,
+        started: &Arc<AtomicU64>,
+        gate: &Arc<tokio::sync::Notify>,
+    ) -> RunFn {
+        let counter = Arc::clone(counter);
+        let started = Arc::clone(started);
+        let gate = Arc::clone(gate);
+        Box::new(move || {
+            let counter = Arc::clone(&counter);
+            let started = Arc::clone(&started);
+            let gate = Arc::clone(&gate);
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                started.fetch_add(1, Ordering::SeqCst);
+                gate.notified().await;
+            })
+        })
     }
 
     #[test]
@@ -246,7 +288,7 @@ mod tests {
             0,
         );
         job.request();
-        wait_until(5, || counter.load(Ordering::SeqCst) >= 1);
+        wait_until(|| counter.load(Ordering::SeqCst) >= 1);
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
@@ -257,22 +299,35 @@ mod tests {
     #[test]
     fn concurrent_requests_coalesce_into_one_rerun() {
         // Requests landing while a run executes collapse into exactly ONE
-        // re-run — not one run per request. The run sleeps so both extra
-        // requests land mid-run; the 200ms settle catches a spurious third run.
+        // re-run — not one run per request. A gated run pins the ordering: each
+        // run blocks on the gate until released, so the two extra requests
+        // provably land while run 1 is in flight (no sleep-window race that an
+        // oversubscribed host could lose). The final settle catches a spurious
+        // third run.
         crate::runtime::testing::run(async {});
         let counter = Arc::new(AtomicU64::new(0));
+        let started = Arc::new(AtomicU64::new(0));
+        let gate = Arc::new(tokio::sync::Notify::new());
         let job = Maintenance::new(
-            counting_run(&counter, 50),
+            gated_run(&counter, &started, &gate),
             Duration::ZERO,
             Duration::ZERO,
             0,
         );
-        job.request(); // run 1 starts, then sleeps 50ms
-        std::thread::sleep(Duration::from_millis(10));
+        job.request(); // run 1 starts, then BLOCKS on the gate
+        wait_until(|| started.load(Ordering::SeqCst) >= 1); // run 1 is in flight
         job.request(); // coalesces → one re-run
         job.request(); // coalesces again → still one re-run
-        wait_until(5, || counter.load(Ordering::SeqCst) >= 2);
-        std::thread::sleep(Duration::from_millis(200));
+                       // `notify_one` stores a permit when no waiter is parked yet, so the release
+                       // can't be lost to a scheduling gap between a run bumping `started` and
+                       // registering on the gate. One permit per expected run.
+        gate.notify_one(); // release run 1 → its tail fires the coalesced re-run
+        wait_until(|| started.load(Ordering::SeqCst) >= 2); // re-run is in flight
+        gate.notify_one(); // release the re-run
+                           // Await the job back to Idle — the STRUCTURAL "all runs are done" event,
+                           // not a sleep window. Once Idle with no pending request, a third run is
+                           // unrepresentable in the state machine, so the count is final: exactly 2.
+        wait_until(|| job.is_idle());
         assert_eq!(counter.load(Ordering::SeqCst), 2, "one coalesced re-run");
     }
 
@@ -292,8 +347,15 @@ mod tests {
         job.request();
         assert_eq!(job.pending(), 1);
         job.cancel();
+        // cancel() is synchronous: the task is aborted and the phase is Idle
+        // before it returns. The run was parked behind the 60s debounce and never
+        // reached its closure, so the count is deterministically 0 right now — no
+        // settle window needed, and `is_idle()` proves nothing is still armed.
         assert_eq!(job.pending(), 0);
-        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            job.is_idle(),
+            "cancel left the job disarmed (Idle, not dirty)"
+        );
         assert_eq!(
             counter.load(Ordering::SeqCst),
             0,

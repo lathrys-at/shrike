@@ -320,6 +320,14 @@ impl TagRefresher {
     pub fn shutdown(&self) {
         self.job.shutdown();
     }
+
+    /// Whether the background refresh job is fully quiescent (nothing armed, in
+    /// flight, or pending). A test awaits this to know no late background
+    /// recompute can still fire and read a collection state it shouldn't.
+    #[cfg(test)]
+    pub fn is_idle(&self) -> bool {
+        self.job.is_idle()
+    }
 }
 
 /// The state a tag-centroid refresh runs over: the collection actor, the engine

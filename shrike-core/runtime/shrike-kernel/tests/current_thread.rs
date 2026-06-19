@@ -18,7 +18,20 @@ use shrike_kernel::Kernel;
 
 #[test]
 fn full_flow_on_the_driven_runtime() {
-    let dir = std::env::temp_dir().join(format!("shrike-current-thread-{}", std::process::id()));
+    // Root at Bazel's per-action $TEST_TMPDIR (unique per process/run) when
+    // present, so a recycled PID can't reopen a prior run's lingering dir; fall
+    // back to $TMPDIR for a bare `cargo test`.
+    let root = std::env::var_os("TEST_TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = root.join(format!(
+        "shrike-current-thread-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let collection = dir.join("collection.anki2").to_string_lossy().into_owned();
     let cache = dir.join("cache").to_string_lossy().into_owned();

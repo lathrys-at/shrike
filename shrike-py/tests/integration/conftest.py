@@ -366,20 +366,20 @@ def wait_for_index_ready(server: ServerInfo, timeout: float = 60.0) -> dict:
     raise TimeoutError("Index did not become ready")
 
 
-def search_until(mcp, queries, predicate, *, timeout: float = 60.0, limit: int = 10) -> list[dict]:
+def search_until(mcp, queries, predicate, *, limit: int = 10) -> list[dict]:
     """Poll ``search_notes`` until ``predicate(matches)`` holds, then return the
-    matches (the caller asserts on them, so a timeout surfaces as that assertion).
+    matches.
 
     Upserts are write-only: a note embeds + indexes off the ingest queue, so a
     search issued right after a write races the drain. Over HTTP there is no
     ``settle`` to await, so the read-side equivalent is to retry until the index
-    reflects the write. The generous default covers a cold runner's one-time
-    model-preset build on the first embed."""
-    deadline = time.monotonic() + timeout
-    matches: list[dict] = []
+    reflects the write. The poll is UNBOUNDED — no in-predicate timeout, which
+    would be a slow-but-not-hung run's flake. A write that never indexes hangs and
+    the bazel per-target ``test_timeout`` (the single global hang guard) fails it.
+    (``limit`` is the search top_k — what to fetch — not a poll bound.)"""
     while True:
         matches = mcp("search_notes", {"queries": queries, "limit": limit})["results"][0]["matches"]
-        if predicate(matches) or time.monotonic() > deadline:
+        if predicate(matches):
             return matches
         time.sleep(0.2)
 
@@ -1188,10 +1188,14 @@ def collection_server(server_factory, embedding_model: Path) -> ServerInfo:
     # the derived (FTS5) rows landed with them, so dependent tests never start
     # against a half-drained collection.
     base = srv.url.rsplit("/", 1)[0]
-    deadline = time.monotonic() + 60.0
-    while time.monotonic() < deadline:
+    # Poll UNBOUNDED until every seeded note is indexed — no wall-clock deadline,
+    # which would flake a slow-but-not-hung cold runner. A drain that never
+    # completes hangs and the bazel per-target ``test_timeout`` (the single global
+    # hang guard) fails it; a crashed server raises a connection error here (a real
+    # failure, not a hang). The per-request ``timeout=5.0`` bounds ONE socket read,
+    # not the poll.
+    while True:
         idx = httpx.get(f"{base}/status", timeout=5.0).json().get("index", {})
         if idx.get("state") == "ready" and idx.get("size", 0) >= created:
             return srv
         time.sleep(0.05)
-    raise TimeoutError(f"Index did not reach the seeded size ({created}) before timeout")
