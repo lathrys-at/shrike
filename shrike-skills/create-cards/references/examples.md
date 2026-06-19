@@ -274,9 +274,9 @@ tags: ["organic", "reactions", "nucleophilic-substitution"]
 
 ---
 
-## Using neighbors to catch a duplicate
+## Using the pre-write search to catch a duplicate
 
-After upsert, you just created:
+You drafted:
 
 ```
 Front: What is the mechanism of action of aspirin?
@@ -284,13 +284,9 @@ Back:  Irreversibly inhibits cyclooxygenase (COX-1 and COX-2), blocking
        prostaglandin and thromboxane synthesis.
 ```
 
-The response attaches a neighbor at score 0.91:
-
-```
-{ "id": 1700000000123, "score": 0.91, "tags": ["pharmacology", "nsaids"] }
-```
-
-Read note `1700000000123`:
+Before writing, search the claim (step 3): `search_notes(queries=["aspirin
+irreversibly inhibits cyclooxygenase, blocking prostaglandin synthesis"])`. A
+match comes back at score 0.91 — note `1700000000123`:
 
 ```
 Front: How does aspirin work?
@@ -298,7 +294,7 @@ Back:  Irreversibly acetylates COX-1/COX-2, reducing prostaglandin and
        thromboxane production.
 ```
 
-Same fact. Resolve it: delete the note you just created and, if the original
-could be sharper, update it instead. Note the merge in your report. Also notice
-the original's tag is `nsaids` — if your new card used `nsaid`, the neighbor data
-just told you to align.
+Same fact. Resolve it before writing: drop the draft and, if the original could
+be sharper, update it instead. Note the merge in your report. Also notice the
+match's tag is `nsaids` — if your draft used `nsaid`, align to the existing form
+before the upsert.

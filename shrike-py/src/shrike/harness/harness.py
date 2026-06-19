@@ -147,11 +147,11 @@ class _RecognitionEngine:
 
 
 class DedupStatsRecorder:
-    """Rolling dedup best-match statistics: one sample per upsert draft note —
-    the best SEMANTIC neighbor cosine, or a no-match tick. The calibration
-    feedstock for the dedup threshold; loop-confined (the actions record on the
-    event loop), so no lock. Process-lifetime only — a restart starts fresh
-    (durable accumulation is a later refinement)."""
+    """Rolling dedup best-match statistics: one sample per search query group —
+    the best SEMANTIC cosine, or a no-match tick. The calibration feedstock for
+    the dedup threshold; loop-confined (the actions record on the event loop),
+    so no lock. Process-lifetime only — a restart starts fresh (durable
+    accumulation is a later refinement)."""
 
     BUCKETS = 20
 
@@ -262,9 +262,8 @@ class KernelIndexView:
         return [v for v in out if v is not None]
 
     def search(self, texts: list[str], top_k: int = 10) -> list[list[dict[str, Any]]]:
-        """Nearest **text** neighbors per query (the upsert-neighbors path):
-        one list per text of ``{note_id, distance}`` dicts, over the kernel's
-        engine."""
+        """Nearest **text** neighbors per query: one list per text of
+        ``{note_id, distance}`` dicts, over the kernel's engine."""
         vectors = self.embed_queries(texts)
         if vectors is None:
             return [[] for _ in texts]

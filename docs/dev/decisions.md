@@ -115,22 +115,23 @@ projection. It may lag the collection (stale results) but the collection never l
 comparison plus a background rebuild. Scheme and fingerprint details in
 `indexing-and-search.md`.
 
-### Contextual upsert returns neighbours; it makes no suggestions
+### `upsert_notes` is write-only; neighbours come from the search path
 
-`upsert_notes` returns, per created/updated note, the k nearest existing notes — the same
-fused `search_notes` pipeline over the note's own content, with the batch excluded from
-itself. There's no `neighbor_threshold` (an absolute cosine cutoff doesn't map onto the RRF
-ranking); a holistic gate admits a neighbour only when a real content signal backs it (a
-semantic match clearing the search floor, or an exact overlap). It returns raw neighbours
-and stops — no tag suggestions, no duplicate flags — because the server can't know the
-caller's intent and a baked-in policy would be wrong half the time. The neighbours let an
-LLM caller ground new cards in the existing taxonomy; the policy lives in the skill.
+`upsert_notes` returns per-item `status` + `id` and nothing more — it does not attach the
+written notes' nearest neighbours. The neighbour list was never a read-after-write on the
+index (it embedded each written note's text as a *query* and searched with that note
+excluded), so it was a query-embed plus a search bolted onto every write's response path —
+a multi-second remote-embed N+1 on the latency-sensitive write. The same information is a
+`search_notes` of a card's content, which the caller runs *before* writing (the authoring
+dup-check) or keyed on the id *after* (`search_notes(ids=[…])`) — a read on the search path
+where it belongs, not a cost every write pays. The dedup/activation calibration sampler that
+fed off the neighbour search's scores re-sources to the ordinary search path.
 
 ### Semantic duplicate detection is not a separate feature
 
 There's no dedicated semantic-duplicate endpoint. A high similarity score in `search_notes`
-or upsert neighbours *is* the soft-duplicate signal, and the caller sets its own threshold;
-a second code path with a built-in cutoff would be redundant with a worse interface.
+*is* the soft-duplicate signal, and the caller sets its own threshold; a second code path
+with a built-in cutoff would be redundant with a worse interface.
 
 ### Anki's exact duplicate rule lives inside `upsert_notes`
 

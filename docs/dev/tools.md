@@ -18,7 +18,7 @@ function in `api/tools.py` that returns the response model so FastMCP emits an
 | `list_notes` | Filter/retrieve notes by deck, tags, type, IDs, date. |
 | `search_notes` | Per-modality semantic similarity + exact substring + fuzzy, RRF-fused. |
 | `collection_query` | Raw Anki search expression → notes (read-only escape hatch). |
-| `upsert_notes` | Create or update notes in bulk (1–100); `on_duplicate` + `dry_run`; returns neighbors. |
+| `upsert_notes` | Create or update notes in bulk (1–100); `on_duplicate` + `dry_run`; write-only (per-item `status`/`id`). |
 | `upsert_note_types` | Create or update note type definitions (1–10). |
 | `update_note_type_fields` | Edit a note type's fields by name: add/remove/rename/reposition. |
 | `update_note_type_templates` | Edit a note type's card templates by name. |

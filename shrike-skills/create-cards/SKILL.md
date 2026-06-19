@@ -48,8 +48,8 @@ operations, same server.
 | Inspect notes by exact filter | `list_notes` | `shrike note list --deck … --json` / `shrike note show <id> --json` |
 | Create or update notes | `upsert_notes` | `shrike note create --json-input --json` / `shrike note update <id> --json` |
 
-- **Always pass `--json`.** Ids, scores, and create-time neighbors appear only in
-  JSON; a call without it is a mistake.
+- **Always pass `--json`.** Ids and per-item status appear only in JSON; a call
+  without it is a mistake.
 - **Create in bulk:** one `upsert_notes` / `shrike note create --json-input` call
   for the whole batch (1–100 notes), never one per card.
 - **Read [references/shrike-cli.md](references/shrike-cli.md) once** for flags and
@@ -105,24 +105,25 @@ fits, create a new broad deck or tag rather than force a bad match — but don't
 leave the cards in `Default`: put them in the new deck and flag it in your report
 so the user can rename or redirect it.
 
-**5. Write — one call, then align tags.** Upsert the whole batch at once:
+**5. Align tags, then write — one call.** Align each draft's tags to the existing
+vocabulary **before** the upsert, using the tags step 3's search already
+surfaced: if you tagged `antibiotic` but the matched notes use `antibiotics`,
+adopt the existing form. (Aligning before the write means no follow-up edit.)
+Then upsert the whole batch at once:
 
 - MCP — `upsert_notes(notes=[{deck, note_type, fields, tags}, …])`
 - CLI — `echo '[{…}, …]' | shrike note create --json-input --json`
 
 (Field names per type are in [references/shrike-cli.md](references/shrike-cli.md).)
-The response returns `neighbors` per note. **Use them for one thing only: tag
-alignment.** If you tagged `antibiotic` and the neighbors say `antibiotics`,
-match the existing form (`note update --tags`, or `note tag <ids> --set …` for
-several — both fully replace the tag set, so include the tags you keep). Then
-stop.
+The response is per-item `status` + `id` — write-only; it does not return
+similar notes.
 
-**Do not** re-check scores, run fresh searches, or read your notes back to verify
-them. You already caught duplicates in step 3, and a successful upsert is
-confirmation: every note saved exactly as sent, each with its id in the response.
-If a note returns `neighbors_unavailable` (a transient hiccup) it still saved —
-refetch with `search_notes(ids=[…])` if you want the neighbors; don't re-create
-it.
+**Do not** read your notes back to verify them. You already caught duplicates and
+surfaced the tag vocabulary in step 3, and a successful upsert is confirmation:
+every note saved exactly as sent, each with its id in the response. If you do want
+to see where a written note landed among its neighbours — to double-check tag
+alignment after the fact — `search_notes(ids=[<id>])` returns exactly that; but
+don't re-create the note.
 
 **6. Report.** Briefly: what you created or updated, in which decks, with which
 tags, and — called out separately — any suspected duplicate and any new deck or

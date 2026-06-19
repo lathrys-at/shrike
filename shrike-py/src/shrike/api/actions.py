@@ -110,16 +110,6 @@ MIN_SEMANTIC_QUERY_CHARS = 3
 # (the true result ceiling). 1e9 is orders of magnitude past any Anki collection.
 _UNBOUNDED_LIMIT = 1_000_000_000
 
-# The semantic floor for neighbor search — the search pipeline's own
-# default (0.5). Upsert neighbors ARE search results: a draft's neighbors are a
-# `search_notes` of the draft's content (see `_attach_neighbors`), so they use
-# the same semantic floor a real search does. There is no bespoke
-# `neighbor_threshold` — an absolute cosine cutoff doesn't map onto the RRF
-# pipeline and once flipped the gate to empty on aarch64 (a borderline cosine).
-# Relevance is the holistic similarity gate in `_attach_neighbors` (a neighbor
-# must be semantic- or exact-backed), not a magic threshold number.
-SEARCH_SEMANTIC_THRESHOLD = 0.5
-
 # The per-call collection selector. Every routable tool carries this optional
 # param; it names a registered profile to operate on, defaulting to the active
 # profile (and, with none set, the daemon's boot collection). The shared
@@ -1026,9 +1016,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             )
         )
         groups = TypeAdapter(list[SearchResultGroup]).validate_json(raw)
-        # Activation-floor calibration feedstock (#848): one sample per query
-        # group — the best SEMANTIC cosine, or a no-match tick — re-sourced here
-        # from the dropped upsert neighbor path. A lexical-only hit has
+        # Activation-floor calibration feedstock: one sample per query group —
+        # the best SEMANTIC cosine, or a no-match tick. A lexical-only hit has
         # `score=None` and never pollutes the semantic sample.
         if dedup_stats is not None:
             for group in groups:
@@ -1116,8 +1105,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         )
 
         note_dicts = [n.model_dump(exclude_none=True) for n in notes]
-        # ONE maintained kernel op — write + index + derived + watermarks
-        # happen kernel-side; only the neighbor attach remains below.
+        # ONE maintained kernel op — write + index + derived + watermarks all
+        # happen kernel-side; the response is write-only (per-item status + id).
         results = json.loads(
             await kernel.upsert_notes_json(json.dumps(note_dicts), on_duplicate, dry_run)
         )
@@ -1133,8 +1122,8 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
 
         # Write-only: the notes are committed (and the index/derived maintenance
         # is enqueued kernel-side, draining in the background). No read-after-
-        # write on the response path — the dedup/activation calibration sampler
-        # the old neighbor search fed now rides the `search_notes` path (#848).
+        # write on the response path; the dedup/activation calibration sampler
+        # rides the `search_notes` path instead.
         return UpsertNotesResponse.model_validate({"results": results, "dry_run": dry_run})
 
     @_action

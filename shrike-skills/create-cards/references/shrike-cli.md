@@ -11,7 +11,7 @@ full CLI — `server`, `type`, `index`, `embedding` — is in the repo's
 
 Global: every command takes `--json` (raw JSON instead of styled text). **Pass
 `--json` whenever you need the structured payload** — the similarity *scores* on
-search and the *neighbors* returned on create only appear in JSON.
+search and the per-note ids/status on create only appear in JSON.
 
 ## `shrike info` — orient in the collection
 
@@ -86,11 +86,13 @@ echo '[
    "tags":["chemistry","elements"]}
 ]' | shrike note create --json-input --json
 ```
-With `--json`, the response carries per-note `neighbors` (the most similar
-existing notes, each with `id`, `score`, `tags`) — your post-write dedup/tag
-check. JSON note object: `deck`, `note_type`, `fields` (required), `tags`
-(optional). Use the note type's real field names (`Front`/`Back` for Basic,
-`Text`/`Back Extra` for Cloze).
+With `--json`, the response carries per-note `status` (`created`/`updated`/
+`error`) and `id` — write-only confirmation, not similar notes. Catch duplicates
+and surface tag vocabulary with a `search_notes`/`shrike note search` *before*
+the write; to double-check after, `shrike note search --similar-to <id> --json`.
+JSON note object: `deck`, `note_type`, `fields` (required), `tags` (optional).
+Use the note type's real field names (`Front`/`Back` for Basic, `Text`/`Back
+Extra` for Cloze).
 
 ## `shrike note update` — refine an existing note
 
@@ -109,7 +111,7 @@ shrike note tag NOTE_IDS... --set a,b
 Replaces the tags on every listed note with the same set (`--set ""` clears).
 Like `note update --tags` but across several notes at once, and it touches
 nothing but tags. Handy when you've created a batch and want to align them all to
-the neighborhood's vocabulary in one call.
+the existing vocabulary in one call.
 
 ## `shrike note delete` — remove notes
 

@@ -622,7 +622,7 @@ DeleteNoteTypeResult = Annotated[
 #
 # No ``error`` field: a whole-call failure (bad input, unhandled exception) is
 # an MCP ``isError`` result, which the client raises on. ``message`` is a
-# genuine optional advisory (e.g. index-building notice, neighbor-retry hint).
+# genuine optional advisory (e.g. an index-building notice).
 # ============================================================================
 
 
@@ -1067,8 +1067,8 @@ class CoverageMatrix(BaseModel):
 
 
 class DedupStats(BaseModel):
-    """Rolling dedup best-match statistics: one sample per upsert draft
-    note — the best SEMANTIC neighbor cosine, or a `no_match` tick when none
+    """Rolling dedup best-match statistics: one sample per search query group —
+    the best SEMANTIC cosine among its matches, or a `no_match` tick when none
     ranked. The calibration feedstock for the dedup threshold, deliberately
     separate from the search-gate calibration (different population).
     `buckets[i]` counts best-scores in [i/20, (i+1)/20); 20 buckets over [0, 1].

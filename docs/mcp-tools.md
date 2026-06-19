@@ -1,6 +1,6 @@
 # Shrike MCP Tools
 
-These tools manage an Anki flashcard collection. The server maintains a local vector index over all note content, enabling semantic search and contextual neighbor suggestions without external API calls.
+These tools manage an Anki flashcard collection. The server maintains a local vector index over all note content, enabling semantic search over the collection without external API calls.
 
 This document is the human-readable reference. The machine-readable schema each tool advertises (input and output) is generated at runtime by the server from the Pydantic models in `shrike/schemas.py`, which is the single source of truth.
 
@@ -284,13 +284,11 @@ Create or update notes in bulk. If a note object includes an `id`, the existing 
 
 When creating notes, `deck`, `note_type`, and `fields` are required. When updating, only `id` and the properties being changed need to be provided; omitted properties are left unchanged.
 
-**Duplicate and validity checking.** Each new note is validated against Anki's own add-note rule before it is written. A first-field duplicate — a new note whose first field matches an existing note of the same type (Anki's rule, applied collection-wide and independent of deck) — is governed by `on_duplicate`: `error` (the default; the item is reported and not written), `skip` (`status: "skipped"`), or `allow` (created anyway). Notes that are malformed regardless of policy — an empty first field, or broken cloze structure — are always reported as errors and never written. As with any batch op, one bad note doesn't block the rest. This exact first-field check is distinct from the *semantic* `neighbors` below: a high neighbor score is a softer "this looks similar" hint, while `on_duplicate` enforces Anki's precise rule.
+**Duplicate and validity checking.** Each new note is validated against Anki's own add-note rule before it is written. A first-field duplicate — a new note whose first field matches an existing note of the same type (Anki's rule, applied collection-wide and independent of deck) — is governed by `on_duplicate`: `error` (the default; the item is reported and not written), `skip` (`status: "skipped"`), or `allow` (created anyway). Notes that are malformed regardless of policy — an empty first field, or broken cloze structure — are always reported as errors and never written. As with any batch op, one bad note doesn't block the rest.
 
 **Dry run.** Set `dry_run: true` to validate every note and write nothing — a pre-flight sanity check. Each result is `ok` (with `action: "create" | "update"`), `skipped`, or `error`, and the response echoes `dry_run: true`. (Because nothing is written, two identical new notes in the *same* dry-run call both validate clean; a real run catches the second.)
 
-When a vector index is available (and not a dry run), each created or updated result includes `neighbors`: the most similar existing notes. **Neighbors are search results** — a created/updated note's neighbors are exactly what a `search_notes` of its own content returns (the same fused ranking: per-modality semantic + exact text + fuzzy), capped at `top_k_neighbors`, with the note (and its batch siblings) excluded. They are **gated to similarity-backed results**: a neighbor qualifies only when a genuine content-similarity signal backs it — a semantic match (a non-null `score`) or an exact-text overlap. A fuzzy-trigram-only or tag-only coincidence does **not** qualify, so an unrelated note simply returns no neighbors. Each neighbor carries `provenance` (`[{signal, rank}]`, the same shape as search provenance) — any search signal (`text`, `exact`, `image`, `tag`, `fuzzy`); `score` is the cosine for a semantic match and `null` for an exact-only one. Use these for tag consistency (adopt tags from nearby notes), spotting near-duplicates, or understanding where a new note sits in the collection.
-
-If the index update fails transiently (for example, the embedding service is briefly unavailable), the notes are still saved but `neighbors` is omitted. Each affected result is flagged with `neighbors_unavailable: true`, and the response carries a top-level `message` naming the IDs to retry. The exact same neighbor data is reproducible afterward with `search_notes` keyed on the note ID (`search_notes(ids=[<note id>])`). It embeds the same note text against the same index, so the result is identical to what would have been attached here.
+**Write-only.** Each result carries `status` and `id` (or the index/reason of a skip/error) — nothing more. The vector and lexical indexes update in the background after the write returns; the call does not block on them and does not return similar notes. To find near-duplicates or adopt nearby tags, search **before** writing — a `search_notes` of each drafted card's content surfaces the same similar notes (and their tags). To see where a written note sits afterward, `search_notes(ids=[<note id>])` returns its neighbours on demand.
 
 ### Parameters
 
@@ -299,7 +297,6 @@ If the index update fails transiently (for example, the embedding service is bri
 | `notes` | `object[]` | **yes** | Array of note objects (1–100). See note schema below. |
 | `on_duplicate` | `string` | no | Policy for a first-field duplicate on **create**: `"error"` (default), `"skip"`, or `"allow"`. Updates are unaffected. |
 | `dry_run` | `boolean` | no | If `true`, validate everything and write nothing. Default `false`. |
-| `top_k_neighbors` | `integer` | no | Maximum neighbors per result. Default `5`. Set to `0` to disable. |
 
 #### Note object schema
 
@@ -318,20 +315,11 @@ If the index update fails transiently (for example, the embedding service is bri
   "results": [
     {
       "status": "created",
-      "id": 1700000000789,
-      "neighbors": [               // present when vector index is available
-        {
-          "id": 1700000000456,
-          "score": 0.82,
-          "tags": ["metabolism", "chapter-18"]
-        }
-      ]
+      "id": 1700000000789
     },
     {
       "status": "updated",
-      "id": 1700000000123,
-      "neighbors": [{ "id": 1700000000001, "score": 0.71, "tags": ["verb"],
-                       "provenance": [{ "signal": "text", "rank": 1 }] }]
+      "id": 1700000000123
     },
     {
       "status": "skipped",          // on_duplicate: "skip" met a duplicate
@@ -360,21 +348,6 @@ A dry run writes nothing; would-succeed notes report `ok` with the action they w
     { "status": "error", "index": 1, "error": "The first field is empty.", "reason": "empty" }
   ],
   "dry_run": true
-}
-```
-
-When the index update fails transiently, saved notes carry `neighbors_unavailable` instead of `neighbors`, and the response adds a top-level `message`:
-
-```jsonc
-{
-  "results": [
-    {
-      "status": "created",
-      "id": 1700000000789,
-      "neighbors_unavailable": true   // index hiccup; neighbors not computed
-    }
-  ],
-  "message": "Notes were saved, but the vector index update failed, so neighbors could not be computed. Retry with search_notes(ids=[1700000000789]) to fetch the same neighbor data."
 }
 ```
 
