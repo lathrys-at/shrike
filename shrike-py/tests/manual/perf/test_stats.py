@@ -3,6 +3,8 @@ runs on every lane."""
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import pytest
 
 from tests.manual.perf.stats import Distribution, _percentile, summarize
@@ -45,4 +47,4 @@ def test_single_sample_collapses_all_percentiles():
 
 def test_distribution_round_trips_through_dict():
     d = summarize([1.0, 2.0, 3.0, 4.0])
-    assert Distribution.from_dict(d.as_dict()) == d
+    assert Distribution.from_dict(asdict(d)) == d

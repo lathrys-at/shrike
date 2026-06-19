@@ -102,7 +102,7 @@ class Conditions:
         "corpus_variant",
     )
 
-    def compatible_with(self, other: Conditions) -> list[str]:
+    def differs_from(self, other: Conditions) -> list[str]:
         """The invariant fields that DIFFER from ``other`` — empty means the two
         runs are comparable."""
         return [f for f in self.INVARIANT if getattr(self, f) != getattr(other, f)]
@@ -116,13 +116,6 @@ class WorkloadResult:
     workload: str
     distribution: Distribution
     items: int
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "workload": self.workload,
-            "distribution": self.distribution.as_dict(),
-            "items": self.items,
-        }
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> WorkloadResult:
@@ -143,15 +136,10 @@ class RunResult:
     timestamp: str
 
     def to_json(self) -> str:
-        return json.dumps(
-            {
-                "conditions": asdict(self.conditions),
-                "results": [r.as_dict() for r in self.results],
-                "timestamp": self.timestamp,
-            },
-            indent=2,
-            sort_keys=True,
-        )
+        # asdict() recurses through conditions + results + distributions (the
+        # dataclass nesting), so serialization is uniform; from_json reconstructs
+        # explicitly (dataclasses have no auto from-dict).
+        return json.dumps(asdict(self), indent=2, sort_keys=True)
 
     @classmethod
     def from_json(cls, text: str) -> RunResult:

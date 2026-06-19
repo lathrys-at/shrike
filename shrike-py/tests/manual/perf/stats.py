@@ -10,7 +10,7 @@ off the tail (p99), not just the median.
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -26,9 +26,6 @@ class Distribution:
     p99_ms: float
     max_ms: float
     mean_ms: float
-
-    def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Distribution:

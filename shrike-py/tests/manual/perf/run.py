@@ -89,7 +89,7 @@ def main() -> int:
     parser.add_argument(
         "--workloads",
         default="search,rebuild,ingest",
-        help=f"Comma-separated subset of {sorted(WORKLOADS)} (default: all).",
+        help=f"Comma-separated subset of {sorted(WORKLOADS)} (default: search,rebuild,ingest).",
     )
     parser.add_argument("--repeats", type=int, default=20, help="Timed iterations per workload.")
     parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations discarded.")

@@ -62,7 +62,7 @@ def compare(baseline: RunResult, current: RunResult) -> Comparison:
 
     Raises :class:`IncomparableRuns` if the runs' invariant conditions differ.
     """
-    mismatched = current.conditions.compatible_with(baseline.conditions)
+    mismatched = current.conditions.differs_from(baseline.conditions)
     if mismatched:
         details = ", ".join(
             f"{f}: {getattr(baseline.conditions, f)!r} -> {getattr(current.conditions, f)!r}"

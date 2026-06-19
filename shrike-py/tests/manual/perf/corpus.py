@@ -53,9 +53,10 @@ STANDARD_SIZES = (500, 5_000, 50_000)
 # The default cache root (repo-root .cache, gitignored — never ~/.cache).
 DEFAULT_CACHE_ROOT = _ROOT.parent / ".cache" / "perf" / "corpora"
 
-# A small fixed vocabulary: deterministic, varied note text with no external data
-# and no licensing surface. Domain-flavoured so fields read like real study notes.
-_WORDS = [
+# A small fixed vocabulary (shared with the workloads): deterministic, varied text
+# with no external data and no licensing surface. Domain-flavoured so fields read
+# like real study notes.
+VOCAB = [
     "mitochondria",
     "enzyme",
     "synthesis",
@@ -66,7 +67,6 @@ _WORDS = [
     "entropy",
     "vector",
     "matrix",
-    "gradient",
     "tensor",
     "manifold",
     "topology",
@@ -133,13 +133,11 @@ _WORDS = [
     "reformation",
     "envoy",
     "quantum",
-    "photon",
     "boson",
     "lepton",
     "hadron",
     "neutrino",
     "fermion",
-    "entropy",
     "plasma",
     "quark",
 ]
@@ -191,7 +189,7 @@ def _note_rng(spec: CorpusSpec, index: int) -> random.Random:
 
 
 def _sentence(rng: random.Random, n_words: int) -> str:
-    words = [rng.choice(_WORDS) for _ in range(n_words)]
+    words = [rng.choice(VOCAB) for _ in range(n_words)]
     return words[0].capitalize() + " " + " ".join(words[1:]) + "."
 
 
@@ -205,7 +203,7 @@ def _back_text(rng: random.Random) -> str:
 
 
 def _tags(rng: random.Random) -> list[str]:
-    return rng.sample(_WORDS, k=rng.randint(0, 3))
+    return rng.sample(VOCAB, k=rng.randint(0, 3))
 
 
 def _make_image(rng: random.Random, size: int = 96) -> bytes:
@@ -245,7 +243,7 @@ def _generate_notes(spec: CorpusSpec, media_dir: Path) -> list[dict]:
         # Every fifth note is a cloze; the rest are Basic — two notetypes so the
         # write path resolves more than one field layout.
         if i % 5 == 4:
-            word = rng.choice(_WORDS)
+            word = rng.choice(VOCAB)
             text = f"{_sentence(rng, rng.randint(6, 14))} The key term is {{{{c1::{word}}}}}."
             fields = {"Text": text, "Back Extra": _back_text(rng)}
             note_type, image_field = "Cloze", "Back Extra"

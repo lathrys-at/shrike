@@ -17,44 +17,8 @@ from __future__ import annotations
 
 import random
 
+from tests.manual.perf.corpus import VOCAB
 from tests.manual.perf.driver import Booted
-
-# A small fixed vocabulary for synthetic queries and ingest notes (no external
-# data); deterministic so a workload's inputs are identical across runs.
-_VOCAB = [
-    "mitochondria",
-    "enzyme",
-    "synthesis",
-    "gradient",
-    "membrane",
-    "catalyst",
-    "photon",
-    "entropy",
-    "vector",
-    "matrix",
-    "tensor",
-    "manifold",
-    "lemma",
-    "theorem",
-    "neuron",
-    "synapse",
-    "cortex",
-    "receptor",
-    "ribosome",
-    "codon",
-    "orbital",
-    "valence",
-    "isotope",
-    "reaction",
-    "reagent",
-    "solvent",
-    "epoch",
-    "latency",
-    "throughput",
-    "cache",
-    "pipeline",
-    "kernel",
-]
 
 
 class SearchWorkload:
@@ -68,7 +32,7 @@ class SearchWorkload:
         self._limit = limit
         rng = random.Random(0x5EED)
         self._queries = [
-            " ".join(rng.choice(_VOCAB) for _ in range(rng.randint(1, 4))) for _ in range(n_queries)
+            " ".join(rng.choice(VOCAB) for _ in range(rng.randint(1, 4))) for _ in range(n_queries)
         ]
 
     async def setup(self, booted: Booted, iterations: int) -> None:
@@ -123,7 +87,7 @@ class IngestWorkload:
         # A fresh deck/tag so ingested notes never collide with the corpus; the
         # text is deterministic per (iteration, j).
         rng = random.Random((iteration << 20) ^ j)
-        body = " ".join(rng.choice(_VOCAB) for _ in range(12))
+        body = " ".join(rng.choice(VOCAB) for _ in range(12))
         return {
             "deck": "Perf::Ingest",
             "note_type": "Basic",
@@ -152,7 +116,7 @@ class ReconcileWorkload:
             "tags": ["perf-reconcile"],
             "fields": {
                 "Front": f"reconcile {iteration}",
-                "Back": " ".join(rng.choice(_VOCAB) for _ in range(10)),
+                "Back": " ".join(rng.choice(VOCAB) for _ in range(10)),
             },
         }
         await booted.harness.wrapper.upsert_notes([note])
@@ -190,7 +154,7 @@ class DeleteWorkload:
             "tags": ["perf-delete"],
             "fields": {
                 "Front": f"delete {j}",
-                "Back": " ".join(rng.choice(_VOCAB) for _ in range(8)),
+                "Back": " ".join(rng.choice(VOCAB) for _ in range(8)),
             },
         }
 
