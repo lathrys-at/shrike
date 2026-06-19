@@ -34,7 +34,7 @@ def _run(conditions: Conditions, p50: float) -> RunResult:
     dist = summarize([p50] * 5)
     return RunResult(
         conditions=conditions,
-        results=[WorkloadResult("ingest", dist, items=500)],
+        results=[WorkloadResult("upsert", dist, items=500)],
         timestamp="2026-01-01T00:00:00Z",
     )
 
@@ -74,7 +74,7 @@ def test_compare_computes_p50_delta_and_flags_regressions():
     current = _run(_conditions(commit="newer"), 12.0)  # advisory diff only
     cmp = compare(baseline, current)
     (delta,) = cmp.deltas
-    assert delta.workload == "ingest"
+    assert delta.workload == "upsert"
     assert delta.delta_ms == pytest.approx(2.0)
     assert delta.pct == pytest.approx(0.2)
     assert cmp.regressions(threshold_pct=0.10) == [delta]

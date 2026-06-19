@@ -16,10 +16,10 @@ from tests.manual.perf.corpus import CorpusSpec, build_corpus
 from tests.manual.perf.driver import boot_from_profile, measure, run_async
 from tests.manual.perf.workloads import (
     DeleteWorkload,
-    IngestWorkload,
     RebuildWorkload,
-    ReconcileWorkload,
     SearchWorkload,
+    UpsertBatchWorkload,
+    UpsertSeqWorkload,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -72,20 +72,20 @@ def test_rebuild_workload_runs(_driven, tmp_path):
     assert res.distribution.n == 2
 
 
-def test_ingest_workload_reports_batch_items(_driven, tmp_path):
-    res = run_async(_measure(tmp_path, IngestWorkload(batch=10), repeats=2, warmup=0))
-    assert res.workload == "ingest"
-    assert res.items == 10
+def test_upsert_batch_reports_items(_driven, tmp_path):
+    res = run_async(_measure(tmp_path, UpsertBatchWorkload(count=8), repeats=2, warmup=0))
+    assert res.workload == "upsert-batch"
+    assert res.items == 8
 
 
-def test_reconcile_workload_runs(_driven, tmp_path):
-    res = run_async(_measure(tmp_path, ReconcileWorkload(), repeats=2, warmup=0))
-    assert res.workload == "reconcile"
-    assert res.distribution.n == 2
+def test_upsert_seq_writes_each_note_separately(_driven, tmp_path):
+    res = run_async(_measure(tmp_path, UpsertSeqWorkload(count=8), repeats=2, warmup=0))
+    assert res.workload == "upsert-seq"
+    assert res.items == 8
 
 
 def test_delete_workload_deletes_its_own_pool_slice(_driven, tmp_path):
-    # setup ingests iterations*batch notes; each iteration deletes one batch slice.
+    # setup upserts iterations*batch notes; each iteration deletes one batch slice.
     res = run_async(_measure(tmp_path, DeleteWorkload(batch=5), repeats=2, warmup=0))
     assert res.workload == "delete"
     assert res.items == 5

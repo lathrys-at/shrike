@@ -1,11 +1,13 @@
 """The gold workloads the perf harness times.
 
 A workload is one operation, repeated against a booted harness over a fixed
-corpus: search, rebuild, ingest, reconcile, delete. The remaining gold workflows
-(sync, OCR sweeps) need their own scenario / recognizer setup and are a focused
-follow-up.
+corpus: search, rebuild, upsert-batch, upsert-seq, delete. The workflows that need
+their own scenario setup are a focused follow-up: a true *ingest* (importing a
+synthetic .apkg/.colpkg via the package-import path — NOT the upsert action),
+*reconcile* (out-of-band drift recovery: the collection is edited from under the
+server, then reconciled on reacquire), sync, and OCR sweeps.
 
-``mutates`` marks a workload that changes the collection (ingest/reconcile/delete);
+``mutates`` marks a workload that changes the collection (upsert-batch/upsert-seq/delete);
 the runner orders read-only workloads first so a single boot stays representative.
 Running MORE THAN ONE mutating workload in a single invocation compounds the
 collection state across them, so for a clean absolute number run one mutating
@@ -59,69 +61,71 @@ class RebuildWorkload:
         return 1  # one full-collection rebuild
 
 
-class IngestWorkload:
-    """Upsert a batch of fresh notes through the real write path — the bulk-write
-    path (one transaction, embed + index the new notes).
+# The fresh-note count each upsert iteration writes against the loaded corpus —
+# the upsert action measures "add N notes to a {500,5k,50k} collection", not
+# "build a collection". 100 is a representative add-session size and a typical
+# max batch.
+_UPSERT_COUNT = 100
 
-    Note: each timed iteration ADDS a batch, so the collection grows across the
-    run — the recorded ``corpus_size`` condition is the *starting* size, not the
-    size during the later iterations. Comparisons stay valid (identical
-    deterministic growth on both sides); the absolute number is "ingest into a
-    growing collection seeded at corpus_size", not "into a fixed corpus_size"."""
 
-    name = "ingest"
+def _upsert_note(iteration: int, j: int) -> dict:
+    # A fresh deck/tag so upserted notes never collide with the corpus; the text
+    # is deterministic per (iteration, j).
+    rng = random.Random((iteration << 20) ^ j)
+    body = " ".join(rng.choice(VOCAB) for _ in range(12))
+    return {
+        "deck": "Perf::Upsert",
+        "note_type": "Basic",
+        "tags": ["perf-upsert"],
+        "fields": {"Front": f"upsert {iteration}-{j}", "Back": body},
+    }
+
+
+class UpsertBatchWorkload:
+    """Upsert ``count`` fresh notes against the loaded corpus in ONE ``upsert_notes``
+    call — the batched write path (one transaction). Pairs with ``upsert-seq`` to
+    show the batching win.
+
+    Each iteration ADDS ``count`` notes, so the collection grows across the run
+    (the recorded ``corpus_size`` is the *starting* size); identical deterministic
+    growth on both sides keeps comparisons valid. Run ``upsert-batch`` and
+    ``upsert-seq`` in SEPARATE invocations (a fresh boot each) for an
+    apples-to-apples batch-vs-sequential comparison."""
+
+    name = "upsert-batch"
     mutates = True
 
-    def __init__(self, *, batch: int = 200) -> None:
-        self._batch = batch
+    def __init__(self, *, count: int = _UPSERT_COUNT) -> None:
+        self._count = count
 
     async def setup(self, booted: Booted, iterations: int) -> None:
         return None
 
     async def run_one(self, booted: Booted, iteration: int) -> int:
-        notes = [self._note(iteration, j) for j in range(self._batch)]
+        notes = [_upsert_note(iteration, j) for j in range(self._count)]
         await booted.harness.wrapper.upsert_notes(notes)
         return len(notes)
 
-    def _note(self, iteration: int, j: int) -> dict:
-        # A fresh deck/tag so ingested notes never collide with the corpus; the
-        # text is deterministic per (iteration, j).
-        rng = random.Random((iteration << 20) ^ j)
-        body = " ".join(rng.choice(VOCAB) for _ in range(12))
-        return {
-            "deck": "Perf::Ingest",
-            "note_type": "Basic",
-            "tags": ["perf-ingest"],
-            "fields": {"Front": f"ingest {iteration}-{j}", "Back": body},
-        }
 
+class UpsertSeqWorkload:
+    """Upsert ``count`` fresh notes against the loaded corpus as ``count`` SEPARATE
+    ``upsert_notes`` calls — one upsert request (one transaction) per note. The
+    delta from ``upsert-batch`` is the per-call/per-transaction overhead batching
+    elides (one journal fsync per note vs one for the whole batch)."""
 
-class ReconcileWorkload:
-    """Upsert one note (creating drift) then reconcile the index — the incremental
-    reindex path, i.e. the interactive add-one-note-and-be-searchable cost, NOT a
-    full rebuild. Times the upsert + the reconcile together (the drift must exist
-    to be reconciled)."""
-
-    name = "reconcile"
+    name = "upsert-seq"
     mutates = True
+
+    def __init__(self, *, count: int = _UPSERT_COUNT) -> None:
+        self._count = count
 
     async def setup(self, booted: Booted, iterations: int) -> None:
         return None
 
     async def run_one(self, booted: Booted, iteration: int) -> int:
-        rng = random.Random(0x9EC0 ^ iteration)
-        note = {
-            "deck": "Perf::Reconcile",
-            "note_type": "Basic",
-            "tags": ["perf-reconcile"],
-            "fields": {
-                "Front": f"reconcile {iteration}",
-                "Back": " ".join(rng.choice(VOCAB) for _ in range(10)),
-            },
-        }
-        await booted.harness.wrapper.upsert_notes([note])
-        await booted.harness.kernel.reindex_if_needed()
-        return 1  # one note's incremental reconcile
+        for j in range(self._count):
+            await booted.harness.wrapper.upsert_notes([_upsert_note(iteration, j)])
+        return self._count
 
 
 class DeleteWorkload:
@@ -165,8 +169,8 @@ WORKLOADS = {
     for w in (
         SearchWorkload,
         RebuildWorkload,
-        IngestWorkload,
-        ReconcileWorkload,
+        UpsertBatchWorkload,
+        UpsertSeqWorkload,
         DeleteWorkload,
     )
 }

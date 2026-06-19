@@ -55,9 +55,9 @@ _RUNS_DIR = DEFAULT_CACHE_ROOT.parent / "runs"
 
 def _isolated_working_copy(corpus_anki2: Path, corpus_media: Path, run_dir: Path) -> Path:
     """A throwaway copy of the corpus to boot over, so a mutating workload
-    (ingest) never pollutes the cached corpus. The collection file is copied; the
-    media dir is symlinked — read-only reuse that relies on the invariant that the
-    workloads write no media. A future media-writing workload (image ingest /
+    (upsert/delete) never pollutes the cached corpus. The collection file is copied;
+    the media dir is symlinked — read-only reuse that relies on the invariant that
+    the workloads write no media. A future media-writing workload (image upsert /
     store_media) MUST copy the media dir instead, or it would write through the
     symlink into the cached corpus."""
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -88,8 +88,8 @@ def main() -> int:
     parser.add_argument("--variant", choices=VARIANTS, default="text", help="Corpus modality.")
     parser.add_argument(
         "--workloads",
-        default="search,rebuild,ingest",
-        help=f"Comma-separated subset of {sorted(WORKLOADS)} (default: search,rebuild,ingest).",
+        default="search,rebuild,upsert-batch",
+        help=f"Subset of {sorted(WORKLOADS)} (default: search,rebuild,upsert-batch).",
     )
     parser.add_argument("--repeats", type=int, default=20, help="Timed iterations per workload.")
     parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations discarded.")

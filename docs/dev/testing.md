@@ -74,7 +74,7 @@ distributions. Run it by name:
 ```bash
 # kernel-isolation run (the #445 hotspot class, no model inference):
 scripts/build-native.sh --release --synthetic   # OPTIMIZED (-c opt) + synthetic
-scripts/perf.sh --profile stub --size 5000 --variant text --workloads search,rebuild,ingest
+scripts/perf.sh --profile stub --size 5000 --variant text --workloads search,rebuild,upsert-batch
 
 # end-to-end run (real onnx + CLIP; models fetched to the model cache):
 scripts/build-native.sh --release                # optimized extension

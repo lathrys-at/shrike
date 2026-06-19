@@ -23,10 +23,12 @@ def test_text_corpus_builds_through_the_real_write_path(tmp_path):
     assert built.anki2_path.is_file()
 
 
-def test_image_corpus_writes_one_png_per_note(tmp_path):
-    built = build_corpus(CorpusSpec(notes=12, variant="text+image"), tmp_path / "ti")
-    assert built.note_count == 12
-    assert len(list(built.media_dir.glob("*.png"))) == 12
+def test_image_corpus_attaches_images_to_a_fraction_of_notes(tmp_path):
+    built = build_corpus(CorpusSpec(notes=30, variant="text+image"), tmp_path / "ti")
+    assert built.note_count == 30
+    pngs = list(built.media_dir.glob("*.png"))
+    # ~1 note in 10 carries an image (i % 10 == 0): 30 notes -> notes 0, 10, 20.
+    assert len(pngs) == 3
 
 
 def test_generation_is_deterministic(tmp_path):

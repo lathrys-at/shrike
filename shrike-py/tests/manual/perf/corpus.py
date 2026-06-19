@@ -5,8 +5,9 @@ notes — in ``text`` and ``text+image`` variants, through the REAL native write
 (``upsert_notes``), so the fixture is shaped like production rather than planted
 behind it. The content is synthetic but production-shaped: varied field lengths,
 HTML and cloze markup, tags, and a spread across several decks and the default
-notetypes. Images are procedurally generated with per-note diversity (varied
-palette, shapes, and structure) so image vectors don't collapse into one cluster.
+notetypes. In the text+image variant ~1 note in 10 carries a procedurally-generated
+image (random shapes or rendered words, varied per note), so the media path is
+exercised without every note being media.
 
 Everything is seeded — a given :class:`CorpusSpec` yields a byte-identical
 collection every run. The build is disposable and gitignored: it lands under
@@ -40,7 +41,7 @@ from shrike.harness.collection import CollectionWrapper  # noqa: E402
 
 # Bump when the generation logic changes in a way that alters the produced bytes;
 # it folds into the cache key so a stale corpus is rebuilt rather than reused.
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 3
 
 VARIANTS = ("text", "text+image")
 
@@ -207,25 +208,39 @@ def _tags(rng: random.Random) -> list[str]:
 
 
 def _make_image(rng: random.Random, size: int = 96) -> bytes:
-    """A small procedurally-generated PNG with per-note diversity (background,
-    a handful of random shapes, light noise) so distinct notes get distinct,
-    well-spread image vectors."""
-    from PIL import Image, ImageDraw
+    """A small procedurally-generated PNG with per-note diversity. Over a random
+    background, an image is EITHER a handful of random shapes OR a single rendered
+    word — real cards carry both diagrams and text, so mixing the two keeps the
+    image set from being uniformly abstract and exercises the text-on-image path
+    (image embedding now, OCR/recognition later). The word is drawn from VOCAB, the
+    SAME vocabulary the search workload queries with, in a colour that contrasts
+    the background so it stays legible — so under a real CLIP backend a text query
+    for the word lands near this image in the shared space. Deterministic per the
+    note's seeded ``rng``."""
+    from PIL import Image, ImageDraw, ImageFont
 
     def color() -> tuple[int, int, int]:
         return (rng.randint(0, 255), rng.randint(0, 255), rng.randint(0, 255))
 
-    img = Image.new("RGB", (size, size), color())
+    bg = color()
+    img = Image.new("RGB", (size, size), bg)
     draw = ImageDraw.Draw(img)
-    for _ in range(rng.randint(3, 9)):
-        x0, y0 = rng.randint(0, size - 1), rng.randint(0, size - 1)
-        x1, y1 = rng.randint(0, size - 1), rng.randint(0, size - 1)
-        box = [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]
-        shape = rng.choice(("rectangle", "ellipse", "line"))
-        if shape == "line":
-            draw.line([x0, y0, x1, y1], fill=color(), width=rng.randint(1, 5))
-        else:
-            getattr(draw, shape)(box, fill=color(), outline=color())
+    if rng.random() < 0.4:
+        # A single search-query term, high-contrast on the background.
+        word = rng.choice(VOCAB)
+        ink = (0, 0, 0) if sum(bg) > 384 else (255, 255, 255)
+        font = ImageFont.load_default(size=rng.randint(14, 24))
+        draw.text((rng.randint(2, size // 3), rng.randint(2, size // 2)), word, fill=ink, font=font)
+    else:
+        for _ in range(rng.randint(3, 9)):
+            x0, y0 = rng.randint(0, size - 1), rng.randint(0, size - 1)
+            x1, y1 = rng.randint(0, size - 1), rng.randint(0, size - 1)
+            box = [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]
+            shape = rng.choice(("rectangle", "ellipse", "line"))
+            if shape == "line":
+                draw.line([x0, y0, x1, y1], fill=color(), width=rng.randint(1, 5))
+            else:
+                getattr(draw, shape)(box, fill=color(), outline=color())
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
@@ -250,7 +265,8 @@ def _generate_notes(spec: CorpusSpec, media_dir: Path) -> list[dict]:
         else:
             fields = {"Front": _sentence(rng, rng.randint(4, 10)), "Back": _back_text(rng)}
             note_type, image_field = "Basic", "Back"
-        if spec.variant == "text+image":
+        # Only ~1 note in 10 carries an image — real collections aren't all-media.
+        if spec.variant == "text+image" and i % 10 == 0:
             name = f"perf_{spec.seed}_{i}.png"
             (media_dir / name).write_bytes(_make_image(rng))
             fields[image_field] += f'<img src="{name}">'
