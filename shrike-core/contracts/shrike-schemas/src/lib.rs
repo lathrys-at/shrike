@@ -770,6 +770,13 @@ pub struct SearchResponse {
     /// Echo of the request's `version` (client-side stale-response dropping).
     #[serde(default)]
     pub version: Option<i64>,
+    /// Freshness advisory: `true` when the kernel was not settled as the search
+    /// ran (a write still draining through the embed queue, or a rebuild in
+    /// flight), so the semantic ranking may lag the collection. The result is
+    /// served regardless; the caller decides to use it or retry. The collection
+    /// is always current, so exact/fuzzy hits are never stale.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// `SearchResponse.completeness` — mirrors the Pydantic
@@ -795,6 +802,7 @@ impl Default for SearchResponse {
             message: None,
             completeness: Completeness::Full,
             version: None,
+            stale: false,
         }
     }
 }

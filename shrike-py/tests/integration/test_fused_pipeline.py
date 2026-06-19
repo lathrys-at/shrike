@@ -20,7 +20,6 @@ from tests.integration.conftest import (
     ServerInfo,
     requires_onnxruntime,
     requires_shrike_native,
-    search_until,
     wait_for_index_ready,
 )
 
@@ -87,20 +86,24 @@ class TestFullyNativeServer:
         # model_id.
         assert idx["model_id"].startswith("onnx-rs:")
 
-        # The rebuild runs as a background task, so `ready` can flip true on the
-        # per-op index add before the rebuild's drop→re-embed window closes;
-        # retry the search (the read-side `settle` equivalent) until the semantic
-        # `text` signal lands for the integral note, then assert on the result.
-        matches = search_until(
-            mcp,
-            ["calculus accumulation"],
-            lambda ms: (
-                bool(ms)
-                and "integral" in ms[0]["content"]["Front"]
-                and any(p["signal"] == "text" for p in ms[0]["provenance"])
-            ),
-            limit=3,
-        )
+        # `index.state == ready` flips once the rebuild lands, but the per-write
+        # maintenance can still be draining — a search in that window carries
+        # `stale: true` (the #862 advisory) and may not yet see the just-built
+        # vectors in its semantic ranking. Dogfood the advisory: retry until the
+        # read is fresh, then assert on the semantic provenance.
+        search_deadline = time.monotonic() + 60.0
+        while time.monotonic() < search_deadline:
+            res = mcp(
+                "search_notes",
+                {"queries": ["calculus accumulation"], "limit": 3, "threshold": 0.0},
+            )
+            if not res.get("stale", False):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("search did not settle to a fresh read")
+
+        matches = res["results"][0]["matches"]
         assert matches
         assert "integral" in matches[0]["content"]["Front"]
         # Provenance flows through the native fusion identically.

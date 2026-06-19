@@ -185,6 +185,101 @@ class TestAsyncKernel:
         backend = asyncio.run(flow())
         assert backend.calls, "embeds went through the harness backend"
 
+    def test_is_settled_tracks_the_ingest_drain(self, tmp_path) -> None:
+        """The non-blocking freshness probe behind the stale-read advisory: False
+        while a write's embed is still draining, True once the queue drains."""
+        import threading
+
+        class _GatedBackend(_Backend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.release = threading.Event()
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                self.release.wait(timeout=30.0)
+                return super().embed_texts(texts)
+
+        async def flow() -> None:
+            backend = _GatedBackend()
+            kernel = await shrike_native.async_kernel_open(
+                str(tmp_path / "collection.anki2"), str(tmp_path / "cache")
+            )
+            kernel.attach_embedder(shrike_native.PyEmbedder.capture(backend))
+            await kernel.settle()
+            assert kernel.is_settled() is True, "an idle kernel is settled"
+
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            # Commits immediately; the embed maintenance parks in the gated backend.
+            await kernel.upsert_notes([(basic, 1, ["paris france", "geo"], [])], "allow")
+            assert kernel.is_settled() is False, "a draining write is not settled"
+
+            backend.release.set()
+            await kernel.settle()
+            assert kernel.is_settled() is True, "the drained queue is settled again"
+            await kernel.close()
+
+        asyncio.run(flow())
+
+    def test_action_search_notes_brackets_freshness_at_read_time(self, tmp_path) -> None:
+        """`stale` is computed INSIDE the search read (the col_mod + settled
+        bracket), so it describes the snapshot actually read — not a pre-sample.
+        A settled search is fresh; a search while a write drains is stale."""
+        import threading
+
+        class _GatedBackend(_Backend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.release = threading.Event()
+                self.release.set()  # open by default; a test closes it to park
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                self.release.wait(timeout=30.0)
+                return super().embed_texts(texts)
+
+        async def flow() -> None:
+            backend = _GatedBackend()
+            kernel = await _open(tmp_path, backend)
+            await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            await kernel.upsert_notes([(basic, 1, ["paris france", "geo"], [])], "allow")
+            await kernel.settle()
+
+            vectors = backend.embed_texts(["france"])
+
+            def search(c):
+                return shrike_native.action_search_notes(
+                    c,
+                    kernel.engine_handle(),
+                    None,
+                    [("france", "france", True)],
+                    vectors,
+                    10,
+                    0.0,
+                    kernel=kernel,
+                    semantic=True,
+                    index_size=kernel.engine_handle().size(),
+                )
+
+            # Settled: the read saw a stable, drained snapshot → not stale.
+            settled_raw = await kernel.run_job(lambda: search(core))
+            assert json.loads(settled_raw)["stale"] is False
+
+            # Park the embed and enqueue a write: the bracket's settled probe reads
+            # false while the read runs → stale, even though the result is served.
+            backend.release.clear()
+            await kernel.upsert_notes([(basic, 1, ["lyon france", "geo"], [])], "allow")
+            assert kernel.is_settled() is False
+            draining_raw = await kernel.run_job(lambda: search(core))
+            assert json.loads(draining_raw)["stale"] is True
+
+            backend.release.set()
+            await kernel.settle()
+            await kernel.close()
+
+        asyncio.run(flow())
+
     def test_batch_is_one_embed_call(self, tmp_path) -> None:
         async def flow():
             backend = _Backend()
@@ -332,7 +427,9 @@ class TestCrossSpaceWiring:
                 )
 
             raw = await kernel.run_job(lambda: call(core))
-            groups = json.loads(raw)
+            # action_search_notes wraps the fused groups with the read-time `stale`
+            # verdict: {"groups": [...], "stale": bool}.
+            groups = json.loads(raw)["groups"]
             matches = groups[0]["matches"]
             # SearchMatch flattens the note, so the id is at the top level.
             ids = [m["id"] for m in matches]
@@ -362,7 +459,7 @@ class TestCrossSpaceWiring:
                 )
 
             raw_n1 = await kernel.run_job(lambda: call_n1(core))
-            ids_n1 = [m["id"] for m in json.loads(raw_n1)[0]["matches"]]
+            ids_n1 = [m["id"] for m in json.loads(raw_n1)["groups"][0]["matches"]]
             assert image_note not in ids_n1, "without cross_space the image note is absent (N=1)"
 
             await kernel.close()
@@ -553,7 +650,7 @@ class TestLiveTwoSpaceEndToEnd:
                 )
 
             raw = await kernel.run_job(lambda: call(core))
-            ids = [m["id"] for m in json.loads(raw)[0]["matches"]]
+            ids = [m["id"] for m in json.loads(raw)["groups"][0]["matches"]]
             assert image_note in ids, (
                 "the image-bearing note surfaced via the CLIP space + the gate — "
                 "the full live multi-space loop"

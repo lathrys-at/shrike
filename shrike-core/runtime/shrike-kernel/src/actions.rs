@@ -1505,6 +1505,42 @@ pub fn search_notes(
     Ok(results)
 }
 
+/// The read-time freshness stamps a search brackets its read with, so the
+/// returned `stale` describes the SNAPSHOT THE RESULT WAS TAKEN AGAINST — not a
+/// guess sampled before the read.
+///
+/// A search runs as ONE collection-actor job (the host dispatches it through
+/// `wrapper.run` → `kernel.run_job`), so the entire read — the collection scan,
+/// the Arc-shared vector-index and derived reads, the per-note renders — sits
+/// inside one span. A *collection* write can't interleave (the actor is FIFO),
+/// but the **ingest actor** writes the index/derived this read reads off a
+/// separate task; `settled` (the ingest `outstanding == 0` gauge) is how that lag
+/// is seen. Capture both stamps at the read's entry and exit and feed them to
+/// [`is_stale_read`].
+#[derive(Debug, Clone, Copy)]
+pub struct FreshnessStamp {
+    /// `core.col_mod()` at this edge of the read.
+    pub col_mod: i64,
+    /// The ingest `outstanding == 0` gauge at this edge (`true` when no
+    /// committed-but-unindexed work is in flight). Hosts with no ingest actor (a
+    /// facade/test) pass `true` — then only the `col_mod` stability check bites.
+    pub settled: bool,
+}
+
+/// The read-time staleness verdict from the [`FreshnessStamp`]s bracketing a
+/// search's read. Fresh ONLY if the read saw a stable (`col_mod` unchanged) and
+/// settled (`outstanding == 0` at both edges) snapshot; any doubt → stale:
+///
+/// - `col_mod` changed across the read → the snapshot shifted under it (defends a
+///   multi-job span or a reopen mid-read; stable within a single collection job
+///   by construction);
+/// - not settled at *either* edge → there are committed-but-unindexed writes, so
+///   the index lags `col_mod` and a just-written note can be missing from the
+///   semantic ranking.
+pub fn is_stale_read(start: FreshnessStamp, end: FreshnessStamp) -> bool {
+    start.col_mod != end.col_mod || !start.settled || !end.settled
+}
+
 /// The minimum query length the derived store's trigram index can serve —
 /// re-exported so the harness's availability checks agree with the engine.
 pub const SUBSTRING_MIN_QUERY: usize = MIN_TRIGRAM;
@@ -2969,5 +3005,39 @@ mod search_tests {
         );
         core.close().unwrap();
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn is_stale_read_is_the_conservative_or() {
+        let fresh = FreshnessStamp {
+            col_mod: 7,
+            settled: true,
+        };
+        // Stable + settled at both edges → fresh.
+        assert!(!is_stale_read(fresh, fresh));
+        // Not settled at the start (a write was draining as the read began).
+        assert!(is_stale_read(
+            FreshnessStamp {
+                col_mod: 7,
+                settled: false
+            },
+            fresh
+        ));
+        // Not settled at the end (work arrived/was in flight by read's end).
+        assert!(is_stale_read(
+            fresh,
+            FreshnessStamp {
+                col_mod: 7,
+                settled: false
+            }
+        ));
+        // col_mod shifted across the read (the snapshot moved under it).
+        assert!(is_stale_read(
+            fresh,
+            FreshnessStamp {
+                col_mod: 8,
+                settled: true
+            }
+        ));
     }
 }

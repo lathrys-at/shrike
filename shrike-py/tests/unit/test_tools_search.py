@@ -15,6 +15,7 @@ distances while the genuine kernel-mode path runs end to end.
 
 from __future__ import annotations
 
+import json
 import math
 from types import SimpleNamespace
 from typing import Any
@@ -186,6 +187,69 @@ class TestSearchNotesStates:
 
         with pytest.raises(ToolError, match="queries or ids"):
             kharness.call_tool(mcp_no_index, "search_notes", {})
+
+
+class _GatedBackend(_NoteBackend):
+    """A kernel-slot backend whose embed BLOCKS until released — so a write's
+    embed maintenance stays in flight, holding the kernel un-settled, while a
+    concurrent search reads the freshness probe."""
+
+    def __init__(self) -> None:
+        import threading
+
+        self.release = threading.Event()
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        self.release.wait(timeout=30.0)
+        return super().embed_texts(texts)
+
+
+class TestSearchNotesFreshness:
+    """The stale-read advisory: the action threads through the read-time `stale`
+    verdict the native search computes (the col_mod + settled bracket around the
+    read). A settled search is fresh; a search run while a write drains is stale.
+    The native bracket itself is proven end-to-end in test_async_kernel."""
+
+    def test_settled_search_is_not_stale(self, kharness, mcp_sem):
+        # The harness settles after the seed, so the kernel is quiescent.
+        kharness.seed_note("Electron transport chain")
+        result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["transport"]})
+        assert result["stale"] is False
+
+    def test_search_while_write_draining_is_stale(self, kharness, mcp_no_index):
+        # A gated embedder parks the upsert's embed maintenance, so the kernel
+        # stays un-settled; the native read's bracket sees it and the action
+        # threads the resulting `stale` through. (The query has text, so the read
+        # runs even with no index — the bracket is on the read either way.)
+        gated = _GatedBackend()
+        # No reindex at attach: the collection is empty, and a reindex would
+        # itself park in the gated embed. The first embed to park is the upsert's.
+        kharness.attach_embedder(gated, reindex=False)
+
+        async def _upsert_without_settle() -> None:
+            await kharness.kernel.upsert_notes_json(
+                json.dumps(
+                    [{"deck": "Test", "note_type": "Basic", "fields": {"Front": "Q", "Back": "A"}}]
+                ),
+                "allow",
+                False,
+            )
+
+        kharness.run(_upsert_without_settle())  # returns once the write commits
+        try:
+            assert kharness.kernel.is_settled() is False, "the parked embed keeps it un-settled"
+            result = kharness.call_tool_no_settle(
+                mcp_no_index, "search_notes", {"queries": ["anything"]}
+            )
+            assert result["stale"] is True
+        finally:
+            # Release the embed and drain, so teardown's close() doesn't hang.
+            gated.release.set()
+            kharness.settle()
+
+        # Once drained, a fresh search is no longer stale.
+        result = kharness.call_tool(mcp_no_index, "search_notes", {"queries": ["anything"]})
+        assert result["stale"] is False
 
 
 class TestSearchNotesResults:
