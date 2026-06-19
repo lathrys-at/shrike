@@ -126,10 +126,9 @@ class TestDerivedNamespaceParity:
                     ]
                 )
                 await harness.boot(start_embedding=False)
-                for _ in range(100):
-                    if harness.derived.status().get("state") == "ready":
-                        break
-                    await asyncio.sleep(0.05)
+                # boot() drives the maintenance to quiescence and opens the data
+                # plane — ready on return, no status poll + sleep.
+                assert harness.is_ready
                 assert harness.derived.status()["state"] == "ready"
                 hits = harness.derived.search_substring("krebs", 10)
                 assert hits, "host store must see the rows on the shared shrike.db"
@@ -201,11 +200,8 @@ class TestHarness:
                 ]
             )
             await harness.boot(start_embedding=False)
-            # The boot saw drift and built; wait for the background build.
-            for _ in range(100):
-                if harness.derived.status().get("state") == "ready":
-                    break
-                await asyncio.sleep(0.05)
+            # boot() awaits the drift build to quiescence — ready, no poll.
+            assert harness.is_ready
             assert harness.derived.status()["state"] == "ready"
             await harness.close()
 
@@ -1265,6 +1261,9 @@ class _RecalibKernel:
     async def reindex_if_needed(self) -> bool:
         return True
 
+    async def settle(self) -> None:
+        return None
+
     async def calibrate_secondary_floors(self, margin: float) -> list[tuple[str, float | None]]:
         self.recalibrated += 1
         return []
@@ -1292,6 +1291,8 @@ def _make_recalib_harness() -> Harness:
     h.secondary_runtimes = []
     h.cross_space_floor_margin = 1.0
     h._bg_tasks = set()
+    h._ready = asyncio.Event()
+    h._generation = 0
 
     async def _noop_build() -> None:
         return None

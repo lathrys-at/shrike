@@ -335,6 +335,15 @@ class Harness:
         # Background maintenance tasks: tracked so close() drains them (no
         # destroyed-pending teardown) and tests can settle deterministically.
         self._bg_tasks: set[asyncio.Task[Any]] = set()
+        # The readiness barrier (#850): boot / reload / cooperative re-acquire
+        # run their index+derived maintenance to quiescence and set this Event;
+        # the data plane and tests await it instead of polling status + sleeping.
+        # A GENERATION counter makes it re-entrant — a /reload or re-acquire
+        # mid-flight bumps the generation, so a stale stage's "ready" can never
+        # strand the gate at the newer generation (the ready→not-ready→ready
+        # transition the doc warns about).
+        self._ready = asyncio.Event()
+        self._generation = 0
         # Recognition: per-purpose engine state, keyed by the kernel source
         # string (`"ocr"`/`"vlm"`). Empty = nothing attached (a distinct,
         # representable state from "attached but errored"). Each row carries its
@@ -423,10 +432,14 @@ class Harness:
     # -- boot ------------------------------------------------------------------
 
     async def boot(self, *, start_embedding: bool) -> None:
-        """One-shot boot orchestration on the loop: log the collection shape,
-        start + attach embedding (degrading on failure), reconcile index drift
-        in the background, build the derived store on drift, and install the
-        cooperative re-acquire hook."""
+        """One-shot boot orchestration on the loop, run as ORDERED stages with a
+        single re-entrant readiness barrier (#850): log the collection shape,
+        start + attach embedding (degrading on failure), kick off the index
+        drift reconcile + the derived-store build, then drive them to quiescence
+        and open the data plane (``await_ready``). Returns only once ready, so
+        ``await harness.boot()`` is the deterministic boot await (no status poll
+        + sleep). Finally installs the cooperative re-acquire hook."""
+        generation = self._begin_generation()
         summary = (await self.wrapper.get_collection_info(["summary"], []))["summary"]
         logger.info(
             "Collection ready: %d notes, %d decks, %d note types",
@@ -447,6 +460,12 @@ class Harness:
         # The derived-text store builds whether or not a backend is configured.
         await self._maybe_build_derived()
 
+        # Drive the boot maintenance to quiescence (the kernel serializes the
+        # index reconcile + derived rebuild through its ingest actor), then open
+        # the data plane. The ordering that closed the #828/#650 race family is
+        # the kernel's (Theme A); the barrier is the deterministic ready signal.
+        await self._settle_and_mark_ready(generation)
+
         if self.wrapper.cooperative:
             self.wrapper.set_acquire_hook(self._on_reacquire(asyncio.get_running_loop()))
             # Release now so a freshly-booted, never-touched idle daemon doesn't
@@ -466,9 +485,15 @@ class Harness:
         return hook
 
     def _spawn_reacquire_tasks(self, col_mod: int) -> None:
+        # A re-acquire is a new readiness generation: the data plane goes
+        # not-ready until the re-driven index/derived maintenance settles. The
+        # marker task awaits the spawned rebuilds (settle_background excludes it)
+        # then re-opens the gate at this generation.
+        generation = self._begin_generation()
         if self.derived.check_drift(col_mod):
             self._spawn_bg(self._rebuild_derived())
         self._spawn_bg(self._drive_reindex())
+        self._spawn_bg(self._settle_and_mark_ready(generation))
 
     async def _drive_reindex(self) -> None:
         if await self.kernel.reindex_if_needed():
@@ -495,9 +520,42 @@ class Harness:
 
     async def settle_background(self) -> None:
         """Await in-flight background maintenance (drift rebuilds, reindex
-        drivers) — deterministic boots for tests and operational verbs."""
-        while self._bg_tasks:
-            await asyncio.gather(*list(self._bg_tasks), return_exceptions=True)
+        drivers) — deterministic boots for tests and operational verbs. Excludes
+        the CALLING task, so a maintenance task (the re-acquire readiness marker)
+        may settle the others without awaiting itself."""
+        current = asyncio.current_task()
+        while True:
+            pending = [t for t in self._bg_tasks if t is not current]
+            if not pending:
+                break
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _begin_generation(self) -> int:
+        """Open a new readiness generation: the data plane goes not-ready until
+        this generation's maintenance settles. Returns the generation token."""
+        self._generation += 1
+        self._ready.clear()
+        return self._generation
+
+    async def _settle_and_mark_ready(self, generation: int) -> None:
+        """Drain this generation's boot maintenance — the background index/
+        derived rebuilds AND the kernel ingest queue — then open the data plane,
+        but ONLY if a newer generation hasn't superseded it (re-entrancy)."""
+        await self.settle_background()
+        await self.kernel.settle()
+        if generation == self._generation:
+            self._ready.set()
+
+    async def await_ready(self) -> None:
+        """Block until the current generation's boot maintenance has settled —
+        the one deterministic readiness await the data plane and tests use
+        instead of polling derived/index status + sleeping."""
+        await self._ready.wait()
+
+    @property
+    def is_ready(self) -> bool:
+        """Whether the data plane is open (the current generation settled)."""
+        return self._ready.is_set()
 
     async def _rebuild_derived(self) -> None:
         # Kernel-side rebuild: the kernel op collects + builds crate-side
@@ -986,7 +1044,11 @@ class Harness:
     # -- lifecycle ----------------------------------------------------------------
 
     async def reload(self) -> dict[str, Any]:
-        """Close and re-open the collection; re-check drift (``POST /reload``)."""
+        """Close and re-open the collection; re-check drift (``POST /reload``).
+        A new readiness generation: the data plane goes not-ready until the
+        re-driven maintenance settles, so an in-flight reload can't strand the
+        gate (the generation counter)."""
+        generation = self._begin_generation()
         await self.wrapper.reopen()
         col_mod = await self.wrapper.col_mod()
         await self._maybe_build_derived()
@@ -1000,6 +1062,7 @@ class Harness:
                 # _drive_boot_reindex) recalibrates, and /reload must too.
                 # No-op at N=1 (the kernel returns an empty list with no secondaries).
                 await self._recalibrate_secondary_floors()
+        await self._settle_and_mark_ready(generation)
         return {"status": "reloaded", "col_mod": col_mod, "rebuilding": rebuilding}
 
     async def close(self) -> None:
