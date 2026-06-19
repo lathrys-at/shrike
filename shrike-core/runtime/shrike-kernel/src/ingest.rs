@@ -86,6 +86,7 @@ use crate::runtime;
 use crate::tag_centroids::{self, TagCentroidConfig, TagKeyMap, TagRefresher};
 use crate::watermark::WatermarkFloors;
 use crate::{EmbedService, SerializedCollection, FIELD_SOURCE};
+use shrike_engine_api::{Embedder, ImageEmbedder, ImageResolver};
 
 /// What a maintenance item asks the writer to do for its ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -710,21 +711,22 @@ impl Ingestor {
         };
         let orch = self.index_set.primary();
         let model_id = svc.embedder.fingerprint();
-        // Read col.mod AND the note snapshot in ONE collection job, so the
-        // stamped watermark matches exactly the set this reconcile indexed.
-        let (col_mod, raw) = self
+        // Read col.mod AND the live id list in ONE collection job, so the
+        // stamped watermark matches the set this drift pass reconciles against.
+        // The note CONTENT is read in chunks by the streaming producer (O(chunk)
+        // memory), pipelined against the embed.
+        let (col_mod, ids) = self
             .collection
             .run(|core| -> NativeResult<_> {
                 let col_mod = core.col_mod()?;
                 let ids = core.find_notes("")?;
-                let raw = core.note_embed_inputs(&ids)?;
-                Ok((col_mod, raw))
+                Ok((col_mod, ids))
             })
             .await??;
         if !orch.check_drift(col_mod, model_id.as_deref(), svc.images.is_some()) {
             return Ok(false);
         }
-        if raw.is_empty() {
+        if ids.is_empty() {
             if let Some(dim) = svc.embedder.dim() {
                 orch.materialize_empty(dim, col_mod, model_id.as_deref());
             }
@@ -732,47 +734,107 @@ impl Ingestor {
             self.refresh_tags_best_effort().await;
             return Ok(true);
         }
-        let inputs = self.compose_embed_inputs(raw, None);
-        orch.reconcile(
-            inputs.clone(),
-            col_mod,
-            model_id.clone(),
+        // The PRIMARY text space: streamed reconcile (or rebuild on a model swap
+        // / first build), with read‖embed pipelined.
+        self.stream_drift(
+            &orch,
+            index_orchestrator::WriteMode::TextAndImage,
             &*svc.embedder,
             svc.images_pair(),
+            &ids,
+            col_mod,
+            model_id,
         )
         .await?;
         self.clear_index_poison();
-        self.reconcile_image_route(&inputs, col_mod).await?;
+        // The SEPARATE image-primary space, if any: its own drift, its own
+        // streamed pass over the same ids in ImageOnly mode.
+        if let Some((iorch, isvc)) = self.image_only_route() {
+            if let Some((ie, r)) = isvc.images_pair() {
+                let image_model = isvc.embedder.fingerprint();
+                if iorch.check_drift(col_mod, image_model.as_deref(), true) {
+                    self.stream_drift(
+                        &iorch,
+                        index_orchestrator::WriteMode::ImageOnly,
+                        &*isvc.embedder,
+                        Some((ie, r)),
+                        &ids,
+                        col_mod,
+                        image_model,
+                    )
+                    .await?;
+                }
+            }
+        }
         self.refresh_tags_best_effort().await;
         Ok(true)
     }
 
-    /// Reconcile the separate image-primary space, if one exists.
-    async fn reconcile_image_route(&self, inputs: &[EmbedInput], col_mod: i64) -> NativeResult<()> {
-        let Some((iorch, isvc)) = self.image_only_route() else {
-            return Ok(());
+    /// Drive a streamed drift reconcile (or a full rebuild on a model swap /
+    /// first build) of one index space over `ids`, the collection read
+    /// pipelined against the embed via [`Self::stream_inputs`].
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_drift(
+        &self,
+        orch: &index_orchestrator::IndexOrchestrator,
+        mode: index_orchestrator::WriteMode,
+        embedder: &dyn Embedder,
+        images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
+        ids: &[i64],
+        col_mod: i64,
+        model_id: Option<String>,
+    ) -> NativeResult<()> {
+        let total = ids.len() as u64;
+        let do_rebuild = {
+            let stored = orch.model_id();
+            (stored.is_some() && stored != model_id) || !orch.has_hashes()
         };
-        let Some((image_embedder, resolver)) = isvc.images_pair() else {
-            return Ok(());
-        };
-        let image_model_id = isvc.embedder.fingerprint();
-        if !iorch.check_drift(col_mod, image_model_id.as_deref(), true) {
-            return Ok(());
+        let rx = self.stream_inputs(ids.to_vec());
+        if do_rebuild {
+            orch.rebuild_streamed(rx, total, col_mod, model_id, embedder, images, mode)
+                .await
+        } else {
+            orch.reconcile_streamed(rx, total, col_mod, model_id, embedder, images, mode)
+                .await
         }
-        iorch
-            .reconcile_with_mode(
-                inputs.to_vec(),
-                col_mod,
-                image_model_id,
-                &*isvc.embedder,
-                Some((image_embedder, resolver)),
-                index_orchestrator::WriteMode::ImageOnly,
-            )
-            .await
+    }
+
+    /// Spawn a producer that reads `note_embed_inputs` for each `STREAM_CHUNK`
+    /// of `ids` on the collection actor (drive_sync) + composes recognized text,
+    /// sending composed chunks on a bounded channel (depth 2 = one chunk
+    /// prefetched while the consumer embeds on drive_compute). Only O(chunk)
+    /// inputs live at once, and the next read overlaps this chunk's embed.
+    fn stream_inputs(
+        &self,
+        ids: Vec<i64>,
+    ) -> tokio::sync::mpsc::Receiver<NativeResult<Vec<EmbedInput>>> {
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        let collection = Arc::clone(&self.collection);
+        let derived = Arc::clone(&self.derived);
+        let gate = self.recognition_gate.clone();
+        runtime::handle().spawn(async move {
+            for chunk_ids in ids.chunks(index_orchestrator::STREAM_CHUNK) {
+                let read_ids = chunk_ids.to_vec();
+                let read = collection
+                    .run(move |core| core.note_embed_inputs(&read_ids))
+                    .await;
+                let composed: NativeResult<Vec<EmbedInput>> = match read.and_then(|r| r) {
+                    Ok(raw) => Ok(compose_embed_inputs(&*derived, &gate, raw, Some(chunk_ids))),
+                    Err(e) => Err(e),
+                };
+                let is_err = composed.is_err();
+                // A send error (consumer dropped the rx) or a read error ends
+                // the producer; the read error rides the channel to the consumer.
+                if tx.send(composed).await.is_err() || is_err {
+                    break;
+                }
+            }
+        });
+        rx
     }
 
     /// Explicit full index rebuild (`/index/rebuild`): drop and re-embed
-    /// everything.
+    /// everything, streamed (read‖embed pipelined, O(chunk) memory).
     ///
     /// # Errors
     ///
@@ -785,32 +847,35 @@ impl Ingestor {
             ));
         };
         let model_id = svc.embedder.fingerprint();
-        let (col_mod, raw) = self
+        let (col_mod, ids) = self
             .collection
             .run(|core| -> NativeResult<_> {
                 let col_mod = core.col_mod()?;
                 let ids = core.find_notes("")?;
-                let raw = core.note_embed_inputs(&ids)?;
-                Ok((col_mod, raw))
+                Ok((col_mod, ids))
             })
             .await??;
-        let inputs = self.compose_embed_inputs(raw, None);
-        let total = inputs.len();
+        let total = ids.len();
+        let rx = self.stream_inputs(ids.clone());
         self.index_set
             .primary()
-            .rebuild(
-                inputs.clone(),
+            .rebuild_streamed(
+                rx,
+                total as u64,
                 col_mod,
                 model_id,
                 &*svc.embedder,
                 svc.images_pair(),
+                index_orchestrator::WriteMode::TextAndImage,
             )
             .await?;
         if let Some((iorch, isvc)) = self.image_only_route() {
             if let Some((ie, r)) = isvc.images_pair() {
+                let rx2 = self.stream_inputs(ids.clone());
                 iorch
-                    .rebuild_with_mode(
-                        inputs,
+                    .rebuild_streamed(
+                        rx2,
+                        total as u64,
                         col_mod,
                         isvc.embedder.fingerprint(),
                         &*isvc.embedder,

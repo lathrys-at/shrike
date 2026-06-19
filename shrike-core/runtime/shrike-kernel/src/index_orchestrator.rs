@@ -489,6 +489,20 @@ impl IndexOrchestrator {
         Some((to_embed, to_remove))
     }
 
+    /// Whether per-note state exists (the reconcile diff baseline). `false`
+    /// before the first build — a reconcile then falls back to a full rebuild.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
+    pub fn has_hashes(&self) -> bool {
+        self.shared
+            .lock()
+            .expect("orchestrator poisoned")
+            .note_hashes
+            .is_some()
+    }
+
     /// The current build/availability state.
     ///
     /// # Panics
@@ -990,6 +1004,40 @@ pub const CALIB_MIN: usize = 30;
 pub const CALIB_K: usize = 2;
 /// Embed/add chunk size (mirrors `index.BATCH_SIZE`).
 pub const BATCH_SIZE: usize = 64;
+
+/// How many notes a streaming (re)build reads + carries per chunk. Larger than
+/// [`BATCH_SIZE`] (the embed sub-batch) to amortize the per-chunk collection
+/// read; small enough that the bounded channel's prefetch is O(chunk) memory,
+/// not O(collection).
+pub const STREAM_CHUNK: usize = 512;
+
+/// Feed a materialized `inputs` Vec into the streaming (re)build core, so one
+/// code path serves both an in-hand Vec (tests/compose) and the kernel's
+/// pipelined collection-read stream. The Vec is already materialized — there is
+/// no read to overlap — so this synchronously pre-loads every chunk into a
+/// channel sized to hold them all (no spawn, no runtime dependency; the
+/// orchestrator's own tests drive it under a bare `block_on`). The kernel's
+/// real streaming uses a depth-bounded channel + a producer task for the
+/// read‖embed overlap.
+fn chunk_channel(
+    inputs: Vec<EmbedInput>,
+) -> tokio::sync::mpsc::Receiver<NativeResult<Vec<EmbedInput>>> {
+    let mut it = inputs.into_iter();
+    let mut chunks: Vec<Vec<EmbedInput>> = Vec::new();
+    loop {
+        let chunk: Vec<EmbedInput> = it.by_ref().take(STREAM_CHUNK).collect();
+        if chunk.is_empty() {
+            break;
+        }
+        chunks.push(chunk);
+    }
+    let (tx, rx) = tokio::sync::mpsc::channel(chunks.len().max(1));
+    for chunk in chunks {
+        // The channel holds every chunk by construction, so `try_send` fits.
+        let _ = tx.try_send(Ok(chunk));
+    }
+    rx
+}
 const TEXT: &str = "text";
 
 /// One note's embedding inputs (mirrors the Python `NoteEmbedInput`).
@@ -1303,7 +1351,40 @@ impl IndexOrchestrator {
         images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
         mode: WriteMode,
     ) -> NativeResult<()> {
+        // Feed the in-hand Vec through the streaming core (one code path; a
+        // single-chunk channel for tests/compose, a pipelined collection-read
+        // stream for the kernel).
         let total = inputs.len() as u64;
+        let rx = chunk_channel(inputs);
+        self.rebuild_streamed(rx, total, col_mod, model_id, embedder, images, mode)
+            .await
+    }
+
+    /// The streaming full-rebuild core: clear the index, then drain `chunks` —
+    /// embedding + adding each chunk as it arrives — so peak embed memory is
+    /// O(chunk), not O(collection), and the producer's next read overlaps this
+    /// chunk's embed. `apply` (`replace = false`) maintains the per-note hashes.
+    /// `total` feeds the progress gauge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a chunk read, embedding, or an engine write fails (the
+    /// state flips to [`OrchestratorState::Error`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn rebuild_streamed(
+        &self,
+        mut chunks: tokio::sync::mpsc::Receiver<NativeResult<Vec<EmbedInput>>>,
+        total: u64,
+        col_mod: i64,
+        model_id: Option<String>,
+        embedder: &dyn Embedder,
+        images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
+        mode: WriteMode,
+    ) -> NativeResult<()> {
         {
             let mut shared = self.shared.lock().expect("orchestrator poisoned");
             shared.state = OrchestratorState::Building;
@@ -1316,17 +1397,17 @@ impl IndexOrchestrator {
 
         let result: NativeResult<()> = async {
             let mut indexed = 0u64;
-            // The outer chunking exists to land build_progress between
-            // batches (each ≤ BATCH_SIZE slice is a single pass inside
-            // `apply`); `replace = false` skips the per-batch removes that
-            // would otherwise run against the just-cleared index.
-            for batch in inputs.chunks(BATCH_SIZE) {
-                self.apply(batch, embedder, images, false, mode).await?;
-                indexed += batch.len() as u64;
+            while let Some(chunk) = chunks.recv().await {
+                let chunk = chunk?;
+                if chunk.is_empty() {
+                    continue;
+                }
+                self.apply(&chunk, embedder, images, false, mode).await?;
+                indexed += chunk.len() as u64;
                 self.shared
                     .lock()
                     .expect("orchestrator poisoned")
-                    .build_progress = (indexed, total);
+                    .build_progress = (indexed, total.max(indexed));
             }
             {
                 let mut shared = self.shared.lock().expect("orchestrator poisoned");
@@ -1411,52 +1492,114 @@ impl IndexOrchestrator {
         // end-state equals a full rebuild and drift goes quiet correctly.
         // (A first build — stored model_id None — falls through to the
         // empty-prior-state rebuild below; this gate only fires on a real swap.)
+        // A MODEL SWAP must full-rebuild (the per-note hash never folds the
+        // model_id, so a swap yields an empty diff that leaves unchanged notes
+        // in the old space). NO PRIOR STATE likewise rebuilds (nothing to diff).
         let stored_model_id = self.model_id();
-        if stored_model_id.is_some() && stored_model_id != model_id {
+        if (stored_model_id.is_some() && stored_model_id != model_id) || !self.has_hashes() {
             return self
                 .rebuild_with_mode(inputs, col_mod, model_id, embedder, images, mode)
                 .await;
         }
-        let new_hashes: BTreeMap<i64, String> = inputs
-            .iter()
-            .map(|i| (i.note_id, self.hash_for(i, images, mode)))
-            .collect();
-        let Some((to_embed, to_remove)) = self.reconcile_diff(&new_hashes) else {
-            return self
-                .rebuild_with_mode(inputs, col_mod, model_id, embedder, images, mode)
-                .await;
-        };
-        if to_embed.is_empty() && to_remove.is_empty() {
-            // A non-embedding edit bumped col.mod: advance the watermark only.
-            let mut shared = self.shared.lock().expect("orchestrator poisoned");
-            shared.col_mod = Some(col_mod);
-            drop(shared);
-            self.save_meta_only()?;
-            return Ok(());
-        }
+        let total = inputs.len() as u64;
+        let rx = chunk_channel(inputs);
+        self.reconcile_streamed(rx, total, col_mod, model_id, embedder, images, mode)
+            .await
+    }
+
+    /// The streaming reconcile core: diff each chunk against the stored hashes
+    /// as it arrives — embedding only changed/new notes — accumulate the new
+    /// hash map, then remove the notes that vanished (stored, but not read this
+    /// pass). O(chunk) embed memory; the diff baseline + new map are
+    /// O(collection) in small `(id, hash)` pairs only. The caller guarantees
+    /// prior state exists and the model is unchanged (else it rebuilds).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a chunk read, embedding, or an engine write fails (the
+    /// state flips to [`OrchestratorState::Error`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shared-state mutex is poisoned (a prior holder panicked).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reconcile_streamed(
+        &self,
+        mut chunks: tokio::sync::mpsc::Receiver<NativeResult<Vec<EmbedInput>>>,
+        total: u64,
+        col_mod: i64,
+        model_id: Option<String>,
+        embedder: &dyn Embedder,
+        images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
+        mode: WriteMode,
+    ) -> NativeResult<()> {
+        // The diff baseline: a snapshot of the stored per-note hashes (small —
+        // `(id, hash)` pairs). The orchestrator is the sole writer (the actor
+        // task), so nothing mutates it while we stream.
+        let stored: BTreeMap<i64, String> = self
+            .shared
+            .lock()
+            .expect("orchestrator poisoned")
+            .note_hashes
+            .clone()
+            .unwrap_or_default();
         {
             let mut shared = self.shared.lock().expect("orchestrator poisoned");
             shared.state = OrchestratorState::Building;
-            shared.build_progress = (0, to_embed.len() as u64);
+            shared.build_progress = (0, total);
         }
+        let mut new_hashes: BTreeMap<i64, String> = BTreeMap::new();
         let result: NativeResult<()> = async {
+            let mut any_embedded = false;
+            let mut seen = 0u64;
+            while let Some(chunk) = chunks.recv().await {
+                let chunk = chunk?;
+                let n = chunk.len() as u64;
+                // Per-chunk diff: a note is changed iff its new hash differs
+                // from the stored one (or it is new). `apply` (replace=true)
+                // remove-then-adds the changed set; unchanged notes are skipped.
+                let mut changed: Vec<EmbedInput> = Vec::new();
+                for input in chunk {
+                    let h = self.hash_for(&input, images, mode);
+                    let id = input.note_id;
+                    let is_changed = stored.get(&id) != Some(&h);
+                    new_hashes.insert(id, h);
+                    if is_changed {
+                        changed.push(input);
+                    }
+                }
+                if !changed.is_empty() {
+                    self.add_with_mode(&changed, embedder, images, mode).await?;
+                    any_embedded = true;
+                }
+                seen += n;
+                self.shared
+                    .lock()
+                    .expect("orchestrator poisoned")
+                    .build_progress = (seen, total.max(seen));
+            }
+            // Vanished: stored ids absent from what we just read.
+            let to_remove: Vec<i64> = stored
+                .keys()
+                .copied()
+                .filter(|id| !new_hashes.contains_key(id))
+                .collect();
             if !to_remove.is_empty() {
                 self.remove(&to_remove)?;
             }
-            let embed_set: std::collections::HashSet<i64> = to_embed.iter().copied().collect();
-            let changed: Vec<EmbedInput> = inputs
-                .into_iter()
-                .filter(|i| embed_set.contains(&i.note_id))
-                .collect();
-            self.add_with_mode(&changed, embedder, images, mode).await?;
             {
                 let mut shared = self.shared.lock().expect("orchestrator poisoned");
                 shared.note_hashes = Some(new_hashes);
                 shared.col_mod = Some(col_mod);
                 shared.model_id = model_id;
             }
-            self.calibrate_activation()?;
-            self.save()?;
+            if any_embedded || !to_remove.is_empty() {
+                self.calibrate_activation()?;
+                self.save()?;
+            } else {
+                // A non-embedding edit bumped col.mod: advance the watermark only.
+                self.save_meta_only()?;
+            }
             Ok(())
         }
         .await;
