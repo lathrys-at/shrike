@@ -538,9 +538,20 @@ class Harness:
         drivers) — deterministic boots for tests and operational verbs. Excludes
         every readiness MARKER task (`_settle_and_mark_ready`), not just the
         caller: a marker gathers only the maintenance it waits on, so two
-        concurrent re-acquires can't deadlock on each other's markers."""
+        concurrent re-acquires can't deadlock on each other's markers.
+
+        Excludes the recognition sweep too. Readiness is "the index/derived
+        maintenance has settled"; a recognition sweep (OCR/ASR, many seconds) is
+        NOT that maintenance, and gating readiness on it would park the data plane
+        behind a re-acquire/reload that overlapped a live sweep. The sweep's own
+        writes still serialize through the kernel ingest actor; close() drains it
+        directly (via `_bg_tasks`)."""
         while True:
-            pending = [t for t in self._bg_tasks if t not in self._settle_markers]
+            pending = [
+                t
+                for t in self._bg_tasks
+                if t not in self._settle_markers and t is not self._recognition_task
+            ]
             if not pending:
                 break
             await asyncio.gather(*pending, return_exceptions=True)

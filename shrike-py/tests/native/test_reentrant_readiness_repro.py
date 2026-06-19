@@ -88,3 +88,34 @@ def test_two_concurrent_settle_markers_still_open_the_gate(tmp_path) -> None:
         assert settled, "marker tasks left hung (settle-marker cycle)"
 
     asyncio.run(flow())
+
+
+def test_readiness_does_not_block_on_a_live_recognition_sweep(tmp_path) -> None:
+    # Readiness is "the index/derived maintenance has settled". A recognition
+    # sweep (OCR/ASR, many seconds) is NOT that maintenance, so settle_background
+    # — which a re-acquire/reload readiness marker awaits — must NOT block on it.
+    # Otherwise a re-acquire overlapping a live sweep parks the data plane behind
+    # the whole sweep (or the 30s gate fail-safe). The sweep's own writes still
+    # serialize through the kernel; close() drains it directly.
+    async def flow() -> None:
+        harness = await _assemble(tmp_path)
+        await harness.boot(start_embedding=False)
+
+        sweeping = asyncio.Event()
+
+        async def long_sweep() -> None:
+            # Stand in for a multi-second OCR/ASR sweep that never finishes
+            # within the test.
+            await sweeping.wait()
+
+        # Install it exactly as the harness tracks the recognition sweep.
+        harness._recognition_task = harness._spawn_bg(long_sweep())
+
+        # settle_background must return PROMPTLY, not wait for the sweep.
+        await asyncio.wait_for(harness.settle_background(), timeout=5)
+        assert not harness._recognition_task.done(), "the sweep is still running"
+
+        sweeping.set()
+        await harness.close()
+
+    asyncio.run(flow())
