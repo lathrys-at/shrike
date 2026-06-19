@@ -1593,12 +1593,13 @@ mod tests {
 
     #[test]
     fn streamed_rebuild_never_empties_the_index_mid_build() {
-        // The no-recall-cliff guarantee: a streamed rebuild replaces field rows
-        // IN PLACE (per chunk), never wholesale-clearing them up front, so a
-        // search landing mid-rebuild always finds rows — old ones until their
-        // note's chunk overwrites them, new ones after. Probe the store from
-        // INSIDE the chunk stream (between chunk transactions, the lock is free)
-        // and assert every note remains searchable at every step.
+        // The no-recall-cliff guarantee: a streamed rebuild builds the new index
+        // into a SHADOW and swaps it over the live one atomically, never touching
+        // the live field rows until the swap — so a search landing mid-rebuild
+        // always finds the FULL OLD index (then the full new one after the swap).
+        // Probe the store from INSIDE the chunk stream (between chunk
+        // transactions, the lock is free) and assert every note remains
+        // searchable at every step.
         let (e, dir) = store();
         // Seed three notes, each its own searchable term.
         build_snapshot_live(

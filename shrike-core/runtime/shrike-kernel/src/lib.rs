@@ -6333,8 +6333,9 @@ mod no_cpython_smoke {
             };
             let (rebuilt, min_hits) = futures::join!(kernel.rebuild_derived(), search_loop);
             rebuilt.unwrap();
-            // Replace-in-place: the rebuild never wholesale-clears the field
-            // index, so EVERY search mid-rebuild still finds the notes. A
+            // Build-and-swap: the rebuild builds the new index into a shadow and
+            // swaps it over the live one atomically, so the live field index is
+            // never emptied mid-rebuild — EVERY search still finds the notes. A
             // delete-all-then-insert rebuild would let a search land in the empty
             // window and return zero (the full-recall cliff this guards against).
             assert!(
