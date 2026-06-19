@@ -53,7 +53,11 @@ mod async_kernel;
 mod asyncio_bridge;
 // Injects the kernel's compute pool into the engine `Blocking` adapter; only
 // the route-1 sync engines (onnx/CLIP, Apple Vision, synthetic) use it.
-#[cfg(any(feature = "engine-ort", feature = "engine-apple", feature = "engine-synthetic"))]
+#[cfg(any(
+    feature = "engine-ort",
+    feature = "engine-apple",
+    feature = "engine-synthetic"
+))]
 mod compute_dispatch;
 mod finalize_gate;
 mod gated_log;
