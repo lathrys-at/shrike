@@ -853,11 +853,28 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         ordered by Reciprocal Rank Fusion of the signals, with every literal
         (`substring`) hit floated above non-literal ones, then by fused rank.
 
+        The response carries `stale=True` when the kernel was not settled as the
+        search ran — a recent write was still draining through the embed queue,
+        or a rebuild was in flight — so the semantic ranking may lag the
+        collection (a just-written note can be missing). The result is served
+        immediately regardless; a caller that needs the freshest semantic ranking
+        can retry. Exact/lexical hits read the always-current collection and are
+        never stale.
+
         Use this for conceptual queries keyword search can't handle and for
         finding exact wording. At least one of `queries` or `ids` is required."""
         wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
         if not queries and not ids:
             raise ToolInputError("At least one of queries or ids must be provided.")
+
+        # Freshness advisory: the kernel's non-blocking settled probe, read once
+        # up front. Not settled means a recent write is still draining through the
+        # embed queue (or a rebuild is in flight), so the semantic ranking may lag
+        # the collection. Serve immediately and flag `stale` rather than block —
+        # the caller decides. The data-plane readiness gate covers boot/reload
+        # quiescence; this is the per-write lag the gate deliberately doesn't wait
+        # on.
+        stale = not kernel.is_settled()
 
         logger.debug(
             "search_notes queries=%d ids=%d limit=%d threshold=%.2f",
@@ -913,11 +930,15 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 )
             # Pure semantic request with nothing to substring-match → nothing to do.
             if not queries:
-                return SearchResponse(message=message, completeness=completeness, version=version)
+                return SearchResponse(
+                    message=message, completeness=completeness, version=version, stale=stale
+                )
         elif not semantic_ok and not queries:
             # The live tier with id anchors only: anchors are semantic-only,
             # so there is nothing the cheap signals can do.
-            return SearchResponse(message=message, completeness=completeness, version=version)
+            return SearchResponse(
+                message=message, completeness=completeness, version=version, stale=stale
+            )
 
         if deck:
             # Accept a deck name, #id, or numeric id; an explicit id that matches
@@ -929,6 +950,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                     message="No deck matches that reference.",
                     completeness=completeness,
                     version=version,
+                    stale=stale,
                 )
 
         exclude_set = set(exclude_ids or [])
@@ -950,6 +972,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 message="No valid queries or note IDs to search.",
                 completeness=completeness,
                 version=version,
+                stale=stale,
             )
 
         # Query vectors (host-side embedding); the assembly itself runs in
@@ -1037,7 +1060,11 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 dedup_stats.record(max(sem_scores) if sem_scores else None)
         note_outcome(f"{len(groups)} groups, {sum(len(g.matches) for g in groups)} matches")
         return SearchResponse(
-            results=groups, message=message, completeness=completeness, version=version
+            results=groups,
+            message=message,
+            completeness=completeness,
+            version=version,
+            stale=stale,
         )
 
     @_action

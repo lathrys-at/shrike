@@ -672,6 +672,16 @@ class SearchResponse(BaseModel):
     # Echo of the request's `version` (client-side stale-response dropping:
     # the server is stateless per request; the client owns cancellation).
     version: int | None = None
+    # Freshness advisory: True when the kernel was NOT settled as this search
+    # ran — a write was still draining through the embed queue or a rebuild was
+    # in flight, so the index/derived store may lag the collection and a
+    # just-written note can be missing. The collection is always current, so an
+    # exact/lexical hit is unaffected; only the semantic ranking can be stale.
+    # Default False = settled. A standalone bool, not paired with the human
+    # advisory in `message` (that slot is already the home for the prose
+    # explanation) — keeping the machine-checkable flag independent of any text.
+    # The caller decides: serve the result, or settle()/retry for a fresh one.
+    stale: bool = False
 
 
 class UpsertNotesResponse(BaseModel):

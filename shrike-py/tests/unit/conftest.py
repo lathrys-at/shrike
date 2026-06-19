@@ -215,6 +215,18 @@ class KernelHarness:
 
         return self.run(_go())
 
+    def call_tool_no_settle(self, mcp: Any, name: str, args: dict[str, Any] | None = None) -> Any:
+        """Like :meth:`call_tool` but WITHOUT the trailing settle, so a read can
+        run while a prior write's maintenance is still draining — the setup the
+        stale-read advisory test needs (the freshness probe is read *during* the
+        call, before the drain catches up)."""
+
+        async def _go() -> Any:
+            _, structured = await mcp.call_tool(name, args or {})
+            return structured
+
+        return self.run(_go())
+
     def close(self) -> None:
         self.wrapper.close()
 

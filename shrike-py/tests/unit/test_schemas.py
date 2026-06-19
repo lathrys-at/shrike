@@ -95,6 +95,15 @@ def test_search_response_uses_message_not_underscore() -> None:
     assert legacy.message is None
 
 
+def test_search_response_stale_advisory_defaults_false() -> None:
+    """The freshness advisory is additive and optional: a payload without it
+    (an older server) reads `stale=False`, and an explicit flag round-trips."""
+    older = SearchResponse.model_validate({"results": []})
+    assert older.stale is False
+    flagged = SearchResponse.model_validate({"results": [], "stale": True})
+    assert flagged.stale is True
+
+
 def test_server_status_models_the_responsive_payload() -> None:
     """ServerStatus is exactly a responding server's /status report.
 

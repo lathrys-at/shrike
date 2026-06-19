@@ -185,6 +185,42 @@ class TestAsyncKernel:
         backend = asyncio.run(flow())
         assert backend.calls, "embeds went through the harness backend"
 
+    def test_is_settled_tracks_the_ingest_drain(self, tmp_path) -> None:
+        """The non-blocking freshness probe behind the stale-read advisory: False
+        while a write's embed is still draining, True once the queue drains."""
+        import threading
+
+        class _GatedBackend(_Backend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.release = threading.Event()
+
+            def embed_texts(self, texts: list[str]) -> list[list[float]]:
+                self.release.wait(timeout=30.0)
+                return super().embed_texts(texts)
+
+        async def flow() -> None:
+            backend = _GatedBackend()
+            kernel = await shrike_native.async_kernel_open(
+                str(tmp_path / "collection.anki2"), str(tmp_path / "cache")
+            )
+            kernel.attach_embedder(shrike_native.PyEmbedder.capture(backend))
+            await kernel.settle()
+            assert kernel.is_settled() is True, "an idle kernel is settled"
+
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            # Commits immediately; the embed maintenance parks in the gated backend.
+            await kernel.upsert_notes([(basic, 1, ["paris france", "geo"], [])], "allow")
+            assert kernel.is_settled() is False, "a draining write is not settled"
+
+            backend.release.set()
+            await kernel.settle()
+            assert kernel.is_settled() is True, "the drained queue is settled again"
+            await kernel.close()
+
+        asyncio.run(flow())
+
     def test_batch_is_one_embed_call(self, tmp_path) -> None:
         async def flow():
             backend = _Backend()
