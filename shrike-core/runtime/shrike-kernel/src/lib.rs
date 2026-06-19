@@ -3556,6 +3556,9 @@ mod no_cpython_smoke {
             let resp = kernel.delete_notes(vec![nid, bogus]).await.unwrap();
             assert_eq!(resp.deleted, vec![nid], "the real id is deleted");
             assert_eq!(resp.not_found, vec![bogus], "the bogus id is not_found");
+            // The sidecar removal runs off the drain (the per-op derived write
+            // rides the compute pool); settle the queue before asserting on it.
+            kernel.settle().await;
 
             // Sidecars dropped in the SAME op — no separate forget_notes needed.
             assert!(

@@ -64,10 +64,11 @@
 //! # Durability + shutdown
 //!
 //! The durable index/FTS write strictly precedes the durable watermark advance
-//! (`save()` orders engine → hashes → meta; `set_col_mod` is a synchronous
-//! SQLite write the actor issues only after the in-memory add). Shutdown drains
-//! the queue (channel close ⇒ `recv()` returns `None` only once the buffer is
-//! empty), then flushes the index savers durably, before the kernel closes the
+//! (`save()` orders engine → hashes → meta; the derived FTS write and its
+//! `set_col_mod` ride ONE compute-pool hop the actor awaits, ingest-then-stamp,
+//! so the watermark is stamped only after its rows are committed). Shutdown
+//! drains the queue (channel close ⇒ `recv()` returns `None` only once the buffer
+//! is empty), then flushes the index savers durably, before the kernel closes the
 //! collection.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -326,7 +327,12 @@ pub struct Ingestor {
     recognition_gate: RecognitionGate,
     tag_keys: Arc<TagKeyMap>,
     tag_refresh: Arc<TagRefresher>,
-    floors: Mutex<WatermarkFloors>,
+    /// `Arc`-wrapped so the derived watermark resolve+stamp can ride the same
+    /// compute-pool hop as the derived write it certifies (a clone moves into the
+    /// closure). The index floor stays resolved on the actor; both fields share
+    /// this one mutex but the actor awaits the derived hop before touching the
+    /// index field, so the lock is never contended across the await.
+    floors: Arc<Mutex<WatermarkFloors>>,
     /// Count of drained items/jobs whose processing PANICKED and was contained
     /// by the drain loop ([`drain_loop`]). Non-zero means the sole writer hit an
     /// unexpected fault (most likely a poisoned lock) and skipped that work —
@@ -356,7 +362,7 @@ impl Ingestor {
             recognition_gate,
             tag_keys,
             tag_refresh,
-            floors: Mutex::new(WatermarkFloors::default()),
+            floors: Arc::new(Mutex::new(WatermarkFloors::default())),
             drain_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
@@ -428,25 +434,6 @@ impl Ingestor {
             }
         }
         Ok(())
-    }
-
-    /// The derived-ingest half: group rows per note, ingest in ONE transaction.
-    fn ingest_derived(
-        &self,
-        rows: &[(i64, String, String, String)],
-        written: &[i64],
-    ) -> NativeResult<()> {
-        let mut refs: BTreeMap<i64, Vec<(String, String)>> = BTreeMap::new();
-        for (nid, _source, name, value) in rows {
-            refs.entry(*nid)
-                .or_default()
-                .push((name.clone(), value.clone()));
-        }
-        let batch: Vec<(i64, Vec<(String, String)>)> = written
-            .iter()
-            .map(|note_id| (*note_id, refs.remove(note_id).unwrap_or_default()))
-            .collect();
-        self.derived.ingest_many(&batch, FIELD_SOURCE)
     }
 
     /// Await a full tag-centroid recompute to completion — the boot/rebuild
@@ -532,8 +519,9 @@ impl Ingestor {
         // it must stay so the next attach reconciles). The derived watermark is
         // lexical and always maintained.
         let mut index_ok = self.embed_service().is_some();
-        let mut derived_ok = true;
 
+        // The index add (already pool-internal) runs first, preserving the
+        // durability order index-add → derived-write → derived-watermark.
         if !written.is_empty() {
             if let Some(svc) = self.embed_service() {
                 if let Err(e) = self.write_index(raw_inputs, &written, &svc).await {
@@ -541,34 +529,45 @@ impl Ingestor {
                     index_ok = false;
                 }
             }
-            if let Err(e) = self.ingest_derived(rows, &written) {
-                tracing::warn!(error = %e, notes = written.len(), "derived ingest failed after commit; leaving the derived watermark behind");
-                derived_ok = false;
-            }
         }
+        // The in-memory index removal stays on the executor (a usearch slot drop,
+        // not blocking fs); the derived removal joins the off-actor write below.
         if !to_remove.is_empty() {
             if let Err(e) = self.index_set.remove_all(to_remove) {
                 tracing::warn!(error = %e, notes = to_remove.len(), "index removal failed; leaving the index watermark behind");
                 index_ok = false;
             }
-            if let Err(e) = self.derived.remove(to_remove, None) {
-                tracing::warn!(error = %e, notes = to_remove.len(), "derived removal failed; leaving the derived watermark behind");
-                derived_ok = false;
-            }
         }
 
-        if let Some(v) = self.resolve_derived(
-            if derived_ok {
-                advance_to
-            } else {
-                floor_on_fail
-            },
-            derived_ok,
-        ) {
-            if let Err(e) = self.derived.set_col_mod(v) {
-                tracing::warn!(error = %e, "advancing the derived watermark failed");
-            }
-        }
+        // Every per-op derived (SQLite) write — the FTS5 ingest, the removal, and
+        // the watermark advance — rides ONE compute-pool hop, not three inline
+        // fsyncs on the single async executor (`journal_mode=DELETE` fsyncs each
+        // commit). Sequential ops on the same `Mutex<Connection>`, so one closure;
+        // the watermark advance stays AFTER the ingest/removal it certifies (the
+        // derived-write-before-derived-watermark durability order). A plain SQLite
+        // call + a floor-mutex lock is a pool leaf — the closure never re-enters
+        // the pool, so the leaf-invariant holds.
+        let derived = Arc::clone(&self.derived);
+        let floors = Arc::clone(&self.floors);
+        let batch = if written.is_empty() {
+            Vec::new()
+        } else {
+            group_derived_rows(rows, &written)
+        };
+        let removals: Vec<i64> = to_remove.to_vec();
+        let derived_ok = runtime::dispatch_compute(move || {
+            Ok::<bool, NativeError>(apply_derived_writes(
+                &*derived,
+                &floors,
+                batch,
+                removals,
+                advance_to,
+                floor_on_fail,
+            ))
+        })
+        .await
+        .unwrap_or(false);
+
         if let Some(v) =
             self.resolve_index(if index_ok { advance_to } else { floor_on_fail }, index_ok)
         {
@@ -1168,6 +1167,74 @@ async fn process_caught(
     false
 }
 
+/// The per-op derived (SQLite) write sequence, run on the compute pool by
+/// [`Ingestor::apply_maintenance`]: ingest the grouped field rows, remove the
+/// deleted notes' rows, then resolve+stamp the derived watermark — all on one
+/// hop so the fsync-per-commit (`journal_mode=DELETE`) never blocks the executor.
+///
+/// Ordering is load-bearing: the watermark advance comes LAST, after both the
+/// ingest and the removal it certifies — a partial/failed write leaves the floor
+/// behind (`derived_ok == false`) so the next drift rebuild heals it. The body is
+/// a pure pool leaf (a SQLite call + a floor-mutex lock, no `dispatch_*`), so the
+/// leaf-invariant holds when this runs inside `dispatch_compute`. Returns whether
+/// every derived write succeeded (the caller's tag-refresh / status signal).
+fn apply_derived_writes(
+    derived: &dyn DerivedStore,
+    floors: &Mutex<WatermarkFloors>,
+    batch: Vec<(i64, Vec<(String, String)>)>,
+    removals: Vec<i64>,
+    advance_to: i64,
+    floor_on_fail: i64,
+) -> bool {
+    let mut derived_ok = true;
+    if !batch.is_empty() {
+        if let Err(e) = derived.ingest_many(&batch, FIELD_SOURCE) {
+            tracing::warn!(error = %e, notes = batch.len(), "derived ingest failed after commit; leaving the derived watermark behind");
+            derived_ok = false;
+        }
+    }
+    if !removals.is_empty() {
+        if let Err(e) = derived.remove(&removals, None) {
+            tracing::warn!(error = %e, notes = removals.len(), "derived removal failed; leaving the derived watermark behind");
+            derived_ok = false;
+        }
+    }
+    let resolved = floors.lock().expect("floors poisoned").derived.resolve(
+        if derived_ok {
+            advance_to
+        } else {
+            floor_on_fail
+        },
+        derived_ok,
+    );
+    if let Some(v) = resolved {
+        if let Err(e) = derived.set_col_mod(v) {
+            tracing::warn!(error = %e, "advancing the derived watermark failed");
+        }
+    }
+    derived_ok
+}
+
+/// Group `(note_id, source, name, value)` field rows per note into the batch
+/// [`DerivedStore::ingest_many`] takes, with one entry per `written` id (an id
+/// with no rows ingests an empty set, clearing its prior rows). Pulled out of the
+/// actor so the grouping + the ingest both ride the derived compute hop.
+fn group_derived_rows(
+    rows: &[(i64, String, String, String)],
+    written: &[i64],
+) -> Vec<(i64, Vec<(String, String)>)> {
+    let mut refs: BTreeMap<i64, Vec<(String, String)>> = BTreeMap::new();
+    for (nid, _source, name, value) in rows {
+        refs.entry(*nid)
+            .or_default()
+            .push((name.clone(), value.clone()));
+    }
+    written
+        .iter()
+        .map(|note_id| (*note_id, refs.remove(note_id).unwrap_or_default()))
+        .collect()
+}
+
 /// Compose orchestrator inputs from collection rows + the derived store's
 /// recognized texts across every vector-minting source: the index derives from
 /// collection text + OCR + ASR + VLM-describe, so reconcile == rebuild keeps
@@ -1267,6 +1334,272 @@ pub fn spawn(ingestor: Arc<Ingestor>) -> IngestHandle {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// `(op, thread-name)` per recorded derived write, in call order.
+    type CallLog = Arc<Mutex<Vec<(String, String)>>>;
+
+    /// A `DerivedStore` over a real engine that records, per write call, the name
+    /// of the OS thread it ran on (and the call order), so a test can assert the
+    /// per-op derived writes execute on the `drive_compute` pool — not inline on
+    /// the `drive_io` executor. An optional `fail_ingest` forces the ingest to
+    /// `Err`, the shape that must leave the derived watermark behind.
+    struct RecordingDerived {
+        inner: shrike_derived::DerivedEngine,
+        calls: CallLog,
+        fail_ingest: bool,
+    }
+    impl RecordingDerived {
+        fn record(&self, op: &str) {
+            let thread = std::thread::current()
+                .name()
+                .unwrap_or("<unnamed>")
+                .to_string();
+            self.calls
+                .lock()
+                .expect("calls poisoned")
+                .push((op.to_string(), thread));
+        }
+    }
+    impl shrike_store::DerivedStore for RecordingDerived {
+        fn build(
+            &self,
+            rows: &[(i64, String, String, String)],
+            live_notes: &[i64],
+            col_mod: i64,
+        ) -> NativeResult<()> {
+            self.inner.build(rows, live_notes, col_mod)
+        }
+        fn ingest(&self, n: i64, s: &str, r: &[(String, String)]) -> NativeResult<()> {
+            self.inner.ingest(n, s, r)
+        }
+        fn ingest_many(
+            &self,
+            notes: &[(i64, Vec<(String, String)>)],
+            source: &str,
+        ) -> NativeResult<()> {
+            self.record("ingest_many");
+            if self.fail_ingest {
+                return Err(NativeError::internal("derived ingest failed (simulated)"));
+            }
+            self.inner.ingest_many(notes, source)
+        }
+        fn remove(&self, ids: &[i64], source: Option<&str>) -> NativeResult<()> {
+            self.record("remove");
+            self.inner.remove(ids, source)
+        }
+        fn count(&self) -> NativeResult<i64> {
+            self.inner.count()
+        }
+        fn get_col_mod(&self) -> Option<i64> {
+            self.inner.get_col_mod()
+        }
+        fn set_col_mod(&self, v: i64) -> NativeResult<()> {
+            self.record("set_col_mod");
+            self.inner.set_col_mod(v)
+        }
+        fn meta_get(&self, k: &str) -> NativeResult<Option<String>> {
+            self.inner.meta_get(k)
+        }
+        fn meta_set(&self, k: &str, v: &str) -> NativeResult<()> {
+            self.inner.meta_set(k, v)
+        }
+        fn refs_for_source(&self, s: &str) -> NativeResult<Vec<(i64, String)>> {
+            self.inner.refs_for_source(s)
+        }
+        fn texts_for_source(&self, s: &str) -> NativeResult<Vec<(i64, String, String)>> {
+            self.inner.texts_for_source(s)
+        }
+        fn texts_for_source_for_notes(
+            &self,
+            s: &str,
+            ids: &[i64],
+        ) -> NativeResult<Vec<(i64, String, String)>> {
+            self.inner.texts_for_source_for_notes(s, ids)
+        }
+        fn mark_gated(&self, s: &str, pairs: &[(i64, String)]) -> NativeResult<()> {
+            self.inner.mark_gated(s, pairs)
+        }
+        fn gated_refs_for_source(&self, s: &str) -> NativeResult<Vec<(i64, String)>> {
+            self.inner.gated_refs_for_source(s)
+        }
+        fn clear_gated(&self, s: &str) -> NativeResult<()> {
+            self.inner.clear_gated(s)
+        }
+        fn put_segments(&self, n: i64, s: &str, r: &str, j: &str) -> NativeResult<()> {
+            self.inner.put_segments(n, s, r, j)
+        }
+        fn get_segments(&self, n: i64, s: &str, r: &str) -> NativeResult<Option<String>> {
+            self.inner.get_segments(n, s, r)
+        }
+        fn match_rows(
+            &self,
+            expr: &str,
+            limit: i64,
+            with_text: bool,
+            scope: Option<&[i64]>,
+            exclude: &[&str],
+        ) -> NativeResult<Vec<shrike_store::MatchRow>> {
+            self.inner
+                .match_rows(expr, limit, with_text, scope, exclude)
+        }
+        fn search_substring(
+            &self,
+            q: &str,
+            limit: i64,
+            scope: Option<&[i64]>,
+            exclude: &[&str],
+        ) -> NativeResult<Option<Vec<shrike_store::LexicalRow>>> {
+            self.inner.search_substring(q, limit, scope, exclude)
+        }
+        fn search_fuzzy(
+            &self,
+            q: &str,
+            top_k: i64,
+            scope: Option<&[i64]>,
+            exclude: &[&str],
+        ) -> NativeResult<Vec<shrike_store::LexicalRow>> {
+            self.inner.search_fuzzy(q, top_k, scope, exclude)
+        }
+    }
+
+    fn temp_recording_derived(
+        fail_ingest: bool,
+    ) -> (RecordingDerived, CallLog, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-ingest-derived-thread-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let inner = shrike_derived::DerivedEngine::open(
+            dir.join("shrike.db").to_str().unwrap(),
+            shrike_derived::DerivedEngine::SCHEMA_VERSION,
+        )
+        .unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        (
+            RecordingDerived {
+                inner,
+                calls: Arc::clone(&calls),
+                fail_ingest,
+            },
+            calls,
+            dir,
+        )
+    }
+
+    /// The #863 guarantee: the per-op derived (SQLite) write that
+    /// [`Ingestor::apply_maintenance`] runs — the FTS5 ingest plus the watermark
+    /// advance — executes on the `drive_compute` pool when wrapped in
+    /// `dispatch_compute`, NOT inline on the `drive_io` executor that submitted it.
+    /// `journal_mode=DELETE` fsyncs each commit, so running it inline would block
+    /// the single async executor. The compute-pool threads are named
+    /// `shrike-work-*`; the submitting test thread is not — so the recorded thread
+    /// name discriminates the two. The watermark stamp lands LAST, after the
+    /// ingest it certifies (the durability order), and only on success.
+    #[test]
+    fn derived_writes_ride_the_compute_pool() {
+        let (derived, calls, dir) = temp_recording_derived(false);
+        let derived: Arc<dyn DerivedStore> = Arc::new(derived);
+        let floors = Arc::new(Mutex::new(WatermarkFloors::default()));
+
+        let submitter_thread = std::thread::current().name().map(str::to_string);
+        let batch = group_derived_rows(
+            &[(7i64, "field".into(), "Front".into(), "krebs cycle".into())],
+            &[7],
+        );
+        let ok = {
+            let derived = Arc::clone(&derived);
+            let floors = Arc::clone(&floors);
+            runtime::testing::run(async move {
+                runtime::dispatch_compute(move || {
+                    Ok::<bool, NativeError>(apply_derived_writes(
+                        &*derived,
+                        &floors,
+                        batch,
+                        Vec::new(),
+                        100,
+                        0,
+                    ))
+                })
+                .await
+                .unwrap()
+            })
+        };
+
+        assert!(ok, "the derived write succeeded");
+        let recorded = calls.lock().unwrap().clone();
+        // ingest THEN the watermark stamp — the certify-after-write order.
+        let ops: Vec<&str> = recorded.iter().map(|(op, _)| op.as_str()).collect();
+        assert_eq!(
+            ops,
+            vec!["ingest_many", "set_col_mod"],
+            "the ingest is committed before the watermark stamps it"
+        );
+        for (op, thread) in &recorded {
+            assert!(
+                thread.starts_with("shrike-work-"),
+                "{op} ran on a drive_compute pool thread, not inline on the executor (ran on {thread:?})"
+            );
+            assert_ne!(
+                Some(thread.as_str()),
+                submitter_thread.as_deref(),
+                "{op} ran OFF the submitting thread"
+            );
+        }
+        assert_eq!(
+            derived.get_col_mod(),
+            Some(100),
+            "the watermark advanced to the batch's col.mod on success"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Durability ordering under failure: a derived ingest that fails leaves the
+    /// watermark BEHIND (the floor), so the next drift rebuild re-fires — the
+    /// `set_col_mod` is never issued past the un-ingested write. `apply_derived_writes`
+    /// returns `false` so the caller's status/tag-refresh decision sees the failure.
+    #[test]
+    fn failed_derived_ingest_leaves_the_watermark_behind() {
+        let (derived, calls, dir) = temp_recording_derived(true);
+        let derived: Arc<dyn DerivedStore> = Arc::new(derived);
+        let floors = Arc::new(Mutex::new(WatermarkFloors::default()));
+        let batch = group_derived_rows(
+            &[(7i64, "field".into(), "Front".into(), "krebs cycle".into())],
+            &[7],
+        );
+
+        let ok = apply_derived_writes(&*derived, &floors, batch, Vec::new(), 100, 0);
+
+        assert!(!ok, "a failed ingest reports derived_ok == false");
+        let ops: Vec<String> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(op, _)| op.clone())
+            .collect();
+        assert_eq!(
+            ops,
+            vec!["ingest_many"],
+            "the watermark is NOT stamped after a failed ingest"
+        );
+        assert_eq!(
+            derived.get_col_mod(),
+            None,
+            "the derived watermark stays behind for the next drift rebuild to heal"
+        );
+        // The floor was lowered to the failed write's col.mod, blocking any later
+        // advance past it until a reconcile clears it.
+        assert_eq!(
+            floors.lock().unwrap().derived.floor(),
+            Some(0),
+            "the failed write floored the derived watermark at its floor_on_fail"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     /// A panicking unit of drain work is CONTAINED: the counter increments and
     /// `process_caught` returns normally (the loop survives), instead of the
