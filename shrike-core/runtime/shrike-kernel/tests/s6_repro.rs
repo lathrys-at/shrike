@@ -54,7 +54,7 @@ fn temp_dir() -> std::path::PathBuf {
 
 #[test]
 fn upsert_wire_returns_ok_results_even_when_the_embed_tail_fails() {
-    testing::run_with_sync(async {
+    testing::run_with_collection(async {
         let dir = temp_dir();
         let kernel = Kernel::open(
             dir.join("c.anki2").to_str().unwrap(),

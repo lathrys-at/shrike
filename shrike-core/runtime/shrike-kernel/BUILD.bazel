@@ -57,7 +57,7 @@ rust_test(
 )
 
 # The driven-runtime proof (the harness provides every thread): a full open →
-# upsert → search on a current_thread runtime driven by drive_io/drive_sync/
+# upsert → search on a current_thread runtime driven by drive_io/drive_collection/
 # drive_compute, plus the N+2 shutdown-and-join. Its own test binary for the
 # same process-global-seam reason as current_thread above.
 rust_test(

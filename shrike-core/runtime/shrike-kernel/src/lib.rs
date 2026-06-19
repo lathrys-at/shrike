@@ -9,10 +9,10 @@
 //! ingest), collection access serializes through a task-actor
 //! ([`SerializedCollection`]), and hosts adapt the *action exchange* — an op
 //! in, a completion-backed future out via [`spawn_op`] — never scheduling.
-//! (anki keeps its own runtime for sync; the kernel guarantees sync ops never
-//! run on a runtime worker thread, not that only one runtime exists — see
-//! [`runtime`] for the `spawn_blocking` discipline and its panic-repro
-//! gate.)
+//! (anki keeps its own runtime for client sync; the kernel guarantees
+//! collection ops never run on a runtime worker thread, not that only one
+//! runtime exists — see [`runtime`] for the collection-dispatch discipline and
+//! its panic-repro gate.)
 //!
 //! There is **no pyo3 anywhere in this dependency tree** (enforced by
 //! `//shrike-core:layering_check`); the no-CPython smoke test in
@@ -55,8 +55,9 @@ use shrike_store::{DerivedStore, VectorIndex};
 
 pub mod runtime;
 pub use runtime::{
-    block_on, drive_compute, drive_io, drive_io_until_shutdown, drive_sync, init_driven_runtime,
-    is_driven, shutdown_driven_pools, spawn_op, submit_blocking, submit_compute,
+    block_on, drive_collection, drive_compute, drive_io, drive_io_until_shutdown,
+    init_driven_runtime, is_driven, shutdown_driven_pools, spawn_op, submit_blocking,
+    submit_compute,
 };
 
 // The multi-engine routing key: re-exported so the pyo3 binding maps
@@ -80,27 +81,23 @@ pub use shrike_engine_api::{
 // without reaching past the kernel into the collection crate.
 pub use shrike_collection::{ExportOutcome, ExportRequest, ExportScope, PackageFormat};
 
-/// The collection as a task-actor: every access is one job sent to a
-/// single spawned task that runs them **inline, sequentially** — FIFO
-/// serialization by construction, no thread affinity (the task owns the
-/// receiver and migrates freely across runtime workers between polls;
-/// `CollectionCore` is Send). Jobs are synchronous closures and never await,
-/// which makes the old re-entrancy rule structural. On a `current_thread`
-/// runtime the actor shares the one thread driving everything — the
-/// degenerate single-thread mode works by construction (no `block_in_place`
-/// anywhere).
+/// The collection as a task-actor: an async task owning a FIFO job queue. For
+/// each job it dispatches the synchronous (blocking) closure to the dedicated
+/// [`drive_collection`](runtime::drive_collection) OS thread via
+/// [`dispatch_collection`](runtime::dispatch_collection), awaiting it before
+/// taking the next — so FIFO serialization is preserved and every collection
+/// access (read and write, including the journal fsync) runs on the single
+/// `drive_collection` thread, off the async executor. The actor task holds only
+/// an `Arc<dyn Collection>` handle (`Send`) and never touches the core itself —
+/// the access runs in the dispatched closure — so the task migrates freely
+/// across runtime workers between polls.
 ///
-/// Inline jobs briefly occupy whichever worker polls the actor — strictly
-/// less thread-hungry than the retired permanently-dedicated worker thread,
-/// and engine compute lives on the separate blocking pool so embeds never
-/// compete. Because jobs run inline on a runtime worker, a sync anki call
-/// that `block_on`s would panic if invoked *directly* in a job (any
-/// runtime-worker thread is a runtime context). anki's `block_on` lives only
-/// on the sync/AnkiWeb service paths, none of which Shrike dispatches today
-/// (pinned in shrike-collection); when client sync lands, those
-/// sync ops MUST ride `spawn_blocking` rather than an inline job — a
-/// blocking-pool thread is a legal `block_on` site. The discipline and its
-/// panic-repro gate live in [`runtime`].
+/// `drive_collection` is a plain (non-runtime) OS thread, so `block_on` is
+/// *legal* there — which is exactly what makes anki's sync/`block_on` paths
+/// safe when client sync lands (anki keeps its own runtime for that). Dispatch
+/// off the executor is therefore not an optimization but the invariant: a
+/// `block_on` invoked directly on a runtime worker would panic. The discipline
+/// and its panic-repro gate live in [`runtime`].
 pub struct SerializedCollection {
     core: Arc<dyn Collection>,
     /// `None` after [`SerializedCollection::shutdown`] — dropping the sender
@@ -127,11 +124,11 @@ impl SerializedCollection {
         let (opened_tx, opened_rx) = oneshot::channel();
         let (jobs_tx, mut jobs_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
         let actor = runtime::handle().spawn(async move {
-            // Open on the sync pool (driven) / blocking pool (default), never
-            // inline on the runtime task: the collection is a sync resource and
-            // anki's sync paths `block_on`, which a runtime worker forbids.
-            // `dispatch_sync` is the one routing seam.
-            let opened = runtime::dispatch_sync(move || {
+            // Open on the drive_collection thread, never inline on the runtime
+            // task: the collection is a blocking resource and anki's sync paths
+            // `block_on`, which a runtime worker forbids. `dispatch_collection`
+            // is the one routing seam.
+            let opened = runtime::dispatch_collection(move || {
                 CollectionCore::open(&collection_path).map(Arc::new)
             })
             .await;
@@ -143,10 +140,10 @@ impl SerializedCollection {
                 }
             };
             let _ = opened_tx.send(Ok(Arc::clone(&core)));
-            // Each job runs on the sync pool too, awaited here so serialization
-            // (one job at a time, FIFO) is preserved by construction.
+            // Each job runs on the drive_collection thread too, awaited here so
+            // serialization (one job at a time, FIFO) is preserved by construction.
             while let Some(job) = jobs_rx.recv().await {
-                let _ = runtime::dispatch_sync(move || {
+                let _ = runtime::dispatch_collection(move || {
                     job();
                     Ok::<(), NativeError>(())
                 })
@@ -171,8 +168,8 @@ impl SerializedCollection {
         let (jobs_tx, mut jobs_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
         let actor = runtime::handle().spawn(async move {
             while let Some(job) = jobs_rx.recv().await {
-                // Sync-pool routed, awaited to keep FIFO serialization.
-                let _ = runtime::dispatch_sync(move || {
+                // drive_collection-routed, awaited to keep FIFO serialization.
+                let _ = runtime::dispatch_collection(move || {
                     job();
                     Ok::<(), NativeError>(())
                 })
@@ -3117,7 +3114,7 @@ mod no_cpython_smoke {
     /// a JoinHandle-shaped wrapper.
     #[test]
     fn dropping_the_op_wrapper_never_aborts_the_work() {
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let collection = SerializedCollection::open(
                 dir.join("collection.anki2").to_string_lossy().into_owned(),
@@ -3178,7 +3175,7 @@ mod no_cpython_smoke {
             }
         }
 
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -3238,7 +3235,7 @@ mod no_cpython_smoke {
     /// every completion awaited concurrently.
     #[test]
     fn collection_jobs_run_fifo() {
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let collection = SerializedCollection::open(
                 dir.join("collection.anki2").to_string_lossy().into_owned(),
@@ -3267,7 +3264,7 @@ mod no_cpython_smoke {
         // The embed slot is runtime-swappable: detached, the kernel
         // still creates notes and serves lexical search; re-attached, the
         // stale index watermark makes reindex catch up on what it missed.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -3341,7 +3338,7 @@ mod no_cpython_smoke {
         // while embed_service() still returns the PRIMARY (first text) space —
         // the index/search paths consume exactly one engine, so N=1
         // stays byte-identical.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -3421,7 +3418,7 @@ mod no_cpython_smoke {
         // lives at the base index dir DIRECTLY (the in-place-no-subdir migration
         // rule → zero rebuild for existing users); the secondary gets a subdir.
         // The index/search path consumes the primary.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let cache = dir.join("cache");
             let kernel = Kernel::open(
@@ -3623,7 +3620,7 @@ mod no_cpython_smoke {
         // text lands in the text space; its image lands in the CLIP space's
         // ImageOnly index. The CLIP text tower is NEVER called on the write path
         // (ImageOnly), and the image space holds the image vector.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let mut media = std::collections::HashMap::new();
             media.insert("a.png".to_string(), b"image-a-bytes".to_vec());
@@ -3678,7 +3675,7 @@ mod no_cpython_smoke {
             }
         }
 
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let mut media = std::collections::HashMap::new();
             media.insert("a.png".to_string(), b"aaa".to_vec());
@@ -3806,7 +3803,7 @@ mod no_cpython_smoke {
     fn delete_fans_out_to_every_space_at_n2() {
         // A note's vectors leave EVERY space on delete: the text
         // space drops its text vector, the CLIP space drops its image vector.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let mut media = std::collections::HashMap::new();
             media.insert("a.png".to_string(), b"aaa".to_vec());
@@ -3851,7 +3848,7 @@ mod no_cpython_smoke {
         // a separate forget_notes. A requested id that doesn't exist is
         // not_found (never silently counted deleted), and a real id's vectors +
         // derived rows leave in the same op.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -3920,7 +3917,7 @@ mod no_cpython_smoke {
         // 0-space search: no text-capable space → semantic is off, the
         // cross-space fan-out is empty, and search serves the LEXICAL signals
         // only (no empty-index panic). The literal hit lands via `exact`.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -3978,7 +3975,7 @@ mod no_cpython_smoke {
         // N spaces: adding a separate CLIP space must not change which
         // engine the text-neighbor query reads — it stays the primary text
         // engine, so the dedup signal is deterministic, never ambiguous across N.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let mut media = std::collections::HashMap::new();
             media.insert("a.png".to_string(), b"aaa".to_vec());
@@ -4014,7 +4011,7 @@ mod no_cpython_smoke {
         // (the deployment ladder's composition point) behaves like an opened
         // one — the actor wraps the injected collection, ops serve, and the
         // index/derived paths ride the injected trait objects.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             std::fs::create_dir_all(dir.join("cache")).unwrap();
             let collection: Arc<dyn shrike_collection::Collection> =
@@ -4069,7 +4066,7 @@ mod no_cpython_smoke {
         // pool with per-item errors, the read ops round-trip, and prune
         // carries its own maintenance tail (vectors leave with the notes,
         // the watermark advances — no host-side forget/metadata calls).
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -4170,7 +4167,7 @@ mod no_cpython_smoke {
         // index watermark to the new col_mod (no drift on the next check);
         // a no-op batch leaves the watermark EXACTLY where it was — the
         // `changed` guard skips the tail, not merely "no drift afterwards".
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -4265,7 +4262,7 @@ mod no_cpython_smoke {
     /// fires.
     #[test]
     fn metadata_only_op_does_not_recompute_tag_centroids() {
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -4403,7 +4400,7 @@ mod no_cpython_smoke {
             }
         }
 
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -4513,7 +4510,7 @@ mod no_cpython_smoke {
         // Open-on-demand, kernel-side: an idle release between ops
         // (or between one op's jobs) self-heals on the next serialized job
         // instead of erroring CollectionNotOpen.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -4558,7 +4555,7 @@ mod no_cpython_smoke {
         // The tag-centroid layer end to end: tagged upserts → centroids in the
         // tag.text space (hygiene-filtered) → note searches structurally
         // blind to tag keys.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -4641,7 +4638,7 @@ mod no_cpython_smoke {
         // The tag-signal payoff: a member whose own text doesn't match the query
         // still surfaces because its TAG's centroid (dominated by on-topic
         // siblings) activates and expands.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -4765,7 +4762,7 @@ mod no_cpython_smoke {
         // Recognition end-to-end: one recognition pass per image feeds the
         // lexical store (rows + segments) AND the text-space vector, so a
         // query matching only the text INSIDE an image surfaces the note.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -4863,7 +4860,7 @@ mod no_cpython_smoke {
         // col.mod watermark — advancing it would over-certify a concurrent,
         // still-queued user write whose col.mod the sweep happened to read, and
         // recognition never bumps col.mod, so drift could never re-detect it.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -4933,7 +4930,7 @@ mod no_cpython_smoke {
         // batch. With 5 pending images and batch=2 the drain runs 3 internal
         // chunks (2+2+1) but ONE enumeration; the call returns
         // recognized=5/remaining=0.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -4992,7 +4989,7 @@ mod no_cpython_smoke {
         // delete, transient error) — the item must be SKIPPED, never
         // recognized over empty bytes, and must stay pending so a later
         // sweep (once the read heals) recognizes the real bytes.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -5091,7 +5088,7 @@ mod no_cpython_smoke {
         // so each call re-takes the same window — the kernel can't drain it.
         // The report must let a driver detect the no-progress batch
         // (recognized == 0 with remaining > 0) and stop instead of spinning.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -5212,7 +5209,7 @@ mod no_cpython_smoke {
         // recognized ONCE — not re-OCR'd every sweep — and only a recognizer
         // fingerprint change (engine upgrade) puts it back in the pending
         // set, exactly like stored rows re-derive.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -5299,7 +5296,7 @@ mod no_cpython_smoke {
         // instead of re-taking the identical window forever (which the
         // no-progress stop, keyed on recognized == 0, deliberately does not
         // terminate).
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -5407,7 +5404,7 @@ mod no_cpython_smoke {
         // to the single-slot sweep). Describe lands in source "vlm",
         // VECTOR-ONLY: a vector mints (a non-literal query surfaces the note)
         // but the describe prose is NEVER reachable via substring/fuzzy.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -5582,7 +5579,7 @@ mod no_cpython_smoke {
         // purpose recognizes it (source "asr", LexicalAndVector like OCR), and
         // both consumers light up: the transcript is lexically searchable AND
         // mints a text-space vector. Span segments persist. OCR is untouched.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -5729,7 +5726,7 @@ mod no_cpython_smoke {
         // when several single-item sweeps are driven CONCURRENTLY. (One audio
         // note per item; max_items=1 makes each concurrent sweep one
         // recognize() dispatch.) The probe records the peak overlap.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -5873,7 +5870,7 @@ mod no_cpython_smoke {
         // (clear_gated(vlm)), exactly like a stored row re-derives. Pins the
         // 4xx negative-cache path explicitly (the existing gated test covers
         // only the below-substance drop).
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -6000,7 +5997,7 @@ mod no_cpython_smoke {
         // any persist or fingerprint advance, so the backlog stays pending and
         // a later sweep (once the endpoint is up) retries. The negative cache
         // is for per-item PERMANENT failures only.
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -6072,7 +6069,7 @@ mod no_cpython_smoke {
     fn open_upsert_search_close_without_python() {
         // The harness picks the runtime: here futures' minimal block_on —
         // no tokio, nothing owned by the kernel.
-        crate::runtime::testing::run_with_sync(assert_send(smoke()));
+        crate::runtime::testing::run_with_collection(assert_send(smoke()));
     }
 
     async fn smoke() {
@@ -6200,7 +6197,7 @@ mod no_cpython_smoke {
     /// (post-commit col_mod equals the committed snapshot) and restores them.
     #[test]
     fn derived_rebuild_verifies_against_mid_build_writes() {
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -6346,7 +6343,7 @@ mod no_cpython_smoke {
     /// so the watermark stays behind and drift heals bravo.
     #[test]
     fn s5_interleaved_upsert_does_not_falsely_advance_the_index_watermark() {
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Arc::new(
                 Kernel::open(
@@ -6458,7 +6455,7 @@ mod no_cpython_smoke {
     /// over-certification point.
     #[test]
     fn s6_2_interleaved_upsert_does_not_falsely_advance_the_derived_watermark() {
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Arc::new(
                 Kernel::open(
@@ -6553,7 +6550,7 @@ mod no_cpython_smoke {
     /// committed note), AND leaves the index watermark behind so drift heals it.
     #[test]
     fn s6_best_effort_tail_returns_results_and_leaves_the_watermark_behind() {
-        crate::runtime::testing::run_with_sync(async {
+        crate::runtime::testing::run_with_collection(async {
             let dir = temp_dir();
             let kernel = Kernel::open(
                 dir.join("c.anki2").to_str().unwrap(),
@@ -6614,7 +6611,7 @@ mod no_cpython_smoke {
     /// A `rebuild_derived` overlapping concurrent searches must not deadlock.
     ///
     /// The streaming rebuild pulls field-row chunks through the collection actor
-    /// (the single drive_sync thread); a concurrent `search` runs `search_notes`
+    /// (the single drive_collection thread); a concurrent `search` runs `search_notes`
     /// through that SAME actor and takes the derived connection lock
     /// (search_substring/search_fuzzy). If the rebuild held that lock across its
     /// chunk pulls, the search would wedge the actor on the lock while the
@@ -6630,7 +6627,7 @@ mod no_cpython_smoke {
     /// the whole 143-test binary).
     #[test]
     fn rebuild_derived_does_not_deadlock_against_concurrent_search() {
-        crate::runtime::testing::run_with_sync(async move {
+        crate::runtime::testing::run_with_collection(async move {
             let dir = temp_dir();
             let kernel = Arc::new(
                 Kernel::open(

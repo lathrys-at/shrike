@@ -75,10 +75,10 @@ class DrivenRuntime:
         live).
 
         The IO thread is started and confirmed driving (``runtime_probe``) before
-        the sync/compute threads are spawned. tokio's ``current_thread`` runtime
-        gives ownership of the IO/timer drivers to the FIRST ``block_on`` caller,
-        which MUST be the IO thread; a sync/compute leaf reaching its own
-        ``block_on`` first would win that ownership and leave the drivers
+        the collection/compute threads are spawned. tokio's ``current_thread``
+        runtime gives ownership of the IO/timer drivers to the FIRST ``block_on``
+        caller, which MUST be the IO thread; a collection/compute leaf reaching
+        its own ``block_on`` first would win that ownership and leave the drivers
         advancing only while it parks in ``recv``, starving timers/IO."""
         if not self._driven or self._threads:
             return
@@ -88,7 +88,7 @@ class DrivenRuntime:
         # The barrier: returns once the IO thread is inside its block_on and owns
         # the drivers, so the leaves below can't claim driver ownership.
         shrike_native.runtime_probe()
-        leaves = [threading.Thread(target=shrike_native.drive_sync, name="shrike-sync")]
+        leaves = [threading.Thread(target=shrike_native.drive_collection, name="shrike-collection")]
         leaves += [
             threading.Thread(target=shrike_native.drive_compute, name=f"shrike-work-{i}")
             for i in range(self._compute_threads)
@@ -97,7 +97,7 @@ class DrivenRuntime:
             self._threads.append(thread)
             thread.start()
         logger.info(
-            "Driven runtime: %d committed threads (1 io, 1 sync, %d compute)",
+            "Driven runtime: %d committed threads (1 io, 1 collection, %d compute)",
             len(self._threads),
             self._compute_threads,
         )

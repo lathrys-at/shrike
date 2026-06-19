@@ -63,7 +63,7 @@ Three structural facts, re-read under the assumption:
    `drive_compute`. So intra-op parallelism = *decompose the op into compute jobs and
    `try_join` them*, not *spawn more tasks*.
 
-2. **The collection actor (`drive_sync`, one thread, forced by anki's single-writer
+2. **The collection actor (`drive_collection`, one thread, forced by anki's single-writer
    lock) serializes all collection access.** This is the floor on the read phase of
    every bulk op. It is acceptable for serialization *between* ops (rare), but it is
    the main obstacle to parallelizing the *interior* of one op (the 100k read can't
@@ -106,7 +106,7 @@ the *sole writer* of the vector index, the derived store, and the watermark. Put
 ```
 collection write (fast)          ingest actor (single consumer)
   commit to anki @ col.mod V  ─▶  drain a batch ─▶ batched re-read note content
-  enqueue {ids, V, kind}          (drive_sync)
+  enqueue {ids, V, kind}          (drive_collection)
   return immediately           ─▶ embed batch (drive_compute ×N)
                                ─▶ atomic per-note index add
                                ─▶ derived ingest (one txn)
@@ -193,9 +193,9 @@ path assumes synchronous visibility — neighbors excludes the new notes, and th
 calibration sampler moves to the search path (Theme J).
 
 **No new deadlock (stated against the actual invariant).** The leaf-invariant
-(`runtime.rs:52`) is specifically that a `drive_sync`/`drive_compute` *pool job* must
+(`runtime.rs:52`) is specifically that a `drive_collection`/`drive_compute` *pool job* must
 not enqueue-and-await further pool work. The ingest actor runs its orchestration on
-`drive_io` (async) and awaits its collection reads (`drive_sync`) and embeds
+`drive_io` (async) and awaits its collection reads (`drive_collection`) and embeds
 (`drive_compute`) as leaves — the existing read→compute→write pattern — so it does not
 violate it. Add the actor to the set the debug tripwire and the shutdown reasoning
 cover.
@@ -237,7 +237,7 @@ bulk, and they are written as **serial phases on parallel-capable hardware**.
 pools concurrently**, with the CPU stage fanned across `drive_compute`:
 
 ```
-read chunk k        (drive_sync)        ─┐
+read chunk k        (drive_collection)        ─┐
    embed chunk k    (drive_compute ×N)   ├─ overlapped: read(k+1) ‖ embed(k) ‖ add(k-1)
       index add k   (drive_io/engine)   ─┘
 ```
@@ -245,7 +245,7 @@ read chunk k        (drive_sync)        ─┐
 - **Pipeline the phases — the genuinely new win.** The per-batch embed is *already*
   fanned (`try_join` over text/ocr/image, `index_orchestrator.rs:1165`); the new
   latency win is **cross-chunk pipelining** (read(k+1) ‖ embed(k) ‖ add(k−1)), bounded
-  by the single `drive_sync` read thread (no read overlap without Theme F) and the
+  by the single `drive_collection` read thread (no read overlap without Theme F) and the
   FTS5 single-writer floor. Scope the claim accordingly: pipelining stages, not
   re-fanning an already-fanned embed.
 - **One read pass feeds two consumers at boot — for the content read.** The derived
@@ -378,7 +378,7 @@ facade's *read* paths and `/status` state machine need once they do.
 
 ## Theme F — Read-only collection path: parallelize the read phase of one op (spike)
 
-**Problem.** The single `drive_sync` actor serializes *all* collection access. Under
+**Problem.** The single `drive_collection` actor serializes *all* collection access. Under
 the assumption this is fine *between* ops (rare overlap), but it is the hard floor on
 the **read phase of one bulk op** — the 100k boot read cannot overlap itself, and it
 is often the longest stage in Theme B's pipeline.
@@ -521,7 +521,7 @@ This is the feedback loop that makes every efficiency claim above verifiable at 
 
 **#840** removes the transitional `RuntimeMode::Default` now that the server (#834)
 and cabi (#835) run on the driven `current_thread` runtime. It halves the dispatch
-reasoning (one `dispatch_sync`/`dispatch_compute` path) and is worth landing first —
+reasoning (one `dispatch_collection`/`dispatch_compute` path) and is worth landing first —
 every proposal here is easier against a single runtime model.
 
 ---

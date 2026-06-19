@@ -3,15 +3,16 @@
 //! shrike-cabi spawns no threads — it exposes the kernel's blocking drive
 //! entries, and the HOST commits + joins the OS threads. Each lifecycle test
 //! plays that host: it installs the driven runtime, parks the committed threads
-//! in `shrike_drive_io`/`shrike_drive_sync`/`shrike_drive_compute`, runs its
+//! in `shrike_drive_io`/`shrike_drive_collection`/`shrike_drive_compute`, runs its
 //! flow, calls `shrike_runtime_shutdown`, and joins its own threads — the exact
 //! contract a Swift/Kotlin app follows.
 //!
 //! The startup ORDERING is load-bearing (it is itself under test): the IO thread
 //! must enter the runtime's `block_on` FIRST so it owns tokio's IO/timer
 //! drivers. [`Host::start`] enforces it with `shrike_runtime_probe` — a barrier
-//! that blocks until the IO thread is driving — before parking the sync/compute
-//! threads. A regression that parks them too early (or drops the probe) races
+//! that blocks until the IO thread is driving — before parking the
+//! collection/compute threads. A regression that parks them too early (or drops
+//! the probe) races
 //! driver ownership and starves timers/IO.
 //!
 //! Lives in `tests/host/mod.rs` (a subdirectory module, NOT `tests/host.rs`) so
@@ -26,7 +27,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use shrike_cabi::{
-    shrike_drive_compute, shrike_drive_io, shrike_drive_sync, shrike_runtime_init,
+    shrike_drive_collection, shrike_drive_compute, shrike_drive_io, shrike_runtime_init,
     shrike_runtime_probe, shrike_runtime_shutdown,
 };
 
@@ -48,8 +49,9 @@ pub struct Host {
 impl Host {
     /// Install the driven runtime and park the committed N + 2 threads in the C
     /// drive entries, honoring the startup barrier: spawn the IO thread, PROBE
-    /// until it is driving, then spawn sync + N compute. Asserts the driven
-    /// install and the probe so a misuse fails loudly rather than hanging later.
+    /// until it is driving, then spawn the collection thread + N compute. Asserts
+    /// the driven install and the probe so a misuse fails loudly rather than
+    /// hanging later.
     pub fn start() -> Self {
         assert!(
             shrike_runtime_init(),
@@ -66,8 +68,9 @@ impl Host {
             shrike_runtime_probe(),
             "shrike_runtime_probe confirms the IO thread is driving before the rest park"
         );
-        // 3. Now sync + N compute — they hook into the IO thread's drivers.
-        threads.push(spawn("shrike-sync", shrike_drive_sync));
+        // 3. Now the collection thread + N compute — they hook into the IO
+        //    thread's drivers.
+        threads.push(spawn("shrike-collection", shrike_drive_collection));
         for i in 0..COMPUTE_THREADS {
             threads.push(spawn(&format!("shrike-work-{i}"), shrike_drive_compute));
         }

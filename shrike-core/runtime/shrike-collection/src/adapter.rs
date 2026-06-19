@@ -1089,12 +1089,13 @@ fn decode_backend_error(bytes: &[u8]) -> NativeError {
 // that: not one of the runtime-spinning service indices appears in the
 // dispatched set.
 //
-// Once sync support lands (waking these services), the invariant the kernel
-// guarantees is NOT "one runtime" but "sync ops never run on a runtime worker
-// thread". anki's sync paths `block_on`, which panics from any runtime-worker
-// thread regardless of which runtime owns it — so the fix is the
-// `spawn_blocking` dispatch discipline in `shrike_kernel::runtime` (pinned by
-// its `sync_dispatch_pin` panic-repro test), NOT a runtime-handle-injection
+// Once client sync support lands (waking these services), the invariant the
+// kernel guarantees is NOT "one runtime" but "collection ops never run on a
+// runtime worker thread". anki's sync paths `block_on`, which panics from any
+// runtime-worker thread regardless of which runtime owns it — so the fix is the
+// collection-dispatch discipline in `shrike_kernel::runtime` (every collection
+// op runs on the non-runtime `drive_collection` thread; pinned by its
+// `collection_dispatch_pin` panic-repro test), NOT a runtime-handle-injection
 // patch to anki (rejected: the anki patch mechanism is Bazel-only, so it would
 // fork sync behaviour across build lanes — see docs/dev/decisions.md).
 // (Backend dispatcher, tag 25.09.4: sync=41, ankiweb=45, ankihub=47 — none may

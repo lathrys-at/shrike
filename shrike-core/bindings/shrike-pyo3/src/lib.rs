@@ -250,13 +250,14 @@ fn drive_io(py: Python<'_>) -> PyResult<()> {
         .map_err(to_py_err)
 }
 
-/// Park this thread as the serialized collection / anki-sync execution thread
-/// until the pools are shut down. GIL released; a non-runtime context, so anki's
-/// own `block_on` is legal here.
+/// Park this thread as the serialized collection execution thread until the
+/// pools are shut down — every anki-collection op runs here. GIL released; a
+/// non-runtime context, so anki's own `block_on` is legal here.
 #[cfg(feature = "anki-core")]
 #[pyfunction]
-fn drive_sync(py: Python<'_>) -> PyResult<()> {
-    py.detach(shrike_kernel::drive_sync).map_err(to_py_err)
+fn drive_collection(py: Python<'_>) -> PyResult<()> {
+    py.detach(shrike_kernel::drive_collection)
+        .map_err(to_py_err)
 }
 
 /// Park this thread as one of the N CPU-compute workers until the pools are shut
@@ -1165,7 +1166,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(decode_media_b64, m)?)?;
         m.add_function(wrap_pyfunction!(init_driven_runtime, m)?)?;
         m.add_function(wrap_pyfunction!(drive_io, m)?)?;
-        m.add_function(wrap_pyfunction!(drive_sync, m)?)?;
+        m.add_function(wrap_pyfunction!(drive_collection, m)?)?;
         m.add_function(wrap_pyfunction!(drive_compute, m)?)?;
         m.add_function(wrap_pyfunction!(drive_pools_shutdown, m)?)?;
         m.add_function(wrap_pyfunction!(runtime_probe, m)?)?;

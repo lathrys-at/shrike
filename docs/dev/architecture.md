@@ -124,7 +124,7 @@ The N + 2 committed threads come from three drive entries:
   dispatch, the debounced saver's timers, every spawned op. The first `block_on`
   caller takes ownership of the drivers and the rest hook into it, so this thread
   must win that race (see the startup barrier below).
-- **`drive_sync` ×1** is the `SerializedCollection` actor's execution thread —
+- **`drive_collection` ×1** is the `SerializedCollection` actor's execution thread —
   serialized anki / collection (SQLite) work and the anki client-sync
   release-run-reopen. One thread is a consequence of anki's single-writer
   collection, not a tuning choice.
@@ -136,7 +136,7 @@ The N + 2 committed threads come from three drive entries:
 A few rules keep it correct:
 
 - **The collection is a task-actor.** One spawned task owns the collection and
-  processes jobs from an mpsc queue in order, its work executing on `drive_sync`.
+  processes jobs from an mpsc queue in order, its work executing on `drive_collection`.
   Serialization comes from the task's sequential loop, not from thread affinity —
   there is no `block_in_place`.
 - **The index/derived stores have one writer too.** A second persistent task — the
@@ -166,30 +166,30 @@ A few rules keep it correct:
   first `block_on` caller, which MUST be `drive_io`. The harness spawns `drive_io`
   first, then runs `runtime_probe` — schedule a trivial executor-only op and block
   until it completes, proving the IO thread owns the drivers — *before* spawning the
-  `drive_sync`/`drive_compute` threads. Without it a leaf could win ownership and
+  `drive_collection`/`drive_compute` threads. Without it a leaf could win ownership and
   timers/IO would advance only while that leaf parks in `recv`.
 - **Invariant: a sync op never runs on a runtime worker thread.** Anki's sync code
   paths call `block_on`, which panics from inside a runtime worker. Every
-  kernel-side sync op routes through `dispatch_sync`, which enqueues onto the
-  non-runtime `drive_sync` thread — so anki's `block_on` is legal there *by
+  kernel-side sync op routes through `dispatch_collection`, which enqueues onto the
+  non-runtime `drive_collection` thread — so anki's `block_on` is legal there *by
   construction*. The invariant is structural, not a dispatch discipline a caller
-  must remember. The `sync_dispatch_pin` test in `shrike_kernel::runtime` pins it.
+  must remember. The `collection_dispatch_pin` test in `shrike_kernel::runtime` pins it.
   (Anki keeps its own internal runtime, cold today because Shrike dispatches none of
   its sync/AnkiWeb services; client sync will wake it, at which point two runtimes
   coexist and this rule is what keeps sync safe.)
 - **Deadlock leaf-invariant.** Every pool job is a leaf: an enqueued
-  `drive_sync`/`drive_compute` job never enqueues-and-awaits further pool work. The
+  `drive_collection`/`drive_compute` job never enqueues-and-awaits further pool work. The
   read→compute→write orchestration fans out and awaits on the async side
   (`drive_io`), and compute is handed its inputs after the actor reads, so a fixed
   pool can't exhaust itself. A debug-build thread-local tripwire asserts it.
 
 **Per-binding thread provisioning.** The binding *exposes* the drive entries; the
 harness *above* it owns the threads. The server's `driven_runtime.py` spawns N + 2
-`threading.Thread`s into the GIL-releasing pyo3 `drive_io`/`drive_sync`/`drive_compute`
+`threading.Thread`s into the GIL-releasing pyo3 `drive_io`/`drive_collection`/`drive_compute`
 entries — GIL-released for each thread's life, so native compute runs with real
 parallelism (the `PyEmbedder`/`PyRecognizer` capture seam re-acquires the GIL only on
 the test/custom path). `shrike-cabi` exposes blocking C entries
-(`shrike_drive_io`/`shrike_drive_sync`/`shrike_drive_compute` + `shrike_runtime_probe`)
+(`shrike_drive_io`/`shrike_drive_collection`/`shrike_drive_compute` + `shrike_runtime_probe`)
 and the native Swift/Kotlin host spawns and joins the OS threads; cabi spawns nothing,
 because it *is* shrike-core. Shutdown is host-shaped: the server drains its ops through
 the bridge and then closes the pools, while cabi folds a bounded in-flight drain into

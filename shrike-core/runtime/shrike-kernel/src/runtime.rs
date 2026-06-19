@@ -8,8 +8,9 @@
 //! and spawns **no threads of its own**: the harness commits **N + 2** threads
 //! and drives every one. [`drive_io`] (×1) owns + drives tokio's IO/timer drivers
 //! and the async executor (actor dispatch, the debounced saver's timers);
-//! [`drive_sync`] (×1) is the serialized collection / anki-sync execution thread,
-//! a consequence of anki's single-writer collection; [`drive_compute`] (×N) runs
+//! [`drive_collection`] (×1) is the serialized collection execution thread —
+//! every anki-collection op runs here, a consequence of anki's single-writer
+//! collection; [`drive_compute`] (×N) runs
 //! CPU-bound engine compute + blocking-fs leaves — the only place real
 //! parallelism lives, so the overlap property is "N ≥ 2". Submission is either
 //! the asyncio bridge (the server) or [`submit_blocking`] (a request thread
@@ -19,30 +20,32 @@
 //! op: there is no lazy fallback, so [`handle`]/[`block_on`]/dispatch from an
 //! uninstalled runtime panics (a setup error — the harness installs first).
 //!
-//! # The sync-dispatch invariant
+//! # The collection-dispatch invariant
 //!
 //! anki retains its own runtime for client sync, so two runtimes can live in the
 //! process. The invariant the kernel guarantees is not "one runtime" but **"a
-//! sync op never executes on a runtime worker thread"**: anki's sync paths call
-//! `block_on`, and [`tokio::runtime::Handle::block_on`] PANICS from inside any
-//! runtime context (a worker thread is such a context — see the panic-repro test
-//! below). `dispatch_sync` enqueues onto the [`drive_sync`] thread, a plain OS
-//! thread (never a runtime context) — so anki's `block_on` is legal there by
-//! construction. The [`SerializedCollection`](crate::SerializedCollection) actor
-//! routes every job through `dispatch_sync`, so a sync anki call can never land
-//! on a runtime worker. The `sync_dispatch_pin` test below pins this
-//! structurally. `docs/dev/decisions.md` records why a runtime handle-injection
-//! patch to anki was rejected in favour of this discipline.
+//! collection op never executes on a runtime worker thread"**: anki's sync paths
+//! call `block_on`, and [`tokio::runtime::Handle::block_on`] PANICS from inside
+//! any runtime context (a worker thread is such a context — see the panic-repro
+//! test below). `dispatch_collection` enqueues onto the [`drive_collection`]
+//! thread, a plain OS thread (never a runtime context) — so anki's `block_on` is
+//! legal there by construction. The
+//! [`SerializedCollection`](crate::SerializedCollection) actor routes every job
+//! through `dispatch_collection`, so a collection op (including anki's sync
+//! `block_on` when client sync lands) can never run on a runtime worker. The
+//! `collection_dispatch_pin` test below pins this structurally.
+//! `docs/dev/decisions.md` records why a runtime handle-injection patch to anki
+//! was rejected in favour of this discipline.
 //!
 //! # The deadlock leaf-invariant
 //!
-//! Every pool job ([`drive_sync`] or [`drive_compute`]) is a **leaf**: the
+//! Every pool job ([`drive_collection`] or [`drive_compute`]) is a **leaf**: the
 //! read→compute→write orchestration fans out and awaits on the async side
 //! ([`drive_io`]), and a pool job never enqueues-and-awaits further pool work
 //! (the "discover ids → one batched read → compute" pattern keeps compute
 //! collection-free), so a fixed pool can't exhaust itself. A debug-build tripwire
 //! (a thread-local set inside a running pool job) asserts it — re-entering
-//! `dispatch_sync`/`dispatch_compute` from within a pool job is the deadlock
+//! `dispatch_collection`/`dispatch_compute` from within a pool job is the deadlock
 //! shape and fires the assert.
 
 use std::cell::Cell;
@@ -61,22 +64,22 @@ static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 type PoolJob = Box<dyn FnOnce() + Send + 'static>;
 
 /// The work queues + their receivers, installed by [`init_driven_runtime`]. The
-/// sync receiver is single-consumer (one [`drive_sync`] thread); the compute
+/// collection receiver is single-consumer (one [`drive_collection`] thread); the compute
 /// receiver is shared across the N [`drive_compute`] threads behind a mutex
 /// (each `recv` hands a job to one waiter). Present once the harness has
 /// installed the driven runtime.
 struct DrivenPools {
     /// The senders are `Option` so [`shutdown_driven_pools`] can `.take()` them:
-    /// dropping every sender closes the queue, so the [`drive_sync`] /
+    /// dropping every sender closes the queue, so the [`drive_collection`] /
     /// [`drive_compute`] parkers see `recv() == None` and return for the harness
     /// to join (the same end-the-loop-by-dropping-the-sender shape the
     /// collection actor uses). Held under a mutex because the static is shared
     /// and the take races concurrent enqueues. A `None` here is treated like a
     /// gone pool — the awaiting future sees the closed receiver.
-    sync_tx: Mutex<Option<mpsc::UnboundedSender<PoolJob>>>,
+    collection_tx: Mutex<Option<mpsc::UnboundedSender<PoolJob>>>,
     compute_tx: Mutex<Option<mpsc::UnboundedSender<PoolJob>>>,
-    /// Taken once by the [`drive_sync`] thread.
-    sync_rx: Mutex<Option<mpsc::UnboundedReceiver<PoolJob>>>,
+    /// Taken once by the [`drive_collection`] thread.
+    collection_rx: Mutex<Option<mpsc::UnboundedReceiver<PoolJob>>>,
     /// Shared by every [`drive_compute`] thread (cloned Arc; the mutex is the
     /// dequeue lock — held only to pop, never across a running job).
     compute_rx: Arc<Mutex<mpsc::UnboundedReceiver<PoolJob>>>,
@@ -87,12 +90,12 @@ struct DrivenPools {
 }
 
 impl DrivenPools {
-    /// A live clone of the sync sender, or `None` once
+    /// A live clone of the collection sender, or `None` once
     /// [`shutdown_driven_pools`] has taken it.
-    fn sync_sender(&self) -> Option<mpsc::UnboundedSender<PoolJob>> {
-        self.sync_tx
+    fn collection_sender(&self) -> Option<mpsc::UnboundedSender<PoolJob>> {
+        self.collection_tx
             .lock()
-            .expect("driven sync sender poisoned")
+            .expect("driven collection sender poisoned")
             .clone()
     }
 
@@ -108,7 +111,7 @@ impl DrivenPools {
 static DRIVEN: OnceLock<DrivenPools> = OnceLock::new();
 
 thread_local! {
-    /// Set while a [`drive_sync`]/[`drive_compute`] job runs, so the dispatch
+    /// Set while a [`drive_collection`]/[`drive_compute`] job runs, so the dispatch
     /// helpers can assert the leaf-invariant (a pool job must never enqueue-and-
     /// await further pool work). Drives a `debug_assert` only.
     static IN_POOL_JOB: Cell<bool> = const { Cell::new(false) };
@@ -124,13 +127,13 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 }
 
 /// Install a `current_thread` runtime: the harness parks threads in
-/// [`drive_io`]/[`drive_sync`]/[`drive_compute`] to provide every thread the
-/// kernel uses; shrike-core spawns none of its own. The `dispatch_sync` /
+/// [`drive_io`]/[`drive_collection`]/[`drive_compute`] to provide every thread the
+/// kernel uses; shrike-core spawns none of its own. The `dispatch_collection` /
 /// `dispatch_compute` helpers enqueue onto the driven queues.
 ///
 /// The supplied runtime MUST be a `current_thread` runtime — one async thread
 /// the harness drives via [`drive_io`]. The driven queues are created here, so a
-/// job submitted before [`drive_sync`] / [`drive_compute`] is parked simply
+/// job submitted before [`drive_collection`] / [`drive_compute`] is parked simply
 /// waits in the channel.
 ///
 /// # Errors
@@ -142,12 +145,12 @@ pub fn init_driven_runtime(
 ) -> Result<(), tokio::runtime::Runtime> {
     RUNTIME.set(runtime)?;
     // We won the runtime install, so the pools below are uncontended.
-    let (sync_tx, sync_rx) = mpsc::unbounded_channel::<PoolJob>();
+    let (collection_tx, collection_rx) = mpsc::unbounded_channel::<PoolJob>();
     let (compute_tx, compute_rx) = mpsc::unbounded_channel::<PoolJob>();
     let _ = DRIVEN.set(DrivenPools {
-        sync_tx: Mutex::new(Some(sync_tx)),
+        collection_tx: Mutex::new(Some(collection_tx)),
         compute_tx: Mutex::new(Some(compute_tx)),
-        sync_rx: Mutex::new(Some(sync_rx)),
+        collection_rx: Mutex::new(Some(collection_rx)),
         compute_rx: Arc::new(Mutex::new(compute_rx)),
         shutdown: Notify::new(),
     });
@@ -173,8 +176,8 @@ pub(crate) fn handle() -> &'static tokio::runtime::Handle {
 /// Panics if the driven runtime is not installed (see [`init_driven_runtime`]).
 /// Panics if called from inside the runtime — a runtime worker thread is a
 /// runtime context, and `tokio`'s nested-`block_on` guard refuses there. This
-/// is the same guard the module's sync-dispatch discipline relies on (pinned by
-/// the `sync_dispatch_pin` test).
+/// is the same guard the module's collection-dispatch discipline relies on
+/// (pinned by the `collection_dispatch_pin` test).
 pub fn block_on<F: Future>(future: F) -> F::Output {
     runtime().block_on(future)
 }
@@ -184,7 +187,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// ownership of tokio's IO + timer drivers and the async executor; every spawned
 /// task (the collection actor's dispatch loop, the debounced saver's timer, the
 /// tag refresher) is polled here, and timers fire. Other
-/// [`drive_sync`]/[`drive_compute`] threads do not own the drivers — they hook
+/// [`drive_collection`]/[`drive_compute`] threads do not own the drivers — they hook
 /// into this one.
 ///
 /// `until` is the harness's shutdown signal (resolved once shutdown begins and
@@ -217,33 +220,37 @@ pub fn drive_io_until_shutdown() -> NativeResult<()> {
     Ok(())
 }
 
-/// **The serialized collection / anki-sync execution thread.** A plain OS thread
-/// blocking on the sync work queue and running each job to completion. One thread
-/// is a *consequence* of anki's single-writer collection (reads and writes
-/// serialize; anki forbids concurrent access), not a tuning choice. Because this
-/// thread is never inside the kernel runtime context, anki's own `block_on` is
-/// legal here — the structural form of the sync-never-on-a-runtime-worker
-/// invariant.
+/// **The serialized collection execution thread.** A plain OS thread blocking on
+/// the collection work queue and running each job to completion — every
+/// anki-collection op (read and write, including the journal fsync) runs here.
+/// One thread is a *consequence* of anki's single-writer collection (reads and
+/// writes serialize; anki forbids concurrent access), not a tuning choice.
+/// Because this thread is never inside the kernel runtime context, anki's own
+/// `block_on` is legal here — the structural form of the
+/// collection-never-on-a-runtime-worker invariant.
 ///
 /// Parks until the queue is closed (every sender dropped — i.e. harness
 /// shutdown), then returns so the harness can join it.
 ///
 /// # Errors
 ///
-/// Returns an error if the driven runtime is not installed, or if the sync queue
-/// was already claimed by a prior `drive_sync` (exactly one thread drives it).
+/// Returns an error if the driven runtime is not installed, or if the collection
+/// queue was already claimed by a prior `drive_collection` (exactly one thread
+/// drives it).
 ///
 /// # Panics
 ///
-/// Panics if the sync-receiver mutex is poisoned (a prior holder panicked).
-pub fn drive_sync() -> NativeResult<()> {
+/// Panics if the collection-receiver mutex is poisoned (a prior holder panicked).
+pub fn drive_collection() -> NativeResult<()> {
     let pools = DRIVEN.get().ok_or_else(driven_missing)?;
     let mut rx = pools
-        .sync_rx
+        .collection_rx
         .lock()
-        .expect("driven sync receiver poisoned")
+        .expect("driven collection receiver poisoned")
         .take()
-        .ok_or_else(|| NativeError::internal("drive_sync was already claimed by another thread"))?;
+        .ok_or_else(|| {
+            NativeError::internal("drive_collection was already claimed by another thread")
+        })?;
     while let Some(job) = rx.blocking_recv() {
         job();
     }
@@ -289,7 +296,7 @@ pub fn drive_compute() -> NativeResult<()> {
 }
 
 /// **Signal every committed thread to return so the harness can join them.**
-/// Drops the pool senders (closing the [`drive_sync`] / [`drive_compute`] queues,
+/// Drops the pool senders (closing the [`drive_collection`] / [`drive_compute`] queues,
 /// so their `recv` yields `None` and they return) and trips the
 /// [`drive_io_until_shutdown`] signal. Call it once, AFTER kernel work has
 /// quiesced (the collection actor drained), so no in-flight enqueue is holding a
@@ -310,9 +317,9 @@ pub fn shutdown_driven_pools() {
     // closes immediately.
     drop(
         pools
-            .sync_tx
+            .collection_tx
             .lock()
-            .expect("driven sync sender poisoned")
+            .expect("driven collection sender poisoned")
             .take(),
     );
     drop(
@@ -389,11 +396,11 @@ pub fn spawn_op<T: Send + 'static>(
 
 // ── dispatch: route blocking work onto the committed pools ───────────────────
 
-/// Run a unit of **anki-collection / sync** blocking work, returning an eagerly-
-/// scheduled future of its result. The collection actor and every kernel-side
-/// sync op route through here so a sync `block_on` can never land on a runtime
-/// worker: the work enqueues onto the [`drive_sync`] thread (a non-runtime
-/// context — anki `block_on` legal by construction).
+/// Run a unit of **anki-collection** blocking work, returning an eagerly-
+/// scheduled future of its result. The collection actor routes every collection
+/// op through here so anki's sync `block_on` (when client sync lands) can never
+/// land on a runtime worker: the work enqueues onto the [`drive_collection`]
+/// thread (a non-runtime context — anki `block_on` legal by construction).
 ///
 /// **Eager by contract** (like the engine `Blocking` adapter): the work is
 /// scheduled inside this call, before the returned future is first polled.
@@ -402,14 +409,14 @@ pub fn spawn_op<T: Send + 'static>(
 ///
 /// The future yields the work's own `NativeResult`, or an internal error if the
 /// executing thread/pool vanished without producing one.
-pub(crate) fn dispatch_sync<T: Send + 'static>(
+pub(crate) fn dispatch_collection<T: Send + 'static>(
     work: impl FnOnce() -> NativeResult<T> + Send + 'static,
 ) -> impl Future<Output = NativeResult<T>> + Send + 'static {
     debug_assert!(
         !IN_POOL_JOB.with(Cell::get),
-        "leaf-invariant: a pool job must not enqueue-and-await further pool work (dispatch_sync)"
+        "leaf-invariant: a pool job must not enqueue-and-await further pool work (dispatch_collection)"
     );
-    enqueue(QueueKind::Sync, work)
+    enqueue(QueueKind::Collection, work)
 }
 
 /// Run a unit of **CPU-bound compute / blocking-fs** work, returning an eagerly-
@@ -470,11 +477,11 @@ pub fn submit_compute(job: Box<dyn FnOnce() + Send + 'static>) {
 /// Which driven queue an enqueue targets.
 #[derive(Clone, Copy)]
 enum QueueKind {
-    Sync,
+    Collection,
     Compute,
 }
 
-/// The shared body of `dispatch_sync`/`dispatch_compute`: enqueue onto the
+/// The shared body of `dispatch_collection`/`dispatch_compute`: enqueue onto the
 /// targeted pool and return an eager future of the result. Boxed so the two
 /// callers unify to one return type.
 fn enqueue<T: Send + 'static>(
@@ -489,7 +496,7 @@ fn enqueue<T: Send + 'static>(
     // installed), the receiver closes empty → the internal error below.
     if let Some(pools) = DRIVEN.get() {
         let sender = match kind {
-            QueueKind::Sync => pools.sync_sender(),
+            QueueKind::Collection => pools.collection_sender(),
             QueueKind::Compute => pools.compute_sender(),
         };
         if let Some(sender) = sender {
@@ -520,7 +527,7 @@ pub fn is_driven() -> bool {
 /// - **Panic containment**: `work` is run under `catch_unwind` and a caught
 ///   panic becomes `Err(Internal)` rather than unwinding out. The pool runs jobs
 ///   on a long-lived OS thread with no per-job isolation, so an uncaught panic
-///   would KILL that thread — and the single `drive_sync` thread dying would
+///   would KILL that thread — and the single `drive_collection` thread dying would
 ///   wedge every future collection op (its receiver was taken with no
 ///   replacement). Catching here keeps "a panic loses only that one job, the
 ///   pool survives, the caller gets a clean Err".
@@ -569,12 +576,12 @@ fn driven_missing() -> NativeError {
 /// committed threads outlive any kernel, exactly as in production):
 ///
 /// - [`run`] installs a `current_thread` runtime and parks **1 `drive_io` + N
-///   `drive_compute`** threads (no sync), then runs a future via the submit +
-///   completion-channel shape — the threaded-host submission path.
-/// - [`run_with_sync`] adds the **`drive_sync`** thread for a test that opens a
-///   collection / exercises anki ops (the serialized-collection actor routes
-///   through `dispatch_sync`). Most kernel tests want this; a genuinely
-///   sync-free test uses [`run`].
+///   `drive_compute`** threads (no collection thread), then runs a future via the
+///   submit + completion-channel shape — the threaded-host submission path.
+/// - [`run_with_collection`] adds the **`drive_collection`** thread for a test
+///   that opens a collection / exercises anki ops (the serialized-collection
+///   actor routes through `dispatch_collection`). Most kernel tests want this; a
+///   test that touches no collection uses [`run`].
 ///
 /// The startup barrier is honored (`drive_io` first, [`spawn_op`]-probe, then the
 /// rest), so the IO thread owns tokio's drivers before any other thread parks.
@@ -590,10 +597,11 @@ pub mod testing {
     const COMPUTE_THREADS: usize = 2;
 
     /// One-time install + IO/compute thread spawn (the barrier-honored core,
-    /// shared by [`run`] and [`run_with_sync`]).
+    /// shared by [`run`] and [`run_with_collection`]).
     static STARTED: OnceLock<()> = OnceLock::new();
-    /// One-time `drive_sync` spawn, lazily added the first time a test wants sync.
-    static SYNC_STARTED: OnceLock<()> = OnceLock::new();
+    /// One-time `drive_collection` spawn, lazily added the first time a test
+    /// opens a collection.
+    static COLLECTION_STARTED: OnceLock<()> = OnceLock::new();
 
     /// Park a committed driver thread in `entry`, naming it per the kernel's
     /// thread-name scheme.
@@ -641,14 +649,14 @@ pub mod testing {
         });
     }
 
-    /// Add the `drive_sync` thread, once per process. The sync queue already
-    /// exists (created by `init_driven_runtime`), so parking the thread late is
-    /// fine — jobs enqueued before it parks simply wait.
-    fn ensure_sync() {
+    /// Add the `drive_collection` thread, once per process. The collection queue
+    /// already exists (created by `init_driven_runtime`), so parking the thread
+    /// late is fine — jobs enqueued before it parks simply wait.
+    fn ensure_collection() {
         ensure_started();
-        SYNC_STARTED.get_or_init(|| {
-            spawn("shrike-sync", || {
-                let _ = drive_sync();
+        COLLECTION_STARTED.get_or_init(|| {
+            spawn("shrike-collection", || {
+                let _ = drive_collection();
             });
         });
     }
@@ -674,45 +682,49 @@ pub mod testing {
     }
 
     /// Run a kernel future on the driven runtime with **1 io + N compute**
-    /// threads (no sync). For a test that does not open a collection.
+    /// threads (no collection thread). For a test that does not open a collection.
     pub fn run<T: Send + 'static>(fut: impl Future<Output = T> + Send + 'static) -> T {
         ensure_started();
         submit_and_wait(fut)
     }
 
-    /// Run a kernel future on the driven runtime with **1 io + 1 sync + N
+    /// Run a kernel future on the driven runtime with **1 io + 1 collection + N
     /// compute** threads — for a test that opens a collection / exercises anki
-    /// ops (the serialized-collection actor routes through the sync thread).
-    pub fn run_with_sync<T: Send + 'static>(fut: impl Future<Output = T> + Send + 'static) -> T {
-        ensure_sync();
+    /// ops (the serialized-collection actor routes through the collection thread).
+    pub fn run_with_collection<T: Send + 'static>(
+        fut: impl Future<Output = T> + Send + 'static,
+    ) -> T {
+        ensure_collection();
         submit_and_wait(fut)
     }
 }
 
 #[cfg(test)]
-mod sync_dispatch_pin {
-    //! The acceptance gate: pin the sync-op dispatch path structurally, not by
+mod collection_dispatch_pin {
+    //! The acceptance gate: pin the collection-dispatch path structurally, not by
     //! luck.
     //!
     //! anki keeps its own runtime for client sync, so two runtimes will live in
-    //! the process; the invariant the kernel guarantees is **"a sync op that may
-    //! `block_on` never executes on a runtime worker thread"**.
+    //! the process; the invariant the kernel guarantees is **"a collection op (and
+    //! anki's sync `block_on`, when client sync lands) never executes on a runtime
+    //! worker thread"**.
     //!
     //! - **Half 1** demonstrates the hazard is real: `Handle::block_on` PANICS
-    //!   on a runtime worker thread (the way a sync anki call would land if
+    //!   on a runtime worker thread (the way anki's sync `block_on` would land if
     //!   dispatched *directly* from a `SerializedCollection` job inline on a
     //!   worker).
     //! - **Half 2** demonstrates the mandated dispatch site is safe: the SAME
-    //!   call on a plain OS thread — the structural form of the [`drive_sync`]
-    //!   dispatch target, never a runtime context — succeeds and returns the
-    //!   sentinel.
+    //!   call on a plain OS thread — the structural form of the
+    //!   [`drive_collection`] dispatch target, never a runtime context — succeeds
+    //!   and returns the sentinel.
     //!
     //! The only variable between the halves is *which thread* runs `block_on`, so
-    //! a regression that lets a sync call run on a runtime worker flips Half 2
-    //! from pass to panic. The full driven-mode form of the invariant (sync runs
-    //! on the committed `drive_sync` thread) is pinned end-to-end by the
-    //! `driven_mode.rs` integration binary. Self-contained here: a locally-built
-    //! `current_thread` runtime so the process-global seam is untouched.
+    //! a regression that lets a collection op run on a runtime worker flips Half 2
+    //! from pass to panic. The full driven-mode form of the invariant (collection
+    //! work runs on the committed `drive_collection` thread) is pinned end-to-end
+    //! by the `driven_mode.rs` integration binary. Self-contained here: a
+    //! locally-built `current_thread` runtime so the process-global seam is
+    //! untouched.
 
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -720,7 +732,7 @@ mod sync_dispatch_pin {
     /// exactly the shape of anki's sync service paths, minus the anki
     /// dependency. Returns a sentinel so the success half can assert the call
     /// actually ran to completion (not merely that it didn't panic).
-    fn sync_call_that_blocks_on(handle: &tokio::runtime::Handle) -> u64 {
+    fn collection_call_that_blocks_on(handle: &tokio::runtime::Handle) -> u64 {
         handle.block_on(async { 0x5031_u64 })
     }
 
@@ -741,7 +753,7 @@ mod sync_dispatch_pin {
         // thread survives for half 2.
         let inner = handle.clone();
         let worker_result = rt.block_on(async move {
-            catch_unwind(AssertUnwindSafe(|| sync_call_that_blocks_on(&inner)))
+            catch_unwind(AssertUnwindSafe(|| collection_call_that_blocks_on(&inner)))
         });
         assert!(
             worker_result.is_err(),
@@ -750,10 +762,10 @@ mod sync_dispatch_pin {
         );
 
         // ── Half 2: the SAME call on a plain OS thread — the structural form of
-        // the `drive_sync` dispatch target, never a runtime context — succeeds
+        // the `drive_collection` dispatch target, never a runtime context — succeeds
         // and returns the sentinel.
         let pooled = handle.clone();
-        let value = std::thread::spawn(move || sync_call_that_blocks_on(&pooled))
+        let value = std::thread::spawn(move || collection_call_that_blocks_on(&pooled))
             .join()
             .expect("the plain thread must not fail");
         assert_eq!(

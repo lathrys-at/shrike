@@ -42,7 +42,7 @@ fn user_data() -> (*mut c_void, mpsc::Receiver<String>) {
 /// kernel's shared driven fixture must be parking the driver threads — start it
 /// here (idempotent, process-global) so every handle-opening test is driven.
 fn open(collection: &str, cache: &str) -> *mut ShrikeHandle {
-    shrike_kernel::runtime::testing::run_with_sync(async {});
+    shrike_kernel::runtime::testing::run_with_collection(async {});
     let c_col = CString::new(collection).unwrap();
     let c_cache = CString::new(cache).unwrap();
     let (ud, rx) = user_data();
@@ -162,7 +162,7 @@ fn c_abi_open_upsert_search_delete_close() {
     // SAFETY: `handle` is the live pointer from open, not yet closed.
     let kernel: Arc<Kernel> = unsafe { Arc::clone(&(*handle).kernel) };
     kernel.attach_embedder(Arc::new(HashEmbedder), None);
-    shrike_kernel::runtime::testing::run_with_sync(async move {
+    shrike_kernel::runtime::testing::run_with_collection(async move {
         kernel.reindex_if_needed().await.unwrap()
     });
 

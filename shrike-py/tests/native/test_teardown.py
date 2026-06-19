@@ -48,8 +48,8 @@ class StubBackend:
 def spawn_drivers():
     # The kernel runtime is harness-driven with no lazy default, so the
     # committed driver threads must be parked before any op. Honor the startup
-    # barrier: io first, probe until it drives, then sync + compute. Returns the
-    # threads so a test can shut down and join.
+    # barrier: io first, probe until it drives, then collection + compute. Returns
+    # the threads so a test can shut down and join.
     #
     # DAEMON threads on purpose: these pins model the UNCLEAN exit (a crash /
     # interpreter teardown WITHOUT drive_pools_shutdown). A non-daemon driver
@@ -61,8 +61,10 @@ def spawn_drivers():
     io = threading.Thread(target=shrike_native.drive_io, name="shrike-io", daemon=True)
     io.start()
     shrike_native.runtime_probe()
-    sync = threading.Thread(target=shrike_native.drive_sync, name="shrike-sync", daemon=True)
-    sync.start()
+    collection = threading.Thread(
+        target=shrike_native.drive_collection, name="shrike-collection", daemon=True
+    )
+    collection.start()
     compute = [
         threading.Thread(
             target=shrike_native.drive_compute, name=f"shrike-work-{i}", daemon=True
@@ -71,7 +73,7 @@ def spawn_drivers():
     ]
     for t in compute:
         t.start()
-    return [io, sync, *compute]
+    return [io, collection, *compute]
 
 async def open_kernel(collection_path, cache_dir):
     kernel = await shrike_native.async_kernel_open(collection_path, cache_dir)
@@ -212,7 +214,7 @@ def test_driven_runtime_boot_serve_and_clean_shutdown(tmp_path) -> None:
     cleanly — joining every committed thread before the interpreter finalizes.
 
     This is the production server's threading model end to end: install the
-    driven runtime before any op, donate one io + one sync + N compute threads
+    driven runtime before any op, donate one io + one collection + N compute threads
     (each GIL-released in its native drive loop), run a real upsert + search via
     the asyncio bridge (driven by the io thread, not tokio workers), then
     close() the kernel (draining the actor) and drive_pools_shutdown() so the

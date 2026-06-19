@@ -29,7 +29,7 @@ def fake_native(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """
     native = MagicMock()
     native.drive_io = lambda: None
-    native.drive_sync = lambda: None
+    native.drive_collection = lambda: None
     native.drive_compute = lambda: None
     native.runtime_probe = lambda: None
     monkeypatch.setattr(driven_runtime, "shrike_native", native)
@@ -42,10 +42,10 @@ def test_install_start_shutdown_spawns_and_joins(fake_native: MagicMock) -> None
 
     rt.install()
     rt.start()
-    assert len(rt._threads) == 5  # 1 io + 1 sync + 3 compute
+    assert len(rt._threads) == 5  # 1 io + 1 collection + 3 compute
     names = {t.name for t in rt._threads}
     assert "shrike-io" in names
-    assert "shrike-sync" in names
+    assert "shrike-collection" in names
     assert sum(n.startswith("shrike-work-") for n in names) == 3
 
     rt.shutdown()

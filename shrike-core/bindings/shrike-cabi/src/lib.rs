@@ -20,8 +20,8 @@
 //!   drivers and the async executor), calls [`shrike_runtime_probe`] (the
 //!   startup barrier — it confirms the IO thread owns the drivers before the
 //!   rest park, since tokio gives driver ownership to the first `block_on`
-//!   caller), then spawns one thread in [`shrike_drive_sync`] (the serialized
-//!   collection / anki-sync thread) and N in [`shrike_drive_compute`] (CPU
+//!   caller), then spawns one thread in [`shrike_drive_collection`] (the
+//!   serialized collection thread) and N in [`shrike_drive_compute`] (CPU
 //!   engine compute + blocking-fs leaves; N the host's choice — the "N >= 2"
 //!   engine overlap). The IO driver is load-bearing: a `current_thread` runtime
 //!   polls `spawn_op`'d tasks ONLY while a thread drives it, so without it the
@@ -266,7 +266,7 @@ fn outcome_json(outcome: NativeResult<String>) -> String {
 //
 // So [`shrike_runtime_init`] installs the driven `current_thread` runtime ONLY
 // (no threads); the host parks its committed threads via [`shrike_drive_io`]
-// (×1), [`shrike_drive_sync`] (×1), and [`shrike_drive_compute`] (×N, N the
+// (×1), [`shrike_drive_collection`] (×1), and [`shrike_drive_compute`] (×N, N the
 // host's choice). [`shrike_runtime_shutdown`] drains every in-flight op (so its
 // callback fires) and then closes the kernel's pool queues; the drive entries
 // return and the HOST joins its own threads.
@@ -384,7 +384,7 @@ fn finish_op() {
 /// 2. spawn one thread in [`shrike_drive_io`].
 /// 3. [`shrike_runtime_probe`] — block until that IO thread is driving (it must
 ///    own the IO/timer drivers before the others park — see the probe's doc).
-/// 4. spawn one thread in [`shrike_drive_sync`] and N in [`shrike_drive_compute`]
+/// 4. spawn one thread in [`shrike_drive_collection`] and N in [`shrike_drive_compute`]
 ///    (N is the host's choice — the source of the "N >= 2" engine overlap).
 /// 5. open / run ops / close via the rest of this ABI.
 /// 6. [`shrike_runtime_shutdown`] — drains in-flight ops + closes the pools.
@@ -423,7 +423,7 @@ pub extern "C" fn shrike_runtime_init() -> bool {
 /// This thread must be the FIRST to enter `block_on` (the host enforces it via
 /// [`shrike_runtime_probe`]): tokio gives IO/timer-driver ownership to the first
 /// `block_on` caller, and only the owner drives timers + IO continuously. If a
-/// `drive_sync`/`drive_compute` thread won that race instead, this thread would
+/// `drive_collection`/`drive_compute` thread won that race instead, this thread would
 /// hook in as a non-owner and timers/IO would advance only while that other leaf
 /// is parked in `recv`, not while it runs a job — flaky starvation.
 #[no_mangle]
@@ -440,18 +440,19 @@ pub extern "C" fn shrike_drive_io() -> bool {
     })
 }
 
-/// Park the calling thread as the serialized collection / anki-sync execution
-/// thread until the pools are shut down. The host spawns ONE thread here, AFTER
-/// [`shrike_runtime_probe`] confirms the IO driver owns the runtime. Returns
-/// `true` on a clean return, `false` on a misuse (not driven mode). The C-ABI
-/// analog of `shrike-pyo3`'s `drive_sync`. This thread is never a runtime
-/// context, so anki's own `block_on` is legal here by construction.
+/// Park the calling thread as the serialized collection execution thread until
+/// the pools are shut down — every anki-collection op runs here. The host spawns
+/// ONE thread here, AFTER [`shrike_runtime_probe`] confirms the IO driver owns
+/// the runtime. Returns `true` on a clean return, `false` on a misuse (not
+/// driven mode). The C-ABI analog of `shrike-pyo3`'s `drive_collection`. This
+/// thread is never a runtime context, so anki's own `block_on` is legal here by
+/// construction.
 #[no_mangle]
-pub extern "C" fn shrike_drive_sync() -> bool {
-    ffi_guard("shrike_drive_sync", false, || {
+pub extern "C" fn shrike_drive_collection() -> bool {
+    ffi_guard("shrike_drive_collection", false, || {
         #[cfg(feature = "anki-core")]
         {
-            shrike_kernel::drive_sync().is_ok()
+            shrike_kernel::drive_collection().is_ok()
         }
         #[cfg(not(feature = "anki-core"))]
         {
@@ -486,7 +487,7 @@ pub extern "C" fn shrike_drive_compute() -> bool {
 /// # Preconditions
 ///
 /// Call ONCE at startup, AFTER spawning the [`shrike_drive_io`] thread and
-/// BEFORE spawning the `drive_sync`/`drive_compute` threads. Calling it before
+/// BEFORE spawning the `drive_collection`/`drive_compute` threads. Calling it before
 /// the IO thread is spawned would block until that thread appears (the barrier's
 /// job, but the host must actually spawn it); calling it after shutdown returns
 /// `false` at once (the guard below).
@@ -501,7 +502,7 @@ pub extern "C" fn shrike_drive_compute() -> bool {
 /// the host then parks the rest behind that guarantee.
 ///
 /// The task is deliberately trivial — NOT an open: an open needs the
-/// `drive_sync` thread (the anki collection actor), which isn't parked yet, so
+/// `drive_collection` thread (the anki collection actor), which isn't parked yet, so
 /// it would hang. This task touches only the executor the IO thread drives.
 #[no_mangle]
 pub extern "C" fn shrike_runtime_probe() -> bool {
@@ -541,7 +542,7 @@ pub extern "C" fn shrike_runtime_probe() -> bool {
 /// Shut the driven runtime down (teardown). Sets the shutdown flag (new ops
 /// fast-fail), DRAINS every already-admitted op so its callback fires (bounded
 /// by `DRAIN_TIMEOUT`), then closes the kernel's pool queues — which makes the
-/// host's [`shrike_drive_io`]/[`shrike_drive_sync`]/[`shrike_drive_compute`]
+/// host's [`shrike_drive_io`]/[`shrike_drive_collection`]/[`shrike_drive_compute`]
 /// calls return so the host can join its threads. A no-op when the runtime was
 /// never installed in driven mode, or on a second call (the flag is idempotent
 /// and the pools are already closed).

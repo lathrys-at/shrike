@@ -56,7 +56,7 @@
 //! # No new deadlock
 //!
 //! The actor orchestrates on `drive_io` (async) and awaits collection reads
-//! (`drive_sync`) and embeds (`drive_compute`) as leaves — the existing
+//! (`drive_collection`) and embeds (`drive_compute`) as leaves — the existing
 //! read→compute→write pattern, so the leaf-invariant ([`runtime`]) holds. A job
 //! running on the actor never enqueues-and-awaits further ingest work (the
 //! ingest analog of the pool leaf-invariant).
@@ -969,7 +969,7 @@ impl Ingestor {
     }
 
     /// Spawn a producer that reads `note_embed_inputs` for each `STREAM_CHUNK`
-    /// of `ids` on the collection actor (drive_sync) + composes recognized text,
+    /// of `ids` on the collection actor (drive_collection) + composes recognized text,
     /// sending composed chunks on a bounded channel (depth 2 = one chunk
     /// prefetched while the consumer embeds on drive_compute). Only O(chunk)
     /// inputs live at once, and the next read overlaps this chunk's embed.
@@ -1079,7 +1079,7 @@ impl Ingestor {
             })
             .await??;
         // Producer: read derived_field_rows per chunk on the collection actor
-        // (drive_sync), sending on a bounded channel (depth 2 = one chunk
+        // (drive_collection), sending on a bounded channel (depth 2 = one chunk
         // prefetched while the build inserts the prior).
         let (tx, mut rx) =
             tokio::sync::mpsc::channel::<NativeResult<Vec<(i64, String, String, String)>>>(2);
@@ -1680,7 +1680,7 @@ mod tests {
         // catches, but we don't want the backtrace noise in test output.
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        runtime::testing::run_with_sync(async move {
+        runtime::testing::run_with_collection(async move {
             let caught = process_caught(&p, "job", async { panic!("boom") }.boxed()).await;
             assert!(
                 caught,

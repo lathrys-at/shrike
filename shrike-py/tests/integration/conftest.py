@@ -66,7 +66,7 @@ def _driven_runtime() -> Iterator[None]:
     Process-global guard: when this suite shares one pytest process with another
     (the unit/native suites have the identical fixture), both trees' autouse
     fixtures fire — but the kernel runtime is set-once, so only the FIRST may park
-    the driver threads (a second ``drive_sync`` would hit "already claimed"). A
+    the driver threads (a second ``drive_collection`` would hit "already claimed"). A
     marker on the ``shrike_native`` module (the one object the conftests share)
     elects the single owner."""
     try:

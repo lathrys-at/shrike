@@ -591,7 +591,7 @@ impl DerivedEngine {
         col_mod: i64,
     ) -> NativeResult<usize> {
         // BUILD-AND-SWAP. The streaming producer reads each chunk through the
-        // collection actor (the single drive_sync thread). The connection lock
+        // collection actor (the single drive_collection thread). The connection lock
         // MUST NOT be held across `next()`: a concurrent `search` runs
         // `search_substring`/`search_fuzzy` THROUGH that same actor and takes
         // THIS lock, so holding it across the actor-dependent pull would wedge

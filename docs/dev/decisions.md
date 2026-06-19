@@ -389,9 +389,9 @@ Patching anki to keep one runtime was rejected because (1) the patch mechanism i
 so it would make `cargo test` and Bazel disagree on a correctness invariant unless we fork anki,
 and (2) the panic hazard is **runtime-agnostic** — `block_on` panics from inside *any* runtime
 worker, so injecting the kernel's handle wouldn't remove it. The invariant is now **structural**:
-every kernel-side sync op routes through `dispatch_sync`, which enqueues onto the non-runtime
-`drive_sync` thread (see the driven-model decision below), where anki's `block_on` is legal by
-construction — not by a `spawn_blocking` discipline a caller must remember. The `sync_dispatch_pin`
+every kernel-side collection op routes through `dispatch_collection`, which enqueues onto the non-runtime
+`drive_collection` thread (see the driven-model decision below), where anki's `block_on` is legal by
+construction — not by a `spawn_blocking` discipline a caller must remember. The `collection_dispatch_pin`
 test pins the hazard and the safe site.
 
 ### One threading model across both bindings: the harness drives, shrike-core spawns nothing
@@ -412,11 +412,11 @@ through three drive entries, and submits work on its own request threads:
   shutdown, and runs the async executor (the collection actor's dispatch, the debounced saver's
   timers, every spawned op). Per tokio, the first `block_on` caller takes ownership of the drivers
   and the others hook into it, so this thread must win that race (see the barrier below).
-- **`drive_sync` ×1** — the `SerializedCollection` actor's execution thread: serialized anki /
+- **`drive_collection` ×1** — the `SerializedCollection` actor's execution thread: serialized anki /
   collection (SQLite) work and the anki client-sync release-run-reopen. One thread is a consequence
   of anki's single-writer collection, not a tuning choice. Because it is never a runtime context,
   anki's own `block_on` is legal here by construction — which makes the sync-dispatch invariant
-  (§ above) **structural** instead of a `spawn_blocking` discipline. `sync_dispatch_pin` is
+  (§ above) **structural** instead of a `spawn_blocking` discipline. `collection_dispatch_pin` is
   re-expressed against this dispatch site.
 - **`drive_compute` ×N** — CPU-bound engine compute (ort/CLIP, and apple via the `Blocking<E>`
   adapter) plus blocking-fs leaves. This is the only place real parallelism lives, so the engine
@@ -430,7 +430,7 @@ underneath is invisible to a handler (`drive_io` drives the runtime instead of t
 `Blocking<E>` dispatches to `drive_compute` instead of `spawn_blocking`).
 
 This **replaces** the prior model, in which the kernel self-drove a lazy multi-thread tokio runtime
-(tokio spawning its own worker + blocking-pool threads) and `dispatch_sync`/`dispatch_compute`
+(tokio spawning its own worker + blocking-pool threads) and `dispatch_collection`/`dispatch_compute`
 bottomed out in `spawn_blocking`. The driven `current_thread` runtime is the only runtime; the
 transitional multi-thread default that let the bindings cut over incrementally has been removed,
 leaving the driven model alone. The harness installs the runtime via `init_driven_runtime` before
@@ -441,14 +441,14 @@ Decisions and invariants:
 - **Startup driver-ownership barrier.** tokio gives IO/timer-driver ownership to the first
   `block_on` caller, which MUST be `drive_io`. The harness spawns `drive_io` first, then a
   `runtime_probe` — schedule a trivial executor-only op and block until it completes, proving the
-  IO thread owns the drivers — BEFORE spawning `drive_sync`/`drive_compute`. Without it a leaf could
+  IO thread owns the drivers — BEFORE spawning `drive_collection`/`drive_compute`. Without it a leaf could
   win ownership and timers/IO would advance only while that leaf parks in `recv`, a flaky
   starvation (#836).
 - **Per-binding thread provisioning.** The binding (`shrike-pyo3`, `shrike-cabi`) *exposes* the
   drive entries; the harness *above* it owns the threads. The server's `driven_runtime.py` spawns
-  N + 2 `threading.Thread`s into the GIL-releasing pyo3 `drive_io`/`drive_sync`/`drive_compute`
+  N + 2 `threading.Thread`s into the GIL-releasing pyo3 `drive_io`/`drive_collection`/`drive_compute`
   entries (GIL-released for the thread's life, so native compute gets real parallelism). cabi
-  exposes blocking C entries `shrike_drive_io`/`shrike_drive_sync`/`shrike_drive_compute` +
+  exposes blocking C entries `shrike_drive_io`/`shrike_drive_collection`/`shrike_drive_compute` +
   `shrike_runtime_probe`; the native host (Swift/Kotlin) spawns and joins the OS threads. cabi
   spawns nothing — it is shrike-core. `shrike_runtime_init` installs the runtime only.
 - **Shutdown is host-shaped.** The server drains via the bridge (`manager.close` awaits each
@@ -463,13 +463,13 @@ Decisions and invariants:
   HTTP client; `media_fetch` too. So `drive_compute` stays pure CPU, and engine-api's two
   conformance routes map cleanly onto the two pools: sync-compute-behind-`Blocking<E>` →
   `drive_compute`, async-direct → `drive_io`.
-- **Deadlock leaf-invariant.** Every pool job is a leaf: an enqueued `drive_sync`/`drive_compute`
+- **Deadlock leaf-invariant.** Every pool job is a leaf: an enqueued `drive_collection`/`drive_compute`
   job never enqueues-and-awaits further pool work — the read→compute→write orchestration fans out
   and awaits on the async side (`drive_io`), and compute is handed its inputs after the actor reads
   (the "discover ids → one batched read → compute" pattern keeps compute collection-free). A fixed
   pool can't exhaust itself. A debug-build thread-local tripwire asserts it.
 
-Read concurrency: the single `drive_sync` thread serializes all collection access, so reads and
+Read concurrency: the single `drive_collection` thread serializes all collection access, so reads and
 writes do not run concurrently, and a background rebuild/reconcile competes with data-plane ops on
 that one thread.
 
@@ -479,7 +479,7 @@ Done / follow-ups:
   driven and the prior multi-thread default existed only to let the bindings cut over incrementally;
   #840 deleted the default path so the driven `current_thread` model is the sole runtime, completing
   this decision (an op before the harness installs the runtime now panics — there is no fallback).
-- **#832 — chunk/stream the derived rebuild**, so a large rebuild does not monopolize `drive_sync`.
+- **#832 — chunk/stream the derived rebuild**, so a large rebuild does not monopolize `drive_collection`.
 - **#833 — a boot/drift "maintenance window"** returning try-again-later on data-plane routes during
   a rebuild/reconcile; #833 owns the concurrent-reads-vs-modifications decision.
 
@@ -547,7 +547,7 @@ through the one backend.
 Consequence: the read phase of a bulk op cannot be parallelised without either patching anki to drop
 exclusive locking (which would break its own assumptions) or replicating anki's field/notetype
 decoding against a raw read-only `rusqlite` connection (fragile, and still blocked by the exclusive
-lock while anki is open). Theme B's streamed read — the single `drive_sync` thread, pipelined
+lock while anki is open). Theme B's streamed read — the single `drive_collection` thread, pipelined
 against the embed (`read(k+1) ‖ embed(k)`) — is therefore the read-phase design, and the
 downstream read-parallelism work the spike gated is closed as not-feasible against the current anki.
 
