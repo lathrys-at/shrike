@@ -550,6 +550,43 @@ impl DerivedEngine {
         live_notes: &[i64],
         col_mod: i64,
     ) -> NativeResult<()> {
+        // One-shot over the streaming core: yield the whole slice once.
+        let mut taken = false;
+        let mut next = || {
+            if taken {
+                None
+            } else {
+                taken = true;
+                Some(Ok(rows.to_vec()))
+            }
+        };
+        self.build_inner(&mut next, live_notes, col_mod).map(|_| ())
+    }
+
+    /// Streaming rebuild: pull `(note_id, source, ref, text)` row chunks via
+    /// `next` and ingest them within ONE transaction (O(chunk) memory). Returns
+    /// the total rows seen. See [`shrike_store::DerivedStore::build_streamed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a chunk read or the rebuild transaction fails.
+    #[allow(clippy::type_complexity)]
+    pub fn build_streamed(
+        &self,
+        next: &mut dyn FnMut() -> Option<NativeResult<Vec<(i64, String, String, String)>>>,
+        live_notes: &[i64],
+        col_mod: i64,
+    ) -> NativeResult<usize> {
+        self.build_inner(next, live_notes, col_mod)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn build_inner(
+        &self,
+        next: &mut dyn FnMut() -> Option<NativeResult<Vec<(i64, String, String, String)>>>,
+        live_notes: &[i64],
+        col_mod: i64,
+    ) -> NativeResult<usize> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
         // FTS5's per-row delete writes a tombstone per token list — on a
@@ -579,6 +616,7 @@ impl DerivedEngine {
             tx.execute(Self::IDX_DDL, []).map_err(db_err)?;
             tx.execute("DELETE FROM rowmap", []).map_err(db_err)?;
         }
+        let mut total = 0usize;
         {
             // Parse the two insert statements once, not once per row
             // (~2 prepares × every field row of the collection, per rebuild).
@@ -590,15 +628,21 @@ impl DerivedEngine {
                     "INSERT INTO rowmap(rowid, note_id, source, ref) VALUES(?1,?2,?3,?4)",
                 )
                 .map_err(db_err)?;
-            for (note_id, source, reference, text) in rows {
-                if text.trim().is_empty() {
-                    continue;
+            // Pull row chunks from the producer (blocking the calling thread)
+            // and insert them within this one transaction — O(chunk) memory.
+            while let Some(chunk) = next() {
+                let chunk = chunk?;
+                for (note_id, source, reference, text) in &chunk {
+                    total += 1;
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    ins_idx.execute([text]).map_err(db_err)?;
+                    let rowid = tx.last_insert_rowid();
+                    ins_map
+                        .execute(rusqlite::params![rowid, note_id, source, reference])
+                        .map_err(db_err)?;
                 }
-                ins_idx.execute([text]).map_err(db_err)?;
-                let rowid = tx.last_insert_rowid();
-                ins_map
-                    .execute(rusqlite::params![rowid, note_id, source, reference])
-                    .map_err(db_err)?;
             }
         }
         // Prune recognition rows (and their segments, and below-gate markers)
@@ -630,7 +674,8 @@ impl DerivedEngine {
             [col_mod],
         )
         .map_err(db_err)?;
-        tx.commit().map_err(db_err)
+        tx.commit().map_err(db_err)?;
+        Ok(total)
     }
 
     /// A free-form meta value (e.g. the recognizer fingerprint).
@@ -967,6 +1012,14 @@ impl shrike_store::DerivedStore for DerivedEngine {
         col_mod: i64,
     ) -> NativeResult<()> {
         Self::build(self, rows, live_notes, col_mod)
+    }
+    fn build_streamed(
+        &self,
+        next: &mut dyn FnMut() -> Option<NativeResult<Vec<(i64, String, String, String)>>>,
+        live_notes: &[i64],
+        col_mod: i64,
+    ) -> NativeResult<usize> {
+        Self::build_streamed(self, next, live_notes, col_mod)
     }
     fn ingest(
         &self,

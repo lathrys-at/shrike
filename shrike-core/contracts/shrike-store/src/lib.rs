@@ -181,6 +181,31 @@ pub trait DerivedStore: Send + Sync {
         live_notes: &[i64],
         col_mod: i64,
     ) -> NativeResult<()>;
+    /// Streaming [`Self::build`]: pull `(note_id, source, ref, text)` row chunks
+    /// via `next` (`None` ends the stream) and ingest them within ONE
+    /// transaction, so peak memory is O(chunk), not O(collection). `next` blocks
+    /// the calling thread; a producer reads the collection in chunks on another
+    /// thread, so reads overlap the FTS5 inserts. Returns the total rows seen.
+    /// The default materializes the whole stream and calls [`Self::build`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a chunk read or the rebuild transaction fails.
+    #[allow(clippy::type_complexity)]
+    fn build_streamed(
+        &self,
+        next: &mut dyn FnMut() -> Option<NativeResult<Vec<(i64, String, String, String)>>>,
+        live_notes: &[i64],
+        col_mod: i64,
+    ) -> NativeResult<usize> {
+        let mut rows: Vec<(i64, String, String, String)> = Vec::new();
+        while let Some(chunk) = next() {
+            rows.extend(chunk?);
+        }
+        let n = rows.len();
+        self.build(&rows, live_notes, col_mod)?;
+        Ok(n)
+    }
     /// Replace one note's rows for `source` with `(ref, text)` pairs.
     ///
     /// # Errors

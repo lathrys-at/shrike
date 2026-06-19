@@ -899,18 +899,46 @@ impl Ingestor {
     ///
     /// Returns an error if the collection read or the derived-store build fails.
     pub async fn rebuild_derived(&self) -> NativeResult<(usize, i64)> {
-        let (rows, live_notes, dmod) = self
+        // Read the live id list + col.mod (cheap); the field-row CONTENT streams
+        // in chunks (O(chunk) memory), pipelined against the FTS5 inserts.
+        let (ids, dmod) = self
             .collection
             .run(|core| -> NativeResult<_> {
                 let ids = core.find_notes("")?;
-                let rows = core.derived_field_rows(&ids)?;
                 let dmod = core.col_mod()?;
-                Ok((rows, ids, dmod))
+                Ok((ids, dmod))
             })
             .await??;
-        let n = rows.len();
+        // Producer: read derived_field_rows per chunk on the collection actor
+        // (drive_sync), sending on a bounded channel (depth 2 = one chunk
+        // prefetched while the build inserts the prior).
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel::<NativeResult<Vec<(i64, String, String, String)>>>(2);
+        let collection = Arc::clone(&self.collection);
+        let producer_ids = ids.clone();
+        runtime::handle().spawn(async move {
+            for chunk_ids in producer_ids.chunks(index_orchestrator::STREAM_CHUNK) {
+                let read_ids = chunk_ids.to_vec();
+                let rows = collection
+                    .run(move |core| core.derived_field_rows(&read_ids))
+                    .await
+                    .and_then(|r| r);
+                let is_err = rows.is_err();
+                if tx.send(rows).await.is_err() || is_err {
+                    break;
+                }
+            }
+        });
+        // Consumer: the FTS5 rebuild on the compute pool, pulling chunks via
+        // `blocking_recv` (a plain compute thread, not a runtime context). The
+        // read overlaps the insert; the whole rebuild is ONE transaction.
         let derived = Arc::clone(&self.derived);
-        runtime::dispatch_compute(move || derived.build(&rows, &live_notes, dmod)).await?;
+        let live = ids;
+        let n = runtime::dispatch_compute(move || {
+            let mut next = || rx.blocking_recv();
+            derived.build_streamed(&mut next, &live, dmod)
+        })
+        .await?;
         // A clean whole-collection rebuild re-ingests every note and stamps its
         // own snapshot col_mod → prior per-op derived failures are healed.
         self.clear_derived_poison();
