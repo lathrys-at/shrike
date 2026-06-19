@@ -10,6 +10,8 @@ import time
 import httpx
 import pytest
 
+from tests.integration.conftest import search_until
+
 pytestmark = pytest.mark.integration
 
 
@@ -419,6 +421,9 @@ class TestListNotesAdvanced:
                 ]
             },
         )
+        # The derived (FTS5) write rides the async ingest drain — poll until the
+        # substring match lands, then read the full response (now settled) for the message.
+        search_until(mcp, ["mitochondria"], lambda ms: len(ms) == 1)
         result = mcp("search_notes", {"queries": ["mitochondria"]})
         matches = result["results"][0]["matches"]
         assert len(matches) == 1
@@ -480,7 +485,8 @@ class TestDerivedLexicalSearch:
         )
         nid = created["results"][0]["id"]
         # A typo the note doesn't literally contain — only the trigram fuzzy signal can surface it.
-        matches = mcp("search_notes", {"queries": ["mitochndria"]})["results"][0]["matches"]
+        # The derived (FTS5) write rides the async ingest drain, so poll until it lands.
+        matches = search_until(mcp, ["mitochndria"], lambda ms: any(m["id"] == nid for m in ms))
         hit = next((m for m in matches if m["id"] == nid), None)
         assert hit is not None, "fuzzy signal did not surface the typo'd query's note"
         assert "fuzzy" in [p["signal"] for p in hit["provenance"]]
@@ -503,7 +509,8 @@ class TestDerivedLexicalSearch:
             },
         )
         nid = created["results"][0]["id"]
-        matches = mcp("search_notes", {"queries": ["transport"]})["results"][0]["matches"]
+        # The derived (FTS5) write rides the async ingest drain, so poll until it lands.
+        matches = search_until(mcp, ["transport"], lambda ms: any(m["id"] == nid for m in ms))
         hit = next((m for m in matches if m["id"] == nid), None)
         assert hit is not None
         assert hit["substring"]["matched_fields"] == ["Front"]

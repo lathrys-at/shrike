@@ -1181,5 +1181,17 @@ def collection_server(server_factory, embedding_model: Path) -> ServerInfo:
         result = mcp("upsert_notes", {"notes": all_notes[i : i + 10]})
         created += sum(1 for r in result["results"] if r["status"] == "created")
     assert created == 50, f"Expected 50 notes created, got {created}"
-    wait_for_index_ready(srv)
-    return srv
+    # The seeding upserts index off the async ingest drain (the per-op
+    # index/derived write rides the compute pool). `wait_for_index_ready` only
+    # gates on size > 0, so poll until ALL 50 are indexed — once the vector
+    # count reflects every note, the drain has processed each maintain item and
+    # the derived (FTS5) rows landed with them, so dependent tests never start
+    # against a half-drained collection.
+    base = srv.url.rsplit("/", 1)[0]
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        idx = httpx.get(f"{base}/status", timeout=5.0).json().get("index", {})
+        if idx.get("state") == "ready" and idx.get("size", 0) >= created:
+            return srv
+        time.sleep(0.05)
+    raise TimeoutError(f"Index did not reach the seeded size ({created}) before timeout")

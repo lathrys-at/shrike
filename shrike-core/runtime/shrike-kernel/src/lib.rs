@@ -3153,6 +3153,9 @@ mod no_cpython_smoke {
             else {
                 panic!("create")
             };
+            // The upsert's index/derived write rides the async drain — settle
+            // before the search reads it back.
+            kernel.settle().await;
             let hits = kernel.search("capital of france", 5).await.unwrap();
             assert_eq!(hits[0].note_id, nid);
             assert!(
@@ -3160,12 +3163,13 @@ mod no_cpython_smoke {
                 "the primary text space's semantic signal contributes"
             );
             // The primary index holds the note.
-            kernel.settle().await;
             assert!(kernel.index().engine().contains(nid));
 
             // Removal fans out to EVERY space — no error on the empty
-            // secondary, and the primary drops the note.
+            // secondary, and the primary drops the note. The vector removal
+            // rides the drain too, so settle before asserting it's gone.
             kernel.delete_notes(vec![nid]).await.unwrap();
+            kernel.settle().await;
             assert!(!kernel.index().engine().contains(nid));
             assert!(
                 !secondary.engine().contains(nid),
@@ -3495,11 +3499,13 @@ mod no_cpython_smoke {
                 "image space has it"
             );
 
-            // Delete → both spaces drop the note (remove_all fans out).
+            // Delete → both spaces drop the note (remove_all fans out). The
+            // vector removal rides the drain, so settle before asserting it's gone.
             assert_eq!(
                 kernel.delete_notes(vec![nid]).await.unwrap().deleted,
                 vec![nid]
             );
+            kernel.settle().await;
             assert!(
                 !kernel.index().engine().contains(nid),
                 "gone from text space"
@@ -3622,6 +3628,9 @@ mod no_cpython_smoke {
             else {
                 panic!("create works without an embedder")
             };
+            // Even with no embedder, the lexical (FTS5) derived write rides the
+            // async drain — settle before the substring search reads it back.
+            kernel.settle().await;
             // Lexical-only: the literal substring hit lands; NO text signal.
             let hits = kernel.search("krebs cycle", 5).await.unwrap();
             assert_eq!(hits[0].note_id, nid);

@@ -484,8 +484,10 @@ class TestEmbeddingLifecycle:
             },
         )
         _wait_for_index_ready(lifecycle_server)
-        before = mcp("search_notes", {"queries": ["mitochondria ATP energy"], "limit": 5})
-        assert before["results"][0]["matches"]
+        # The seed upserts index off the async drain — poll until they're
+        # searchable so the positive assertion can't flake on a lagging drain.
+        before = search_until(mcp, ["mitochondria ATP energy"], lambda ms: bool(ms), limit=5)
+        assert before
 
         # (d) Stop: embedding unavailable, index unavailable, search degrades to
         # the exact tier (no index needed; "ATP" is literal in the seeds).
@@ -527,8 +529,10 @@ class TestEmbeddingLifecycle:
         )
         assert started.exit_code == 0, started.output
         _wait_for_index_ready(lifecycle_server)
-        after = mcp("search_notes", {"queries": ["mitochondria ATP energy"], "limit": 5})
-        assert after["results"][0]["matches"]
+        # The restart rebuilds the index off the async drain — poll until the
+        # notes are searchable again so the positive assertion can't flake.
+        after = search_until(mcp, ["mitochondria ATP energy"], lambda ms: bool(ms), limit=5)
+        assert after
 
         # (f) Idempotent start while running.
         resp = httpx.post(f"{base}/embedding/start", json={}, timeout=30.0)
@@ -653,12 +657,16 @@ class TestSearchQuality:
         )
         ids = [item["id"] for item in r["results"]]
         try:
-            result = semantic_mcp(
-                "search_notes", {"queries": ["volcanic eruption geology"], "limit": 10}
+            # The upsert indexes off the async ingest drain — poll until the new
+            # notes are searchable, so the negative assertion (no tag provenance)
+            # can't pass vacuously against a not-yet-indexed write.
+            matches = search_until(
+                semantic_mcp,
+                ["volcanic eruption geology"],
+                lambda ms: any(m["id"] in ids for m in ms),
             )
-            for group in result["results"]:
-                for m in group["matches"]:
-                    signals = {p["signal"] for p in m.get("provenance", [])}
-                    assert "tag" not in signals, f"blocklisted tag contributed for note {m['id']}"
+            for m in matches:
+                signals = {p["signal"] for p in m.get("provenance", [])}
+                assert "tag" not in signals, f"blocklisted tag contributed for note {m['id']}"
         finally:
             semantic_mcp("delete_notes", {"ids": ids})
