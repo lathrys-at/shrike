@@ -1194,6 +1194,14 @@ impl Kernel {
         self.index_set.primary()
     }
 
+    /// How many ingest-drain items/jobs the sole writer caught panicking. Zero
+    /// in normal operation; non-zero means the drain hit an unexpected fault
+    /// (most likely a poisoned lock), skipped that work, and survived — the
+    /// `/status` degraded-writer signal.
+    pub fn ingest_drain_panics(&self) -> u64 {
+        self.ingest.drain_panics()
+    }
+
     /// The N-space index coordinator — removal + the watermark advance
     /// fan out across it.
     pub fn index_set(&self) -> &index_set::IndexSet {

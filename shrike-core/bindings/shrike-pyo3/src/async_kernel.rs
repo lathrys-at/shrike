@@ -1008,6 +1008,12 @@ impl AsyncKernel {
         crate::kernel_actions::wire(&self.inner.index().status()).map_err(crate::to_py_err)
     }
 
+    /// How many ingest-drain items/jobs the sole writer caught panicking — the
+    /// `/status` degraded-writer signal (0 in normal operation).
+    fn ingest_drain_panics(&self) -> u64 {
+        self.inner.ingest_drain_panics()
+    }
+
     /// Flush the index + sidecars now (shutdown path).
     fn save_index(&self, py: Python<'_>) -> PyResult<()> {
         py.detach(|| self.inner.index().save())

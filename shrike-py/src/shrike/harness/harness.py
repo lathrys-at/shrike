@@ -625,6 +625,13 @@ class Harness:
         }
         if (dedup := self.dedup_stats.snapshot()) is not None:
             status["dedup"] = dedup
+        # Degraded-writer signal: non-zero means the sole ingest-drain writer
+        # caught a panic (likely a poisoned lock), skipped that work, and
+        # survived — the affected notes are un-indexed until a reconcile heals
+        # them. Emitted only when non-zero, so a healthy server's shape is
+        # unchanged.
+        if (drain_panics := self.kernel.ingest_drain_panics()) > 0:
+            status["ingest_drain_panics"] = drain_panics
         # Per-engine recognition status: a map keyed by source — one row per
         # attached purpose, each {state, backend, fingerprint}. An empty map is
         # "nothing attached" (distinct from an attached-but-errored engine).

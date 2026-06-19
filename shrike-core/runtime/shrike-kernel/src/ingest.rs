@@ -74,6 +74,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::future::BoxFuture;
+use futures::FutureExt;
 use shrike_error::{NativeError, NativeResult};
 use shrike_store::DerivedStore;
 use tokio::sync::{mpsc, oneshot};
@@ -151,6 +152,10 @@ enum IngestMsg {
 pub struct IngestHandle {
     tx: Mutex<Option<mpsc::UnboundedSender<IngestMsg>>>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Shared with the [`Ingestor`] the drain task owns: the count of contained
+    /// drain panics, so the kernel (which holds only this handle) can report a
+    /// degraded sole writer on `/status`.
+    drain_panics: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// A cheap, cloneable enqueue handle captured INTO a collection-write job, so
@@ -298,6 +303,14 @@ impl IngestHandle {
             let _ = handle.await;
         }
     }
+
+    /// How many drained items/jobs the drain loop caught panicking. Zero in
+    /// normal operation; non-zero signals a degraded sole writer (the `/status`
+    /// observability hook for [`drain_loop`]'s panic boundary).
+    pub fn drain_panics(&self) -> u64 {
+        self.drain_panics
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// The single writer: owns the watermark floors and every index/derived
@@ -316,6 +329,13 @@ pub struct Ingestor {
     tag_config: TagCentroidConfig,
     tag_refresh: Arc<TagRefresher>,
     floors: Mutex<WatermarkFloors>,
+    /// Count of drained items/jobs whose processing PANICKED and was contained
+    /// by the drain loop ([`drain_loop`]). Non-zero means the sole writer hit an
+    /// unexpected fault (most likely a poisoned lock) and skipped that work —
+    /// the affected notes are un-indexed until a reconcile/rebuild heals them.
+    /// `Arc`-shared with the [`IngestHandle`] so `/status` can read it (the
+    /// drain task owns the `Ingestor`, the kernel holds only the handle).
+    drain_panics: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Ingestor {
@@ -341,6 +361,7 @@ impl Ingestor {
             tag_config,
             tag_refresh,
             floors: Mutex::new(WatermarkFloors::default()),
+            drain_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -958,6 +979,16 @@ impl Ingestor {
 /// The persistent FIFO consumer. Drains items in batches, runs jobs/flushes in
 /// strict order, and exits when the channel closes (every sender dropped), then
 /// flushes the index savers durably.
+///
+/// This task is the kernel's SOLE index/derived writer, so an uncaught panic in
+/// processing one item would kill it for the kernel's life — hot-path enqueues
+/// then silently no-op (writes commit to anki but are never indexed), with no
+/// recovery. A poisoned lock (e.g. an embed-slot writer panicking under the
+/// `RwLock`) is the realistic trigger: every later `.read().expect()` would
+/// panic. So each item/job is processed under a panic boundary
+/// ([`process_caught`]): a caught panic loses only that item — logged + counted
+/// for `/status` — and the loop survives. Next-boot drift then re-indexes the
+/// skipped notes.
 async fn drain_loop(ingestor: Arc<Ingestor>, mut rx: mpsc::UnboundedReceiver<IngestMsg>) {
     let mut pending: Option<IngestMsg> = None;
     loop {
@@ -983,10 +1014,13 @@ async fn drain_loop(ingestor: Arc<Ingestor>, mut rx: mpsc::UnboundedReceiver<Ing
                         Err(_) => break,
                     }
                 }
-                ingestor.process_batch(batch).await;
+                let ing = Arc::clone(&ingestor);
+                let work = async move { ing.process_batch(batch).await }.boxed();
+                process_caught(&ingestor.drain_panics, "batch", work).await;
             }
             IngestMsg::Job(run) => {
-                run(Arc::clone(&ingestor)).await;
+                let ing = Arc::clone(&ingestor);
+                process_caught(&ingestor.drain_panics, "job", run(ing)).await;
             }
             IngestMsg::Flush(done) => {
                 let _ = done.send(());
@@ -994,6 +1028,28 @@ async fn drain_loop(ingestor: Arc<Ingestor>, mut rx: mpsc::UnboundedReceiver<Ing
         }
     }
     ingestor.flush_durable();
+}
+
+/// Drive one drain-loop unit of work under a panic boundary, so a fault in
+/// processing one item (a poisoned lock, an unexpected bug) loses only that item
+/// instead of killing the sole writer. A caught panic is logged once at WARNING
+/// and counted on `panics` (the `/status` degraded signal).
+async fn process_caught(
+    panics: &std::sync::atomic::AtomicU64,
+    kind: &str,
+    work: BoxFuture<'static, ()>,
+) {
+    if std::panic::AssertUnwindSafe(work)
+        .catch_unwind()
+        .await
+        .is_err()
+    {
+        panics.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::warn!(
+            %kind,
+            "ingest drain caught a panic; that unit's notes are un-indexed until the next reconcile heals them"
+        );
+    }
 }
 
 /// Compose orchestrator inputs from collection rows + the derived store's
@@ -1045,9 +1101,42 @@ pub(crate) fn compose_embed_inputs(
 /// Spawn the drain task and return the kernel-held handle.
 pub fn spawn(ingestor: Arc<Ingestor>) -> IngestHandle {
     let (tx, rx) = mpsc::unbounded_channel::<IngestMsg>();
+    let drain_panics = Arc::clone(&ingestor.drain_panics);
     let task = runtime::handle().spawn(drain_loop(ingestor, rx));
     IngestHandle {
         tx: Mutex::new(Some(tx)),
         task: Mutex::new(Some(task)),
+        drain_panics,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A panicking unit of drain work is CONTAINED: the counter increments and
+    /// `process_caught` returns normally (the loop survives), instead of the
+    /// panic unwinding out and killing the sole writer. A clean unit leaves the
+    /// counter untouched. This is the M3 panic-boundary guarantee in isolation.
+    #[test]
+    fn process_caught_contains_a_panicking_unit() {
+        let panics = Arc::new(AtomicU64::new(0));
+        let p = Arc::clone(&panics);
+        // Quiet the default panic hook for the duration: catch_unwind still
+        // catches, but we don't want the backtrace noise in test output.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        runtime::testing::run_with_sync(async move {
+            process_caught(&p, "job", async { panic!("boom") }.boxed()).await;
+            assert_eq!(p.load(Ordering::Relaxed), 1, "the panic was counted");
+            process_caught(&p, "job", async {}.boxed()).await;
+            assert_eq!(
+                p.load(Ordering::Relaxed),
+                1,
+                "a clean unit leaves the counter untouched"
+            );
+        });
+        std::panic::set_hook(prev);
     }
 }
