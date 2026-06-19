@@ -1,18 +1,20 @@
 """The gold workloads the perf harness times.
 
 A workload is one operation, repeated against a booted harness over a fixed
-corpus: search, rebuild, upsert-batch, upsert-seq, delete. The workflows that need
-their own scenario setup are a focused follow-up: a true *ingest* (importing a
-synthetic .apkg/.colpkg via the package-import path — NOT the upsert action),
-*reconcile* (out-of-band drift recovery: the collection is edited from under the
-server, then reconciled on reacquire), sync, and OCR sweeps.
+corpus: search, rebuild, upsert-batch, upsert-seq, delete, reconcile. The workflows
+that need a heavier scenario harness remain a focused follow-up: a true *ingest*
+(importing a synthetic .apkg/.colpkg via the package-import path — NOT the upsert
+action), *sync*, and OCR sweeps.
 
-``mutates`` marks a workload that changes the collection (upsert-batch/upsert-seq/delete);
-the runner orders read-only workloads first so a single boot stays representative.
-Running MORE THAN ONE mutating workload in a single invocation compounds the
-collection state across them, so for a clean absolute number run one mutating
-workload per invocation (comparisons across runs stay valid regardless — the
-mutation is deterministic and identical on both sides).
+``mutates`` marks a workload that changes the collection
+(upsert-batch/upsert-seq/delete/reconcile); the runner orders read-only workloads
+first so a single boot stays representative. Running MORE THAN ONE mutating workload
+in a single invocation compounds the collection state across them, so for a clean
+absolute number run one mutating workload per invocation (comparisons across runs
+stay valid regardless — the mutation is deterministic and identical on both sides).
+
+A workload MAY define an optional ``prepare(booted, iteration)`` coroutine: per-
+iteration setup run UNTIMED before each timed ``run_one`` (see ``driver.Workload``).
 """
 
 from __future__ import annotations
@@ -163,6 +165,65 @@ class DeleteWorkload:
         }
 
 
+# How many notes are edited under the server before each reconcile. The reconcile
+# cost is dominated by the changed set (re-embed) on top of a full-collection
+# fingerprint scan; 100 is a representative sync/edit burst.
+_RECONCILE_DRIFT = 100
+
+
+def _reconcile_note(iteration: int, j: int) -> dict:
+    # A fresh note in its own deck/tag, deterministic per (iteration, j), so each
+    # iteration drifts a disjoint set the reconcile sees as new.
+    rng = random.Random((iteration << 24) ^ (j ^ 0x5EC0))
+    body = " ".join(rng.choice(VOCAB) for _ in range(12))
+    return {
+        "deck": "Perf::Reconcile",
+        "note_type": "Basic",
+        "tags": ["perf-reconcile"],
+        "fields": {"Front": f"reconcile {iteration}-{j}", "Back": body},
+    }
+
+
+class ReconcileWorkload:
+    """Out-of-band drift recovery — the reconcile path, NOT an in-band write.
+
+    Each iteration first (UNTIMED, in ``prepare``) edits the collection from under
+    the server: it writes ``drift`` fresh notes STRAIGHT through the collection
+    actor (``wrapper.upsert_notes`` bypasses the kernel index path), so ``col.mod``
+    moves while the index watermark stays stale — exactly the drift a GUI edit, a
+    sync, or a restore leaves behind. The TIMED ``run_one`` then runs
+    ``reindex_if_needed`` + ``settle``: the kernel sees ``col.mod`` moved, diffs the
+    per-note fingerprints, and re-embeds/re-indexes only the changed notes. The cost
+    tracks the changed set (plus a full-collection fingerprint scan), not the upsert
+    write — so the drift write is kept out of the timed region.
+
+    Writing through the same actor makes the new ``col.mod`` live to the reconcile,
+    so no reopen is needed; reopen is a collection-reacquire cost, not a reconcile
+    cost. Each iteration ADDS ``drift`` notes, so the collection grows across the run
+    (the recorded ``corpus_size`` is the *starting* size); identical deterministic
+    growth on both sides keeps comparisons valid."""
+
+    name = "reconcile"
+    mutates = True
+
+    def __init__(self, *, drift: int = _RECONCILE_DRIFT) -> None:
+        self._drift = drift
+
+    async def setup(self, booted: Booted, iterations: int) -> None:
+        return None
+
+    async def prepare(self, booted: Booted, iteration: int) -> None:
+        # Out-of-band: write through the collection only, leaving the index stale.
+        notes = [_reconcile_note(iteration, j) for j in range(self._drift)]
+        await booted.harness.wrapper.upsert_notes(notes)
+
+    async def run_one(self, booted: Booted, iteration: int) -> int:
+        # Reconcile to quiescence: detect drift, diff fingerprints, re-embed changed.
+        await booted.harness.kernel.reindex_if_needed()
+        await booted.harness.kernel.settle()
+        return self._drift
+
+
 #: name → workload class (instantiated with defaults by the runner).
 WORKLOADS = {
     w.name: w
@@ -172,5 +233,6 @@ WORKLOADS = {
         UpsertBatchWorkload,
         UpsertSeqWorkload,
         DeleteWorkload,
+        ReconcileWorkload,
     )
 }

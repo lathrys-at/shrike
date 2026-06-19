@@ -17,6 +17,7 @@ from tests.manual.perf.driver import boot_from_profile, measure, run_async
 from tests.manual.perf.workloads import (
     DeleteWorkload,
     RebuildWorkload,
+    ReconcileWorkload,
     SearchWorkload,
     UpsertBatchWorkload,
     UpsertSeqWorkload,
@@ -89,3 +90,12 @@ def test_delete_workload_deletes_its_own_pool_slice(_driven, tmp_path):
     res = run_async(_measure(tmp_path, DeleteWorkload(batch=5), repeats=2, warmup=0))
     assert res.workload == "delete"
     assert res.items == 5
+
+
+def test_reconcile_workload_recovers_out_of_band_drift(_driven, tmp_path):
+    # prepare() drifts `drift` notes out-of-band each iteration; the timed run_one
+    # reconciles. Two timed iterations -> two reconciles, each over `drift` notes.
+    res = run_async(_measure(tmp_path, ReconcileWorkload(drift=6), repeats=2, warmup=0))
+    assert res.workload == "reconcile"
+    assert res.distribution.n == 2
+    assert res.items == 6

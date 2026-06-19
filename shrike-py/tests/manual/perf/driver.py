@@ -158,7 +158,13 @@ async def boot_from_profile(profile_path: Path, collection_path: Path, cache_dir
 class Workload(Protocol):
     """One timed operation, repeated against a booted harness over a fixed
     corpus. ``setup`` runs once (untimed); ``run_one`` is the timed unit and
-    returns how many items it processed."""
+    returns how many items it processed.
+
+    A workload MAY also define ``prepare(booted, iteration)`` — an optional
+    coroutine run UNTIMED before each timed ``run_one``, for per-iteration setup
+    that must stay out of the measurement. ``reconcile`` uses it to introduce fresh
+    out-of-band drift; ``setup`` alone can't, since reconcile is idempotent — the
+    first reconcile clears all drift, so each iteration needs its own."""
 
     name: str
 
@@ -168,15 +174,25 @@ class Workload(Protocol):
 
 
 async def time_iterations(
-    run_one: Callable[[int], Awaitable[int]], *, repeats: int, warmup: int
+    run_one: Callable[[int], Awaitable[int]],
+    *,
+    repeats: int,
+    warmup: int,
+    prepare: Callable[[int], Awaitable[None]] | None = None,
 ) -> tuple[list[float], int]:
     """Run ``run_one(i)`` ``warmup + repeats`` times, returning every iteration's
     wall time (ms) and the last iteration's item count. The warmup samples are
     kept here and discarded by :func:`~tests.manual.perf.stats.summarize`, so the
-    raw run is fully recorded. This is the profiler-attach seam (#866)."""
+    raw run is fully recorded. This is the profiler-attach seam (#866).
+
+    ``prepare(i)``, if given, runs UNTIMED before each iteration's ``run_one`` — the
+    per-iteration setup a workload needs out of the timed region (reconcile
+    introducing fresh out-of-band drift)."""
     samples: list[float] = []
     items = 0
     for i in range(warmup + repeats):
+        if prepare is not None:
+            await prepare(i)
         start = time.perf_counter()
         items = await run_one(i)
         samples.append((time.perf_counter() - start) * 1000.0)
@@ -186,10 +202,20 @@ async def time_iterations(
 async def measure(
     workload: Workload, booted: Booted, *, repeats: int, warmup: int
 ) -> WorkloadResult:
-    """Run a workload's setup, then time it, then summarize into a result."""
+    """Run a workload's setup, then time it, then summarize into a result. A
+    workload may expose an optional ``prepare(booted, iteration)`` coroutine, run
+    untimed before each timed ``run_one`` (see :class:`Workload`)."""
     await workload.setup(booted, repeats + warmup)
+    prepare = getattr(workload, "prepare", None)
+
+    async def _prepare(i: int) -> None:
+        await prepare(booted, i)
+
     samples, items = await time_iterations(
-        lambda i: workload.run_one(booted, i), repeats=repeats, warmup=warmup
+        lambda i: workload.run_one(booted, i),
+        repeats=repeats,
+        warmup=warmup,
+        prepare=_prepare if prepare is not None else None,
     )
     return WorkloadResult(
         workload=workload.name,
