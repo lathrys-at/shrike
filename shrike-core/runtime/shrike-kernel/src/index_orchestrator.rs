@@ -1228,10 +1228,17 @@ impl IndexOrchestrator {
                     if replace {
                         let _ = self.engine.remove(&keys)?;
                     }
-                    self.engine.add(TEXT, &keys, &vectors)?;
-                    if !ocr_keys.is_empty() {
-                        self.engine.add(TEXT, &ocr_keys, &ocr_vectors)?;
-                    }
+                    // Atomic per-note text add (#855): a note's field-text
+                    // vectors AND its OCR/ASR vectors (same TEXT modality,
+                    // different keys) land in ONE engine call — so neither a
+                    // concurrent search nor a debounced save can ever observe or
+                    // persist a half-indexed note (the field vector present, the
+                    // recognition vector missing — the #650 flake class).
+                    let mut text_keys = keys;
+                    let mut text_vectors = vectors;
+                    text_keys.extend(ocr_keys);
+                    text_vectors.extend(ocr_vectors);
+                    self.engine.add(TEXT, &text_keys, &text_vectors)?;
                     if !image_keys.is_empty() {
                         let image_ndim = image_vectors.first().map(Vec::len).unwrap_or(0);
                         self.engine.ensure("image", image_ndim)?;
