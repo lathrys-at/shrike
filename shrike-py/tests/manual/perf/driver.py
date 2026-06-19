@@ -162,7 +162,7 @@ class Workload(Protocol):
 
     name: str
 
-    async def setup(self, booted: Booted) -> None: ...
+    async def setup(self, booted: Booted, iterations: int) -> None: ...
 
     async def run_one(self, booted: Booted, iteration: int) -> int: ...
 
@@ -187,7 +187,7 @@ async def measure(
     workload: Workload, booted: Booted, *, repeats: int, warmup: int
 ) -> WorkloadResult:
     """Run a workload's setup, then time it, then summarize into a result."""
-    await workload.setup(booted)
+    await workload.setup(booted, repeats + warmup)
     samples, items = await time_iterations(
         lambda i: workload.run_one(booted, i), repeats=repeats, warmup=warmup
     )

@@ -1,12 +1,16 @@
 """The gold workloads the perf harness times.
 
 A workload is one operation, repeated against a booted harness over a fixed
-corpus: run a search, rebuild the index, ingest a batch. This slice ships a
-representative few to prove the runner; the full gold set (bulk delete,
-reconcile/sync, OCR sweeps) is the benchmarks child (#867).
+corpus: search, rebuild, ingest, reconcile, delete. The remaining gold workflows
+(sync, OCR sweeps) need their own scenario / recognizer setup and are a focused
+follow-up.
 
-``mutates`` marks a workload that changes the collection (ingest); the runner
-orders read-only workloads first so a single boot stays representative.
+``mutates`` marks a workload that changes the collection (ingest/reconcile/delete);
+the runner orders read-only workloads first so a single boot stays representative.
+Running MORE THAN ONE mutating workload in a single invocation compounds the
+collection state across them, so for a clean absolute number run one mutating
+workload per invocation (comparisons across runs stay valid regardless — the
+mutation is deterministic and identical on both sides).
 """
 
 from __future__ import annotations
@@ -67,7 +71,7 @@ class SearchWorkload:
             " ".join(rng.choice(_VOCAB) for _ in range(rng.randint(1, 4))) for _ in range(n_queries)
         ]
 
-    async def setup(self, booted: Booted) -> None:
+    async def setup(self, booted: Booted, iterations: int) -> None:
         return None
 
     async def run_one(self, booted: Booted, iteration: int) -> int:
@@ -83,7 +87,7 @@ class RebuildWorkload:
     name = "rebuild"
     mutates = False
 
-    async def setup(self, booted: Booted) -> None:
+    async def setup(self, booted: Booted, iterations: int) -> None:
         return None
 
     async def run_one(self, booted: Booted, iteration: int) -> int:
@@ -107,7 +111,7 @@ class IngestWorkload:
     def __init__(self, *, batch: int = 200) -> None:
         self._batch = batch
 
-    async def setup(self, booted: Booted) -> None:
+    async def setup(self, booted: Booted, iterations: int) -> None:
         return None
 
     async def run_one(self, booted: Booted, iteration: int) -> int:
@@ -128,5 +132,77 @@ class IngestWorkload:
         }
 
 
+class ReconcileWorkload:
+    """Upsert one note (creating drift) then reconcile the index — the incremental
+    reindex path, i.e. the interactive add-one-note-and-be-searchable cost, NOT a
+    full rebuild. Times the upsert + the reconcile together (the drift must exist
+    to be reconciled)."""
+
+    name = "reconcile"
+    mutates = True
+
+    async def setup(self, booted: Booted, iterations: int) -> None:
+        return None
+
+    async def run_one(self, booted: Booted, iteration: int) -> int:
+        rng = random.Random(0x9EC0 ^ iteration)
+        note = {
+            "deck": "Perf::Reconcile",
+            "note_type": "Basic",
+            "tags": ["perf-reconcile"],
+            "fields": {
+                "Front": f"reconcile {iteration}",
+                "Back": " ".join(rng.choice(_VOCAB) for _ in range(10)),
+            },
+        }
+        await booted.harness.wrapper.upsert_notes([note])
+        await booted.harness.kernel.reindex_if_needed()
+        return 1  # one note's incremental reconcile
+
+
+class DeleteWorkload:
+    """Bulk-delete a batch of notes by id — the delete write path. Setup ingests a
+    disposable pool (iterations × batch fresh notes, so deletes never touch the
+    corpus); each timed iteration deletes its own slice."""
+
+    name = "delete"
+    mutates = True
+
+    def __init__(self, *, batch: int = 200) -> None:
+        self._batch = batch
+        self._ids: list[int] = []
+
+    async def setup(self, booted: Booted, iterations: int) -> None:
+        pool = [self._note(j) for j in range(iterations * self._batch)]
+        results = await booted.harness.wrapper.upsert_notes(pool)
+        self._ids = [r["id"] for r in results if r.get("status") in ("created", "updated")]
+
+    async def run_one(self, booted: Booted, iteration: int) -> int:
+        ids = self._ids[iteration * self._batch : (iteration + 1) * self._batch]
+        await booted.harness.wrapper.delete_notes(ids)
+        return len(ids)
+
+    def _note(self, j: int) -> dict:
+        rng = random.Random(0xDE1E7E ^ j)
+        return {
+            "deck": "Perf::Delete",
+            "note_type": "Basic",
+            "tags": ["perf-delete"],
+            "fields": {
+                "Front": f"delete {j}",
+                "Back": " ".join(rng.choice(_VOCAB) for _ in range(8)),
+            },
+        }
+
+
 #: name → workload class (instantiated with defaults by the runner).
-WORKLOADS = {w.name: w for w in (SearchWorkload, RebuildWorkload, IngestWorkload)}
+WORKLOADS = {
+    w.name: w
+    for w in (
+        SearchWorkload,
+        RebuildWorkload,
+        IngestWorkload,
+        ReconcileWorkload,
+        DeleteWorkload,
+    )
+}
