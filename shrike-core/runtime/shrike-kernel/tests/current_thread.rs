@@ -62,6 +62,9 @@ fn full_flow_on_the_driven_runtime() {
             .await
             .unwrap();
         assert_eq!(outcomes.len(), 1);
+        // The upsert's derived/FTS write rides the async ingest drain, so settle
+        // before the lexical search (eventual consistency — a bare search races it).
+        kernel.settle().await;
         let hits = kernel.search("mitochondria", 5).await.unwrap();
         assert!(!hits.is_empty(), "lexical search found the note");
         kernel.close().await.unwrap();

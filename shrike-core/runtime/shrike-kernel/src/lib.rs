@@ -2964,6 +2964,9 @@ mod no_cpython_smoke {
                 panic!("create must work without an embedder")
             };
             // Lexical-only: the literal hit lands, no semantic signal exists.
+            // The detached upsert's derived/FTS write rides the async ingest drain, so
+            // settle before searching (eventual consistency — a bare search races it).
+            kernel.settle().await;
             let hits = kernel.search("capital of france", 5).await.unwrap();
             assert_eq!(hits[0].note_id, nid);
             assert!(hits[0].signals.iter().all(|(s, _)| s != "text"));
@@ -2972,6 +2975,7 @@ mod no_cpython_smoke {
             // drift and embeds the note created while detached.
             kernel.attach_embedder(Arc::new(HashEmbedder), None);
             assert!(kernel.reindex_if_needed().await.unwrap());
+            kernel.settle().await;
             let hits = kernel.search("capital of france", 5).await.unwrap();
             assert!(hits[0].signals.iter().any(|(s, _)| s == "text"));
 
