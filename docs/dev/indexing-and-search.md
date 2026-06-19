@@ -79,18 +79,30 @@ current index — a test, a search-after-write — awaits it rather than polling
 ### The stale-read advisory
 
 The readiness barrier blocks until quiescent; a read often wants to serve now and
-be *told* the result may lag. `search_notes` does: it carries `stale: true` in its
-response when the kernel was not settled as it ran — a write still draining through
-the embed queue, or a rebuild in flight — so the semantic ranking may miss a
-just-written note. It serves immediately regardless; the caller decides to use it
-or retry. The signal is `Kernel::is_settled()`, a non-blocking read of the ingest
-handle's outstanding-work counter (incremented per `Item`/`Job` sent, decremented
-as each drains): zero means the queue drained AND no bulk rebuild is mid-flight,
-since rebuilds ride the same channel. This is the per-write lag the H1 readiness
-gate deliberately doesn't wait on — the gate covers boot/reload/re-acquire
-quiescence, the advisory covers the gap between a write committing and its index
-update draining. Only `search_notes` carries it: `list_notes`/`collection_query`
-read the always-current collection, so they are never stale.
+be *told* the result may lag. `search_notes` does: it carries `stale: true` when the
+result was taken against a snapshot that wasn't fully indexed — a write still
+draining through the embed queue, or a rebuild in flight — so the semantic ranking
+may miss a just-written note. It serves immediately regardless; the caller decides
+to use it or retry.
+
+The verdict is computed **at read time, inside the read**, not sampled before it.
+The whole search runs as one collection-actor job (the host dispatches it through
+`wrapper.run` → `kernel.run_job`), so the collection scan AND the Arc-shared
+vector-index/derived reads sit in one span — and the ingest actor, which writes
+those same stores off a separate task, is exactly what can make them lag. The native
+search (`action_search_notes`) brackets the read with a `FreshnessStamp` at each
+edge — `core.col_mod()` plus `Kernel::is_settled()` (a non-blocking read of the
+ingest handle's outstanding-work counter: incremented per `Item`/`Job` sent,
+decremented as each drains; zero means the queue drained AND no bulk rebuild is
+mid-flight, since rebuilds ride the same channel) — and `is_stale_read` is the
+conservative OR: the result is fresh only if `col_mod` was unchanged across the read
+and settled at both edges. Any doubt → stale.
+
+This is the per-write lag the H1 readiness gate deliberately doesn't wait on — the
+gate covers boot/reload/re-acquire quiescence, the advisory covers the gap between a
+write committing and its index update draining. Only `search_notes` carries it:
+`list_notes`/`collection_query` read the always-current collection, so they are
+never stale.
 
 ### Per-modality sub-indexes
 

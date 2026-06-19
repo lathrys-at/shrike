@@ -205,9 +205,10 @@ class _GatedBackend(_NoteBackend):
 
 
 class TestSearchNotesFreshness:
-    """The stale-read advisory: a search carries `stale=True` when the kernel
-    was not settled as it ran (a write still draining through the embed queue),
-    and `stale=False` once settled."""
+    """The stale-read advisory: the action threads through the read-time `stale`
+    verdict the native search computes (the col_mod + settled bracket around the
+    read). A settled search is fresh; a search run while a write drains is stale.
+    The native bracket itself is proven end-to-end in test_async_kernel."""
 
     def test_settled_search_is_not_stale(self, kharness, mcp_sem):
         # The harness settles after the seed, so the kernel is quiescent.
@@ -217,7 +218,9 @@ class TestSearchNotesFreshness:
 
     def test_search_while_write_draining_is_stale(self, kharness, mcp_no_index):
         # A gated embedder parks the upsert's embed maintenance, so the kernel
-        # stays un-settled; a search run in that window must flag `stale`.
+        # stays un-settled; the native read's bracket sees it and the action
+        # threads the resulting `stale` through. (The query has text, so the read
+        # runs even with no index — the bracket is on the read either way.)
         gated = _GatedBackend()
         # No reindex at attach: the collection is empty, and a reindex would
         # itself park in the gated embed. The first embed to park is the upsert's.

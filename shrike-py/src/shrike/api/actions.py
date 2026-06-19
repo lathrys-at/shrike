@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 import shrike_native
-from pydantic import Field, TypeAdapter
+from pydantic import BaseModel, Field
 
 from shrike.harness.collection import (
     CollectionWrapper,
@@ -100,6 +100,16 @@ def note_outcome(message: str) -> None:
 # fragments must not burn an embedding call. Ids-anchored searches are never
 # gated (no typing-fragment problem).
 MIN_SEMANTIC_QUERY_CHARS = 3
+
+
+class _SearchNotesNative(BaseModel):
+    """The `action_search_notes` native payload: the fused groups plus the
+    read-time freshness verdict the kernel computed inside the read. Internal to
+    this module — the host maps it onto the public `SearchResponse`."""
+
+    groups: list[SearchResultGroup] = []
+    stale: bool = False
+
 
 # `limit` == 0 means "return all": no upper cap. Used only on the paths
 # whose native cap is a plain `.take()`/`.truncate()`/SQLite `LIMIT` — list_notes,
@@ -867,15 +877,6 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         if not queries and not ids:
             raise ToolInputError("At least one of queries or ids must be provided.")
 
-        # Freshness advisory: the kernel's non-blocking settled probe, read once
-        # up front. Not settled means a recent write is still draining through the
-        # embed queue (or a rebuild is in flight), so the semantic ranking may lag
-        # the collection. Serve immediately and flag `stale` rather than block —
-        # the caller decides. The data-plane readiness gate covers boot/reload
-        # quiescence; this is the per-write lag the gate deliberately doesn't wait
-        # on.
-        stale = not kernel.is_settled()
-
         logger.debug(
             "search_notes queries=%d ids=%d limit=%d threshold=%.2f",
             len(queries or []),
@@ -929,16 +930,16 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                     "'shrike embedding start'."
                 )
             # Pure semantic request with nothing to substring-match → nothing to do.
+            # These early exits serve no semantically-ranked data (lexical-only or
+            # empty), and lexical hits read the always-current collection, so the
+            # default `stale=False` is honest — the stale verdict is computed at
+            # read time only on the path that actually runs the index/derived read.
             if not queries:
-                return SearchResponse(
-                    message=message, completeness=completeness, version=version, stale=stale
-                )
+                return SearchResponse(message=message, completeness=completeness, version=version)
         elif not semantic_ok and not queries:
             # The live tier with id anchors only: anchors are semantic-only,
             # so there is nothing the cheap signals can do.
-            return SearchResponse(
-                message=message, completeness=completeness, version=version, stale=stale
-            )
+            return SearchResponse(message=message, completeness=completeness, version=version)
 
         if deck:
             # Accept a deck name, #id, or numeric id; an explicit id that matches
@@ -950,7 +951,6 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                     message="No deck matches that reference.",
                     completeness=completeness,
                     version=version,
-                    stale=stale,
                 )
 
         exclude_set = set(exclude_ids or [])
@@ -972,7 +972,6 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 message="No valid queries or note IDs to search.",
                 completeness=completeness,
                 version=version,
-                stale=stale,
             )
 
         # Query vectors (host-side embedding); the assembly itself runs in
@@ -1050,7 +1049,13 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 cross_space=cross_space_json,
             )
         )
-        groups = TypeAdapter(list[SearchResultGroup]).validate_json(raw)
+        # The native read returns the fused groups plus the read-time `stale`
+        # verdict: computed inside the collection-actor job that ran the read, by
+        # bracketing the whole index/derived read with a col_mod + ingest-settled
+        # check — so it describes the snapshot the result was actually taken
+        # against, not a value sampled before the read.
+        payload = _SearchNotesNative.model_validate_json(raw)
+        groups = payload.groups
         # Activation-floor calibration feedstock: one sample per query group —
         # the best SEMANTIC cosine, or a no-match tick. A lexical-only hit has
         # `score=None` and never pollutes the semantic sample.
@@ -1064,7 +1069,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             message=message,
             completeness=completeness,
             version=version,
-            stale=stale,
+            stale=payload.stale,
         )
 
     @_action

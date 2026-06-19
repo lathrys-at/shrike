@@ -179,14 +179,42 @@ pub(crate) fn action_search_notes(
         cross_space_budget,
     };
     py.detach(|| {
+        use shrike_kernel::actions::{is_stale_read, FreshnessStamp};
         let tag_keys = tag_kernel.as_ref().map(|k| k.tag_keys());
+        // Freshness bracket: this whole closure runs inside the one
+        // collection-actor job (the host dispatches via wrapper.run →
+        // run_job), so capturing the stamps here and there spans the ENTIRE
+        // read — the collection scan AND the Arc-shared index/derived reads the
+        // ingest actor writes concurrently. `settled` reads the ingest
+        // `outstanding == 0` gauge off the kernel handle; `true` when no kernel
+        // rode in (a facade), leaving only the col_mod stability check.
+        let settled = || tag_kernel.as_ref().is_none_or(|k| k.is_settled());
+        let start = FreshnessStamp {
+            col_mod: inner.col_mod()?,
+            settled: settled(),
+        };
         let groups = shrike_kernel::actions::search_notes(
             inner, index, derived, tag_keys, &sources, &vectors, &args,
         )?;
-        serde_json::to_string(&groups)
-            .map_err(|e| shrike_error::NativeError::internal(e.to_string()))
+        let end = FreshnessStamp {
+            col_mod: inner.col_mod()?,
+            settled: settled(),
+        };
+        serde_json::to_string(&SearchNotesWire {
+            groups,
+            stale: is_stale_read(start, end),
+        })
+        .map_err(|e| shrike_error::NativeError::internal(e.to_string()))
     })
     .map_err(to_py_err)
+}
+
+/// The `action_search_notes` wire payload: the fused groups plus the read-time
+/// freshness verdict the host threads onto `SearchResponse.stale`.
+#[derive(serde::Serialize)]
+struct SearchNotesWire {
+    groups: Vec<shrike_schemas::SearchResultGroup>,
+    stale: bool,
 }
 
 /// Resolve the cross-space fusion variant + τ + budget from the environment
