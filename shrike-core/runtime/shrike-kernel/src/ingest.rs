@@ -765,10 +765,11 @@ impl Ingestor {
                     .await?;
             }
         }
-        // Make the vectors durable BEFORE the done-marker rows land (C2). The
+        // Make the vectors durable BEFORE the done-marker rows land (C2), off
+        // the actor so the blocking save doesn't stall the executor. The
         // recognized text changed the affected notes' tag-relevant vectors, so
         // refresh the tag centroids off the tail (coalesced).
-        self.flush_durable();
+        self.flush_durable_off_actor().await;
         if self.tag_keys.any_member_of(&written) {
             self.tag_refresh.request();
         }
@@ -1039,11 +1040,31 @@ impl Ingestor {
 
     /// Flush the index savers durably (shutdown's "watermark durable" step). The
     /// derived watermark is already durable (`set_col_mod` is a synchronous
-    /// SQLite write).
+    /// SQLite write). Synchronous — used only on the shutdown path, which runs
+    /// once and is not latency-sensitive; the per-op recognition path uses
+    /// [`Self::flush_durable_off_actor`] so the blocking save never stalls the
+    /// single async executor.
     fn flush_durable(&self) {
         for saver in self.index_set.all_savers() {
             saver.flush();
         }
+    }
+
+    /// Flush the index savers durably OFF the actor task: the save is a blocking
+    /// file write (`orchestrator.save()` orders engine → hashes → meta), so it
+    /// rides `dispatch_compute` rather than running inline on `drive_io` — at
+    /// scale an inline save would stall every async task for the whole write.
+    /// The recognition re-embed (C2) needs the vectors durable before its derived
+    /// rows land, so it awaits this.
+    async fn flush_durable_off_actor(&self) {
+        let savers = self.index_set.all_savers();
+        let _ = runtime::dispatch_compute(move || {
+            for saver in savers {
+                saver.flush();
+            }
+            Ok::<(), NativeError>(())
+        })
+        .await;
     }
 }
 
