@@ -26,8 +26,10 @@ precise — an idle daemon steps aside, not that both operate at once.
 
 On each re-acquire an `on_acquire` hook runs a cheap drift check
 (`index.check_drift(col.mod)`) and rebuilds off-lock only on real drift (an
-external edit during the idle gap). In default (permanent) mode this path is
-inert.
+external edit during the idle gap). Reopening starts a fresh readiness generation:
+the harness re-establishes its barrier so a reconcile rides the ingest actor's
+bulk-op path and `await_ready` resolves only once the reopened index has settled.
+In default (permanent) mode this path is inert.
 
 The daemon-liveness lock (`server.lock`) is **separate** from the collection
 lock. `server status` and `GET /status` report both (`locking`,

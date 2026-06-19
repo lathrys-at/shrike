@@ -69,9 +69,12 @@ of a re-embed). The knobs are configurable; the numeric defaults live in
 The index reports `ready`, `building` (with progress), `unavailable` (embedding
 service not running), or `error` (build failed). It is exposed via `/status`,
 `search_notes` responses, and `shrike server status`. Both reconcile and full
-rebuild run in a background thread, so the server is never blocked; the server
-accepts requests immediately and `search_notes` returns an actionable status
-("building 2847/5000 notes, try again shortly") until ready.
+rebuild ride the ingest actor's bulk-op path (one FIFO order with the hot write
+path), so the server is never blocked; it accepts requests immediately and
+`search_notes` returns an actionable status ("building 2847/5000 notes, try again
+shortly") until ready. The harness readiness barrier (`await_ready` / `settle()`)
+resolves on "queue drained, no rebuild pending", so a caller that must see a
+current index — a test, a search-after-write — awaits it rather than polling.
 
 ### Per-modality sub-indexes
 
@@ -92,10 +95,12 @@ each modality enters fusion as its own signal. Because rank fusion compares rank
 ## The derived-text store
 
 Derived data — text Shrike computes locally from notes — wants one home, separate
-from Anki's synced collection. `DerivedTextStore` (`harness/derived.py`) is that
-home: a sidecar SQLite file (`shrike.db`) in the cache directory. Its first
-artifact is an **FTS5 trigram index** over note text, which backs the substring
-(`exact`) candidates and the `fuzzy` signal of `search_notes`.
+from Anki's synced collection. The home is a sidecar SQLite file (`shrike.db`) in
+the cache directory, written by the kernel's `DerivedEngine` (`shrike-derived`) —
+the single writer, reached through the ingest actor, with `harness/derived.py`
+(`DerivedTextStore`) the harness-side facade. Its first artifact is an **FTS5
+trigram index** over note text, which backs the substring (`exact`) candidates
+and the `fuzzy` signal of `search_notes`.
 
 It lives in a sidecar rather than in `collection.anki2` because Anki's sync,
 "Check Database", media check, and version migrations own that schema — a foreign

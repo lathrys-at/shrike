@@ -93,8 +93,14 @@ fingerprint assembly, `health()` — and hand the kernel a native composition. T
 and test backends; no production path uses it.
 
 Write operations route through a fixed set of kernel ops — `upsert_notes_json`,
-`delete_notes`, `reindex_notes`, `forget_notes`, `metadata_changed` — so the
-index and derived store stay consistent with the collection by construction.
+`delete_notes`, `reindex_notes`, `forget_notes`, `metadata_changed`. Each commits
+to the collection and hands the affected note ids to the **ingest actor** — the
+single writer of the index, the derived store, and the watermarks (see the
+runtime below) — so the stores stay consistent with the collection by
+construction. The collection write returns immediately; the embed and index
+update run asynchronously off a queue, so a fast interactive write never waits on
+a multi-second embed. A caller that needs the index current — a search-after-write,
+a test — awaits `settle()`.
 
 ## The runtime
 
@@ -133,6 +139,18 @@ A few rules keep it correct:
   processes jobs from an mpsc queue in order, its work executing on `drive_sync`.
   Serialization comes from the task's sequential loop, not from thread affinity —
   there is no `block_in_place`.
+- **The index/derived stores have one writer too.** A second persistent task — the
+  **ingest actor** (`ingest.rs`) — is the only code that mutates the vector index,
+  the derived store, and the watermarks. Every write op enqueues onto its single
+  FIFO channel *from inside* the collection-write job, so queue order matches the
+  monotonic `col.mod` order. The embed queue decouples the fast collection commit
+  from the slow embed: the consumer drains in batches (re-read content → embed on
+  `drive_compute` → atomic per-note index add → derived ingest → advance the
+  watermark). Because there is exactly one writer, the index-vs-derived race family
+  dissolves by construction — no lock, no in-flight-token reconciliation. Bulk ops
+  (reindex/rebuild/recognition store) ride the same channel as awaited jobs, so
+  they serialize with the hot path; `settle()` and the harness readiness barrier
+  stand on "queue drained, no rebuild pending".
 - **Engine compute is dispatched eagerly, never inline.** `dispatch_compute` (the
   `Blocking<E>` adapter's seam) schedules each engine call onto `drive_compute` inside
   the call, which preserves the search/batch overlap. Independent batch futures are
