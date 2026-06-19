@@ -265,10 +265,14 @@ class DerivedTextStore:
     def _can_serve_reads(self) -> bool:
         """Whether a *read* (substring/fuzzy) may run against the engine right now.
 
-        The kernel is the sole writer of ``shrike.db`` — it rebuilds against its OWN connection
-        (the rows never enter Python), and SQLite (WAL) serves this facade's connection the last
-        committed state throughout. So a read is safe and consistent even mid-rebuild: serve in
-        both READY and BUILDING (a build must not silently field-fall-back already-present rows).
+        Serving in both READY and BUILDING is safe because the kernel's rebuild is
+        ATOMIC: it builds the new FTS5 index into a shadow off the live tables and swaps it over
+        them in ONE transaction, so any reader sees either the complete OLD index or the complete
+        NEW one — never a torn/partial state mid-rebuild. (The justification is the atomic swap,
+        NOT a journal mode — the store opens ``journal_mode=DELETE``, not WAL.) Production lexical
+        reads run through the kernel's own mutex'd connection, serialized against the swap; this
+        facade's separate connection (the ``/status`` surface) likewise sees only committed state.
+        So a BUILDING read must not silently field-fall-back already-present rows — serve it.
         """
         if not self._available or self._engine is None:
             return False
