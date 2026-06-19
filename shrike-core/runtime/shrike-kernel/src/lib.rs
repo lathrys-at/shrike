@@ -6189,4 +6189,76 @@ mod no_cpython_smoke {
             std::fs::remove_dir_all(dir).ok();
         });
     }
+
+    /// A `rebuild_derived` overlapping concurrent searches must not deadlock.
+    ///
+    /// The streaming rebuild pulls field-row chunks through the collection actor
+    /// (the single drive_sync thread); a concurrent `search` runs `search_notes`
+    /// through that SAME actor and takes the derived connection lock
+    /// (search_substring/search_fuzzy). If the rebuild held that lock across its
+    /// chunk pulls, the search would wedge the actor on the lock while the
+    /// rebuild waited on the actor for its next chunk — a circular wait that
+    /// hangs the whole kernel. The rebuild drops the lock around every pull, so
+    /// the two interleave. The watchdog is a liveness guard: it aborts the
+    /// process if the run wedges, so a regression fails loudly instead of hanging
+    /// CI. With the fix the run completes in well under a second.
+    #[test]
+    fn rebuild_derived_does_not_deadlock_against_concurrent_search() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let done = Arc::new(AtomicBool::new(false));
+        let wd = Arc::clone(&done);
+        std::thread::spawn(move || {
+            for _ in 0..300 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if wd.load(Ordering::SeqCst) {
+                    return;
+                }
+            }
+            eprintln!(
+                "DEADLOCK: rebuild_derived wedged against a concurrent search on the derived lock"
+            );
+            std::process::abort();
+        });
+
+        let done_set = Arc::clone(&done);
+        crate::runtime::testing::run_with_sync(async move {
+            let dir = temp_dir();
+            let kernel = Arc::new(
+                Kernel::open(
+                    dir.join("c.anki2").to_str().unwrap(),
+                    dir.join("cache").to_str().unwrap(),
+                )
+                .await
+                .unwrap(),
+            );
+            kernel.attach_embedder(Arc::new(HashEmbedder), None);
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+            let n = index_orchestrator::STREAM_CHUNK * 3;
+            let notes: Vec<NoteSpec> = (0..n)
+                .map(|i| NoteSpec {
+                    notetype_id: basic,
+                    deck_id: 1,
+                    fields: vec![format!("note body {i} mitochondria"), format!("back {i}")],
+                    tags: vec![],
+                })
+                .collect();
+            kernel
+                .upsert_notes(notes, DuplicatePolicy::Error)
+                .await
+                .unwrap();
+
+            let searcher = Arc::clone(&kernel);
+            let search_loop = async move {
+                for _ in 0..200 {
+                    let _ = searcher.search("mitochondria", 5).await;
+                }
+            };
+            let (rebuilt, _) = futures::join!(kernel.rebuild_derived(), search_loop);
+            rebuilt.unwrap();
+
+            kernel.close().await.unwrap();
+            std::fs::remove_dir_all(dir).ok();
+        });
+        done_set.store(true, Ordering::SeqCst);
+    }
 }

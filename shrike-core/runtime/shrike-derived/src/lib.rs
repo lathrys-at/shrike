@@ -587,15 +587,46 @@ impl DerivedEngine {
         live_notes: &[i64],
         col_mod: i64,
     ) -> NativeResult<usize> {
+        // The streaming producer reads each chunk through the collection actor
+        // (the single drive_sync thread). The connection lock MUST NOT be held
+        // across `next()`: a concurrent `search` runs `search_substring`/
+        // `search_fuzzy` THROUGH that same actor and takes THIS lock, so holding
+        // it across the actor-dependent pull would wedge the actor on the lock
+        // while the build waits on the actor — a circular deadlock. So the lock
+        // is taken per phase (reset, each chunk insert, prune+stamp) and dropped
+        // around every `next()`. The build is therefore NOT one transaction: a
+        // crash mid-rebuild leaves a partial store at the OLD col_mod (stamped
+        // LAST), which reads as drift on the next boot and rebuilds — the
+        // rebuildable-cache contract. The store reports BUILDING throughout, so a
+        // search landing mid-rebuild may see a partial index (it falls back),
+        // never a hang.
+
+        // Phase 1 — reset the field rows (own transaction, lock dropped after).
+        self.reset_field_rows()?;
+
+        // Phase 2 — pull chunks OFF-lock, insert each under a short lock.
+        let mut total = 0usize;
+        while let Some(chunk) = next() {
+            let chunk = chunk?;
+            total += self.insert_chunk(&chunk)?;
+        }
+
+        // Phase 3 — prune dead-note recognition rows + stamp col_mod (own
+        // transaction). Stamping LAST keeps the rebuild crash-safe: until it
+        // lands, drift still fires.
+        self.prune_and_stamp(live_notes, col_mod)?;
+        Ok(total)
+    }
+
+    /// Phase 1 of the streaming rebuild: clear the `field` rows in one short
+    /// transaction (lock released on return). When NO recognition rows exist
+    /// (the common case) the FTS5 table is dropped + recreated — 40× faster than
+    /// a whole-table DELETE at 50k rows (per-row tombstones), and FTS5's
+    /// delete-all shortcut is unavailable on a content-ful table. DDL is
+    /// transactional, and the recreate reuses the schema's own DDL string.
+    fn reset_field_rows(&self) -> NativeResult<()> {
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
-        // FTS5's per-row delete writes a tombstone per token list — on a
-        // rebuild that's a second insert-sized cost. When ONLY field rows exist
-        // (no recognition rows to preserve — the common case), drop and recreate
-        // the table instead: measured 40× faster than even a whole-table DELETE
-        // at 50k rows, and FTS5's 'delete-all' shortcut is unavailable on a
-        // content-ful table. DDL is transactional in SQLite, and the recreate
-        // reuses the schema's own DDL string.
         let has_other: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM rowmap WHERE source != 'field')",
@@ -616,10 +647,21 @@ impl DerivedEngine {
             tx.execute(Self::IDX_DDL, []).map_err(db_err)?;
             tx.execute("DELETE FROM rowmap", []).map_err(db_err)?;
         }
-        let mut total = 0usize;
+        tx.commit().map_err(db_err)
+    }
+
+    /// Phase 2 of the streaming rebuild: insert ONE chunk's rows under a short
+    /// lock (one transaction per chunk so the lock is released between the
+    /// actor-dependent pulls). Returns the rows SEEN (blank text skipped). The
+    /// idx↔rowmap pairing rides `last_insert_rowid()` on this connection — sound
+    /// because every write rides the single mutexed connection (the module
+    /// invariant), and a concurrent read takes the lock but never inserts, so it
+    /// can't perturb the pairing between the two statements here.
+    fn insert_chunk(&self, chunk: &[(i64, String, String, String)]) -> NativeResult<usize> {
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(db_err)?;
+        let mut seen = 0usize;
         {
-            // Parse the two insert statements once, not once per row
-            // (~2 prepares × every field row of the collection, per rebuild).
             let mut ins_idx = tx
                 .prepare_cached("INSERT INTO idx(txt) VALUES(?1)")
                 .map_err(db_err)?;
@@ -628,28 +670,32 @@ impl DerivedEngine {
                     "INSERT INTO rowmap(rowid, note_id, source, ref) VALUES(?1,?2,?3,?4)",
                 )
                 .map_err(db_err)?;
-            // Pull row chunks from the producer (blocking the calling thread)
-            // and insert them within this one transaction — O(chunk) memory.
-            while let Some(chunk) = next() {
-                let chunk = chunk?;
-                for (note_id, source, reference, text) in &chunk {
-                    total += 1;
-                    if text.trim().is_empty() {
-                        continue;
-                    }
-                    ins_idx.execute([text]).map_err(db_err)?;
-                    let rowid = tx.last_insert_rowid();
-                    ins_map
-                        .execute(rusqlite::params![rowid, note_id, source, reference])
-                        .map_err(db_err)?;
+            for (note_id, source, reference, text) in chunk {
+                seen += 1;
+                if text.trim().is_empty() {
+                    continue;
                 }
+                ins_idx.execute([text]).map_err(db_err)?;
+                let rowid = tx.last_insert_rowid();
+                ins_map
+                    .execute(rusqlite::params![rowid, note_id, source, reference])
+                    .map_err(db_err)?;
             }
         }
-        // Prune recognition rows (and their segments, and below-gate markers)
-        // for notes no longer in the collection. The authoritative note set is
-        // `live_notes` (the collection), NOT the field rows: a note can be live
-        // yet contribute no field rows (all-blank fields, or a snapshot taken
-        // before it was written), and its recognition rows must survive.
+        tx.commit().map_err(db_err)?;
+        Ok(seen)
+    }
+
+    /// Phase 3 of the streaming rebuild: prune recognition rows (and their
+    /// segments + below-gate markers) for notes no longer in the collection,
+    /// then stamp `col_mod` — in one short transaction (lock released after).
+    /// The authoritative note set is `live_notes` (the collection), NOT the
+    /// field rows: a note can be live yet contribute no field rows (all-blank
+    /// fields, or a snapshot taken before it was written), and its recognition
+    /// rows must survive.
+    fn prune_and_stamp(&self, live_notes: &[i64], col_mod: i64) -> NativeResult<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(db_err)?;
         let live: std::collections::HashSet<i64> = live_notes.iter().copied().collect();
         let stale: Vec<i64> = {
             let mut stmt = tx
@@ -674,8 +720,7 @@ impl DerivedEngine {
             [col_mod],
         )
         .map_err(db_err)?;
-        tx.commit().map_err(db_err)?;
-        Ok(total)
+        tx.commit().map_err(db_err)
     }
 
     /// A free-form meta value (e.g. the recognizer fingerprint).
