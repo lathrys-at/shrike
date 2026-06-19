@@ -33,6 +33,7 @@ pub mod fusion;
 pub mod index_orchestrator;
 pub mod index_set;
 pub mod ingest;
+pub mod maintenance;
 pub mod recognize;
 pub mod tag_centroids;
 pub mod watermark;

@@ -549,3 +549,26 @@ decoding against a raw read-only `rusqlite` connection (fragile, and still block
 lock while anki is open). Theme B's streamed read — the single `drive_sync` thread, pipelined
 against the embed (`read(k+1) ‖ embed(k)`) — is therefore the read-phase design, and the
 downstream read-parallelism work the spike gated is closed as not-feasible against the current anki.
+
+### One structured-maintenance primitive — but the saver's debounce is not just burst-coalescing (Theme G)
+
+Two background coalescers survived the ingest-actor consolidation (Theme A absorbed the
+derived-claim and recognition-sweep coordinators): the index `DebouncedSaver` and the
+`TagRefresher`. Both are now expressed over one primitive, `maintenance::Maintenance` — a coalescing
+single-flight job with a uniform `request` / coalesce / `cancel` / `shutdown` lifecycle and a single
+status counter (`pending`). The win is uniformity and one place to later hang the deferred #797/#800
+instrumentation, not throughput.
+
+The non-obvious part is *why the primitive carries two pacing knobs rather than one*. The proposal
+framed both jobs as burst-coalescers whose threshold "can be trivial under rare concurrency." That is
+true for the tag refresh (a cheap, pure recompute — `delay = 0`: run immediately, coalesce concurrent
+requests into one re-run paced by `window`). It is **not** true for the index saver. The saver's
+`delay` is a *re-arming time-window debounce*: it batches a stream of **spaced** writes — an
+interactive add-N-notes session, one note every few seconds — into a single large index file write
+per quiet period. Collapsing it to immediate-coalesce would issue one full-index write per note in
+exactly that common case, since spaced requests never overlap a run to coalesce. So `Maintenance`
+keeps both modes: a re-arming `delay` (saver: batch spaced writes), a burst `threshold` (cap a flood
+so it doesn't sit behind the debounce), and a coalesced re-run `window`. `delay = 0, threshold = 0`
+recovers the pure coalesce-loop. The synchronous shutdown write stays the host's own path
+(`DebouncedSaver::flush` calls `cancel` then writes inline), so `close()` returns only after the
+write lands.

@@ -246,23 +246,7 @@ impl TagKeyMap {
 /// engine state, so the coalesced run sees everything the skipped ones would
 /// have.
 pub struct TagRefresher {
-    collection: Arc<crate::SerializedCollection>,
-    engine: Arc<dyn VectorIndex>,
-    keys: Arc<TagKeyMap>,
-    config: TagCentroidConfig,
-    saver: Arc<crate::index_orchestrator::DebouncedSaver>,
-    embed: Arc<std::sync::RwLock<crate::EmbedSpaces>>,
-    window: std::time::Duration,
-    state: std::sync::Mutex<RefreshState>,
-}
-
-#[derive(Default)]
-struct RefreshState {
-    running: bool,
-    dirty: bool,
-    /// The in-flight task — aborted on shutdown so a sleeping follow-up
-    /// never outlives the kernel's collection actor.
-    task: Option<tokio::task::AbortHandle>,
+    job: Arc<crate::maintenance::Maintenance>,
 }
 
 /// Pacing between coalesced follow-up refreshes under sustained write
@@ -272,7 +256,9 @@ pub const TAG_REFRESH_WINDOW: f64 = 2.0;
 impl TagRefresher {
     /// Build a refresher over the collection actor, vector engine, key map,
     /// hygiene config, debounced saver, and the embed-slot the recompute means
-    /// over. Wraps it in the `Arc` the spawned refresh tasks clone.
+    /// over. The refresh runs on the shared [`crate::maintenance::Maintenance`]
+    /// coalescing job: immediate first run (`delay = 0`), concurrent requests
+    /// coalesced into one re-run paced by [`TAG_REFRESH_WINDOW`], no burst cap.
     pub fn new(
         collection: Arc<crate::SerializedCollection>,
         engine: Arc<dyn VectorIndex>,
@@ -281,73 +267,54 @@ impl TagRefresher {
         saver: Arc<crate::index_orchestrator::DebouncedSaver>,
         embed: Arc<std::sync::RwLock<crate::EmbedSpaces>>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let ctx = Arc::new(RefreshCtx {
             collection,
             engine,
             keys,
             config,
             saver,
             embed,
-            window: std::time::Duration::from_secs_f64(TAG_REFRESH_WINDOW),
-            state: std::sync::Mutex::new(RefreshState::default()),
-        })
+        });
+        let job = crate::maintenance::Maintenance::new(
+            Box::new(move || {
+                let ctx = Arc::clone(&ctx);
+                Box::pin(async move { ctx.run_once().await })
+            }),
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs_f64(TAG_REFRESH_WINDOW),
+            0,
+        );
+        Arc::new(Self { job })
     }
 
     /// Note a membership-relevant change. Never blocks, never errors: the
     /// refresh is best-effort by contract (the tag layer is
     /// conditionally-present and must not fail the op it rides on).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal state mutex is poisoned (a prior holder
-    /// panicked).
-    pub fn request(self: &Arc<Self>) {
-        {
-            let mut st = self.state.lock().expect("tag refresher poisoned");
-            if st.running {
-                st.dirty = true;
-                return;
-            }
-            st.running = true;
-            st.dirty = false;
-        }
-        let this = Arc::clone(self);
-        let task = crate::runtime::handle().spawn(async move {
-            loop {
-                this.run_once().await;
-                {
-                    let mut st = this.state.lock().expect("tag refresher poisoned");
-                    if !st.dirty {
-                        st.running = false;
-                        st.task = None;
-                        break;
-                    }
-                    st.dirty = false;
-                }
-                tokio::time::sleep(this.window).await;
-            }
-        });
-        // The task may already have finished (and cleared itself); storing a
-        // finished handle is harmless — abort on a completed task is a no-op.
-        self.state.lock().expect("tag refresher poisoned").task = Some(task.abort_handle());
+    pub fn request(&self) {
+        self.job.request();
     }
 
     /// Abort any in-flight/scheduled refresh (kernel close): the collection
     /// actor is about to drain, and a late follow-up has nothing to read.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal state mutex is poisoned (a prior holder
-    /// panicked).
     pub fn shutdown(&self) {
-        let mut st = self.state.lock().expect("tag refresher poisoned");
-        st.dirty = false;
-        st.running = false;
-        if let Some(task) = st.task.take() {
-            task.abort();
-        }
+        self.job.shutdown();
     }
+}
 
+/// The state a tag-centroid refresh runs over: the collection actor, the engine
+/// and key map it rebuilds, the hygiene config, the saver it pokes after a
+/// successful recompute, and the embed-slot the recompute means over. Held
+/// behind an `Arc` the maintenance job's run closure clones.
+struct RefreshCtx {
+    collection: Arc<crate::SerializedCollection>,
+    engine: Arc<dyn VectorIndex>,
+    keys: Arc<TagKeyMap>,
+    config: TagCentroidConfig,
+    saver: Arc<crate::index_orchestrator::DebouncedSaver>,
+    embed: Arc<std::sync::RwLock<crate::EmbedSpaces>>,
+}
+
+impl RefreshCtx {
     async fn run_once(&self) {
         if self.embed.read().expect("embed slot poisoned").is_empty() {
             return; // no embedder → no text vectors to mean over

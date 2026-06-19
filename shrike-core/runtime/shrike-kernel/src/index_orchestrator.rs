@@ -687,126 +687,66 @@ impl IndexOrchestrator {
     }
 }
 
-/// The debounced saver on the kernel's own clock (tokio::time;
-/// mirrors `IndexSaver`): a flush `delay` seconds after the last change, or
-/// immediately at `threshold` unsaved changes — whichever first. The armed
-/// timer is one spawned task sleeping then flushing; re-arm aborts it (an
-/// abort lands only at the sleep — once past it the flush completes, which
-/// is fine: flush is idempotent).
+/// The debounced index saver: a flush `delay` seconds after the last change,
+/// or immediately at `threshold` unsaved changes — whichever first — expressed
+/// over the shared [`crate::maintenance::Maintenance`] coalescing job. The file
+/// write rides the compute pool (`dispatch_compute`), never a runtime worker or
+/// an op tail; a re-save coalesced in mid-write is itself debounced
+/// (`window == delay`). [`flush`](Self::flush) is the synchronous shutdown
+/// path: it disarms the job and writes inline, so `close()` returns only after
+/// the write lands.
 pub struct DebouncedSaver {
     orchestrator: Arc<IndexOrchestrator>,
-    delay: std::time::Duration,
-    threshold: u64,
-    pending: Mutex<PendingState>,
-}
-
-#[derive(Default)]
-struct PendingState {
-    changes: u64,
-    armed: Option<tokio::task::AbortHandle>,
+    job: Arc<crate::maintenance::Maintenance>,
 }
 
 impl DebouncedSaver {
     /// Build a saver over `orchestrator` with the idle-debounce `delay_secs`
     /// (clamped non-negative) and the burst-cap `threshold`.
     pub fn new(orchestrator: Arc<IndexOrchestrator>, delay_secs: f64, threshold: u64) -> Arc<Self> {
-        Arc::new(Self {
-            orchestrator,
-            delay: std::time::Duration::from_secs_f64(delay_secs.max(0.0)),
+        let delay = std::time::Duration::from_secs_f64(delay_secs.max(0.0));
+        let orch = Arc::clone(&orchestrator);
+        let job = crate::maintenance::Maintenance::new(
+            Box::new(move || {
+                let orch = Arc::clone(&orch);
+                Box::pin(async move {
+                    // The blocking file write rides the compute pool; a detached
+                    // runtime future (driven by `drive_io`) awaits the pool job,
+                    // keeping the write off every timer and op-tail path.
+                    let save = crate::runtime::dispatch_compute(move || {
+                        orch.save().map_err(|e| {
+                            tracing::warn!(error = ?e, "debounced index save failed");
+                            e
+                        })
+                    });
+                    let _ = save.await;
+                })
+            }),
+            delay,
+            delay,
             threshold,
-            pending: Mutex::new(PendingState::default()),
-        })
+        );
+        Arc::new(Self { orchestrator, job })
     }
 
     /// Record a change: re-arm the idle timer, or flush now at the burst cap.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the pending-state mutex is poisoned (a prior holder panicked).
-    pub fn request_save(self: &Arc<Self>) {
-        // abort-old + spawn + store happen under ONE lock scope: two
-        // concurrent op tails re-arming must never each take a None and
-        // leave an orphaned (un-abortable) timer behind. The spawn is
-        // non-blocking, so holding the std mutex across it is fine.
-        let mut pending = self.pending.lock().expect("saver poisoned");
-        pending.changes += 1;
-        if let Some(armed) = pending.armed.take() {
-            armed.abort();
-        }
-        if pending.changes >= self.threshold {
-            drop(pending);
-            // Off the op tail, so the burst-cap upsert's caller doesn't eat the
-            // multi-second file write inline.
-            self.flush_background();
-            return;
-        }
-        let this = Arc::clone(self);
-        let delay = self.delay;
-        let task = crate::runtime::handle().spawn(async move {
-            tokio::time::sleep(delay).await;
-            // Blocking fs work belongs on the blocking pool, not a runtime
-            // worker.
-            this.flush_background();
-        });
-        pending.armed = Some(task.abort_handle());
+    pub fn request_save(&self) {
+        self.job.request();
     }
 
-    /// Unsaved changes since the last flush.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the pending-state mutex is poisoned (a prior holder panicked).
+    /// Unsaved changes since the last flush was handed off.
     pub fn pending_changes(&self) -> u64 {
-        self.pending.lock().expect("saver poisoned").changes
+        self.job.pending()
     }
 
-    /// Disarm the timer and zero the counter — synchronously, so
-    /// `pending_changes` means "changes not yet handed to a flush" regardless
-    /// of where the file write runs.
-    fn reset_pending(&self) {
-        let mut pending = self.pending.lock().expect("saver poisoned");
-        if let Some(armed) = pending.armed.take() {
-            // Possibly our own handle (the timer task flushing) — an
-            // abort after the sleep is a no-op.
-            armed.abort();
-        }
-        pending.changes = 0;
-    }
-
-    /// Flush synchronously: disarm the timer, zero the counter, and persist
-    /// (a save failure is logged, not propagated — used at shutdown so close()
+    /// Flush synchronously: disarm the job, zero the counter, and persist (a
+    /// save failure is logged, not propagated — used at shutdown so close()
     /// returns only after the write lands).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the pending-state mutex is poisoned (a prior holder panicked).
     pub fn flush(&self) {
-        self.reset_pending();
+        self.job.cancel();
         if let Err(e) = self.orchestrator.save() {
             tracing::warn!(error = ?e, "debounced index save failed");
         }
-    }
-
-    /// `flush`, but the file write rides the blocking pool — the timer and
-    /// burst-threshold paths use this so neither a tokio worker nor an op
-    /// tail carries the multi-second write. The counter resets
-    /// synchronously (same contract as `flush`); shutdown keeps the
-    /// synchronous `flush` so close() returns only after the write lands.
-    fn flush_background(self: &Arc<Self>) {
-        self.reset_pending();
-        let this = Arc::clone(self);
-        // The blocking file write rides the compute pool (`dispatch_compute`);
-        // fire-and-forget, so a detached runtime task (driven by `drive_io`)
-        // awaits the pool job's completion off the timer and op-tail paths.
-        let save = crate::runtime::dispatch_compute(move || {
-            this.orchestrator.save().map_err(|e| {
-                tracing::warn!(error = ?e, "debounced index save failed");
-                e
-            })
-        });
-        crate::runtime::handle().spawn(async move {
-            let _ = save.await;
-        });
     }
 }
 
