@@ -1,43 +1,28 @@
 """The MCP host: the FastMCP app, custom HTTP routes, the per-call validator-cache
 shim, and the export download store.
 
-``main`` is re-exported so ``from shrike.server import main`` and the ``//shrike-py/bin``
-launchers keep working now that ``server`` is a package; ``python -m shrike.server``
-is served by ``__main__`` (which imports from ``shrike.server.server`` directly).
-
-The re-export is LAZY (module ``__getattr__``, PEP 562): ``main`` resolves on first
-access, not at package-import time. It cannot be eager — ``shrike.server.server``
-imports a sibling submodule (``shrike.server._mcp_perf``), which runs this package's
-``__init__``; an eager ``from shrike.server.server import main`` here would re-enter
-``shrike.server.server`` while it is still mid-initialization (``main`` not yet bound)
-and raise ``ImportError`` at import time.
-
-The first successful resolve is CACHED into the package namespace (``globals()``), so
-``main`` becomes a real attribute thereafter. This closes the intermittent
-``AttributeError: module 'shrike.server' ... does not have the attribute 'main'``:
-once any access (the ``//bin`` launcher's import, a prior test, the CLI's
-``from shrike.server import main``) has resolved ``main``, the ``getattr`` that
-``mock.patch("shrike.server.main", ...)`` runs to read the original finds the cached
-real attribute and never re-imports a possibly-mid-initialization submodule.
+``main`` is the package entry point: ``from shrike.server import main`` and the
+``//shrike-py/bin`` launchers use it (``python -m shrike.server`` goes through
+``__main__``, which imports ``shrike.server.server`` directly). It is a thin wrapper
+that imports the implementation from ``shrike.server.server`` at *call* time, not at
+package-import time. ``shrike.server.server`` pulls in the whole serve stack — the
+native extension, FastMCP, the harness, a sibling ``_mcp_perf`` submodule — so
+re-exporting ``main`` at import time raced that graph's partial initialization and
+intermittently left the package with no ``main`` attribute (``AttributeError: module
+'shrike.server' has no attribute 'main'``). Deferring the import keeps ``main`` an
+always-present, patchable attribute and pulls the serve stack in only when the server
+is actually run.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # so type checkers + IDEs still see `main` on the package
-    from shrike.server.server import main as main
-
 __all__ = ["main"]
 
 
-def __getattr__(name: str) -> object:
-    if name == "main":
-        from shrike.server.server import main
+def main() -> None:
+    """Run the MCP server. The implementation lives in ``shrike.server.server`` and is
+    imported at call time (never at package import) so this module stays clear of the
+    serve stack's import graph."""
+    from shrike.server.server import main as _main
 
-        # Cache into the package namespace so a later access — and mock.patch's
-        # restore — finds a real attribute instead of re-resolving (which could
-        # re-enter a mid-initialization submodule).
-        globals()["main"] = main
-        return main
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    _main()
