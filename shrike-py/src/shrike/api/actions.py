@@ -59,7 +59,6 @@ from shrike.schemas import (
     ListNotesResponse,
     ListProfilesResponse,
     MigrateNoteTypeResponse,
-    Neighbor,
     NoteInput,
     NoteTypeInput,
     ProfileEntry,
@@ -1027,6 +1026,14 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             )
         )
         groups = TypeAdapter(list[SearchResultGroup]).validate_json(raw)
+        # Activation-floor calibration feedstock (#848): one sample per query
+        # group — the best SEMANTIC cosine, or a no-match tick — re-sourced here
+        # from the dropped upsert neighbor path. A lexical-only hit has
+        # `score=None` and never pollutes the semantic sample.
+        if dedup_stats is not None:
+            for group in groups:
+                sem_scores = [m.score for m in group.matches if m.score is not None]
+                dedup_stats.record(max(sem_scores) if sem_scores else None)
         note_outcome(f"{len(groups)} groups, {sum(len(g.matches) for g in groups)} matches")
         return SearchResponse(
             results=groups, message=message, completeness=completeness, version=version
@@ -1042,17 +1049,6 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 description="Array of note objects to create or update.",
             ),
         ],
-        top_k_neighbors: Annotated[
-            int,
-            Field(
-                ge=0,
-                le=20,
-                description=(
-                    "Maximum similar-note neighbors to return per result. Default 5. "
-                    "Set to 0 to disable neighbor lookup."
-                ),
-            ),
-        ] = 5,
         on_duplicate: Annotated[
             Literal["error", "skip", "allow"],
             Field(
@@ -1101,27 +1097,13 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         pre-flight sanity check. Each result is `ok` (with `action`),
         `skipped`, or `error`; the response echoes `dry_run: true`.
 
-        When a vector index is available (and not a dry run), each created or
-        updated result includes `neighbors`: the most similar existing notes,
-        capped at `top_k_neighbors` (default 5). Neighbors are exactly what a
-        `search_notes` of the new note's own content returns (same fused
-        ranking — semantic + exact text + fuzzy), gated to results a genuine
-        similarity signal backs (a semantic match or an exact-text overlap),
-        so an unrelated note simply returns no neighbors. Use these for tag
-        consistency (adopt tags from nearby notes), spotting near-duplicates by
-        meaning (a softer signal than the exact `on_duplicate` rule), or
-        understanding where a new note sits in the collection. Each neighbor
-        carries note ID, similarity score (null for an exact-only match), tags,
-        and provenance — use list_notes or search_notes to inspect content.
-
-        If the index update fails transiently (e.g. the embedding service is
-        briefly unavailable), the notes are still saved but `neighbors` is
-        omitted. Each affected result is flagged `neighbors_unavailable: true`
-        and the response carries a top-level `message`. Recover the exact same
-        neighbor data afterward with search_notes(ids=[<note id>]) — it embeds
-        the same note text against the same index, so the result is identical
-        to what would have been attached here."""
-        wrapper, index, kernel, derived, dedup_stats = (await _route(collection)).unpack()
+        This is a write-only op: it commits the notes and returns their per-item
+        status. The vector index and lexical store update in the background
+        (eventual consistency), so a just-written note may not appear in a
+        `search_notes` immediately. To check for near-duplicates, `search_notes`
+        with the planned content *before* writing; to find notes similar to one
+        you just wrote, `search_notes` with its content or `ids=[<note id>]`."""
+        _, _, kernel, _, _ = (await _route(collection)).unpack()
         creates = sum(1 for n in notes if n.id is None)
         updates = len(notes) - creates
         logger.debug(
@@ -1149,183 +1131,11 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             f"{counts.get('error', 0)} errors"
         )
 
-        # A dry run writes nothing, so there is no cache maintenance or neighbor
-        # lookup to do — the results are pure validation outcomes.
-        changed_ids = (
-            [r["id"] for r in results if r.get("status") in ("created", "updated")]
-            if not dry_run
-            else []
-        )
-
-        if changed_ids and index and index.available:
-            # The neighbor attach is best-effort: the notes are already
-            # committed (and indexed kernel-side), so a failure here must
-            # never turn a successful upsert into an error response.
-            neighbors_ok = False
-            try:
-                inputs = await wrapper.note_embed_inputs(changed_ids)
-                neighbors_ok = await _attach_neighbors(
-                    results,
-                    changed_ids,
-                    [inp.text for inp in inputs],
-                    top_k_neighbors,
-                )
-            except Exception:
-                logger.warning("Failed to compute neighbors after upsert", exc_info=True)
-
-            if not neighbors_ok:
-                # Notes are saved, but neighbors could not be computed
-                # (transient index/embedding hiccup). Flag each affected
-                # result and point the caller at the recovery path: the
-                # exact same neighbor data is reproducible via a similarity
-                # search keyed on the note's own ID. We only reach here when
-                # the index was available, so search_notes(ids=...) is a
-                # viable retry.
-                # neighbors_ok is the explicit signal that the attach never
-                # ran (it assigns all-or-nothing) — the typed kernel results
-                # carry `neighbors: []` even before the attach, so key
-                # absence is not a usable sentinel.
-                pending = [r["id"] for r in results if r.get("status") in ("created", "updated")]
-                for r in results:
-                    if r.get("id") in pending:
-                        r["neighbors_unavailable"] = True
-                if pending:
-                    logger.debug(
-                        "Neighbors unavailable for %d note(s); caller can retry via "
-                        "search_notes(ids=%s)",
-                        len(pending),
-                        pending,
-                    )
-                    return UpsertNotesResponse.model_validate(
-                        {
-                            "results": results,
-                            "dry_run": False,
-                            "message": (
-                                "Notes were saved, but the vector index update failed, "
-                                "so neighbors could not be computed. Retry with "
-                                f"search_notes(ids={pending}) to fetch the same "
-                                "neighbor data."
-                            ),
-                        }
-                    )
-
+        # Write-only: the notes are committed (and the index/derived maintenance
+        # is enqueued kernel-side, draining in the background). No read-after-
+        # write on the response path — the dedup/activation calibration sampler
+        # the old neighbor search fed now rides the `search_notes` path (#848).
         return UpsertNotesResponse.model_validate({"results": results, "dry_run": dry_run})
-
-    async def _attach_neighbors(
-        results: list[dict[str, Any]],
-        changed_ids: list[int],
-        texts: list[str],
-        top_k: int,
-    ) -> bool:
-        """Attach similar-note neighbors to each upsert result.
-
-        Neighbors ARE search results: a draft's neighbors are the top-``top_k``
-        results of a ``search_notes`` of the draft's own content (self + batch
-        siblings excluded), run through the SAME fused RRF pipeline the search
-        tool uses (``action_search_notes`` — per-modality semantic +
-        exact/substring + fuzzy + tag-centroid + cross-space, fused with the
-        exact-match priority tier). There is no bespoke cosine cutoff: that is
-        what makes the feature platform-robust. An absolute-cosine gate (0.6)
-        emptied the whole list when one borderline cosine dipped under it — a
-        cross-platform (NEON vs AVX) embedding delta flipped it on aarch64
-        while ranked search stayed green. RRF doesn't break-empty on a
-        borderline cosine (a ~0.59 match clears the search's 0.5 semantic floor
-        easily — no cliff to flip), so neighbors inherit search's green
-        behaviour on every platform.
-
-        SIMILARITY GATE (the holistic "none relevant → return nothing" rule): a
-        result qualifies as a neighbor only when a genuine *content-similarity*
-        signal backs it — a SEMANTIC match (cleared the search's own ~0.5
-        semantic floor → a non-null ``score``) OR an EXACT/substring overlap
-        (``substring`` present). A fuzzy-trigram-ONLY hit (e.g. the "What is
-        the…" stem coincidence) and a tag-centroid-ONLY hit do NOT qualify —
-        they are lexical/tag coincidences, not real similarity. So an unrelated
-        note in a topical collection returns no neighbors, while a true
-        semantic/near-duplicate is kept.
-
-        The ``best`` calibration sample stays semantic-cosine-only: the
-        max semantic ``score`` among a draft's neighbors (a lexical hit has
-        ``score=None`` and never pollutes it).
-
-        Returns True when the neighbor search completed (each created/updated
-        result now carries a ``neighbors`` list, possibly empty), False on
-        failure — the caller then signals a retry.
-        """
-        assert index is not None
-        try:
-            # Off the event loop: embed blocks on backend inference.
-            vectors = await asyncio.to_thread(index.embed_queries, texts)
-            if vectors is None:
-                return False  # backend vanished mid-call — retryable
-            # Build the SAME search state a real search_notes call assembles:
-            # one query SOURCE per draft (its content, is_query=True so the
-            # lexical signals fire too), the secondary cross-space rows, the
-            # image activation floor, the index size — and the kernel handle
-            # that carries the tag-centroid state. Neighbors = a self search, so
-            # nothing is disabled. The semantic floor is the search default
-            # (0.5) — no per-call neighbor threshold.
-            sources: list[tuple[str, str, bool]] = [(t, t, True) for t in texts]
-            cross_space_json = None
-            if kernel is not None:
-                cross_space_json = await kernel.build_cross_space_json(texts, top_k)
-            image_floor = activation_floor(index.activation_stats.get("image"), ACTIVATION_MARGIN)
-            index_handle = index.engine
-            derived_handle = (
-                derived._engine._rust
-                if derived is not None and derived.available and derived._engine is not None
-                else None
-            )
-            # Exclude the drafts themselves (self + batch siblings) from every
-            # draft's results — a note is never its own neighbor.
-            exclude = sorted(set(changed_ids))
-            raw = await wrapper.run(
-                lambda c: shrike_native.action_search_notes(
-                    c,
-                    index_handle,
-                    derived_handle,
-                    sources,
-                    vectors,
-                    top_k,
-                    SEARCH_SEMANTIC_THRESHOLD,
-                    exclude=exclude,
-                    kernel=kernel,
-                    image_floor=image_floor,
-                    semantic=True,
-                    index_size=index.size,
-                    cross_space=cross_space_json,
-                )
-            )
-            groups = TypeAdapter(list[SearchResultGroup]).validate_json(raw)
-            if len(groups) != len(changed_ids):
-                raise ValueError(
-                    f"neighbor search returned {len(groups)} groups for {len(changed_ids)} drafts"
-                )
-            id_to_neighbors: dict[int, list[dict[str, Any]]] = {}
-            for nid, group in zip(changed_ids, groups, strict=True):
-                # The similarity gate: keep only similarity-backed matches — a
-                # semantic hit (non-null score) or an exact/substring overlap.
-                # Drop fuzzy-only / tag-only coincidences (the holistic
-                # relevance read).
-                qualified = [
-                    m for m in group.matches if m.score is not None or m.substring is not None
-                ]
-                neighbors = [
-                    Neighbor(id=m.id, score=m.score, tags=m.tags, provenance=m.provenance)
-                    for m in qualified
-                ]
-                if dedup_stats is not None:
-                    # The calibration sample stays semantic-cosine-only:
-                    # the best semantic score, ignoring lexical-only hits.
-                    sem_scores = [m.score for m in qualified if m.score is not None]
-                    dedup_stats.record(max(sem_scores) if sem_scores else None)
-                id_to_neighbors[nid] = [n.model_dump() for n in neighbors]
-            for r in results:
-                if r.get("status") in ("created", "updated") and r.get("id") in id_to_neighbors:
-                    r["neighbors"] = id_to_neighbors[r["id"]]
-            return True
-        except Exception:
-            logger.warning("Failed to compute neighbors after upsert", exc_info=True)
-            return False
 
     @_action
     async def upsert_note_types(
