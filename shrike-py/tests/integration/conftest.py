@@ -366,6 +366,24 @@ def wait_for_index_ready(server: ServerInfo, timeout: float = 60.0) -> dict:
     raise TimeoutError("Index did not become ready")
 
 
+def search_until(mcp, queries, predicate, *, timeout: float = 60.0, limit: int = 10) -> list[dict]:
+    """Poll ``search_notes`` until ``predicate(matches)`` holds, then return the
+    matches (the caller asserts on them, so a timeout surfaces as that assertion).
+
+    Upserts are write-only: a note embeds + indexes off the ingest queue, so a
+    search issued right after a write races the drain. Over HTTP there is no
+    ``settle`` to await, so the read-side equivalent is to retry until the index
+    reflects the write. The generous default covers a cold runner's one-time
+    model-preset build on the first embed."""
+    deadline = time.monotonic() + timeout
+    matches: list[dict] = []
+    while True:
+        matches = mcp("search_notes", {"queries": queries, "limit": limit})["results"][0]["matches"]
+        if predicate(matches) or time.monotonic() > deadline:
+            return matches
+        time.sleep(0.2)
+
+
 class ServerInfo:
     """Connection details for a running test server."""
 
@@ -392,8 +410,8 @@ class MCPClient:
         self._url = url
         # Reuse one keep-alive connection: a fresh httpx.post per call pays a TCP
         # connect (~2.4ms) every time, and a session client makes ~700 calls.
-        # 30s: an upsert call embeds its whole batch synchronously, and on a
-        # cold CI runner the first llama embed also pays the one-time model
+        # 30s: on a cold runner the first embed (a search query, or the
+        # background drain of a write-only upsert) pays the one-time model
         # preset build, so a 10s ceiling is too tight.
         self._client = httpx.Client(timeout=30.0)
 

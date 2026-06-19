@@ -1,12 +1,10 @@
 """Integration tests for semantic search, contextual upsert, and index management.
 
 Requires llama-server on PATH and downloads a small GGUF model.
-Tests exercise the full pipeline: embedding, indexing, search, neighbors.
+Tests exercise the full pipeline: embedding, indexing, and search.
 """
 
 from __future__ import annotations
-
-import time
 
 import httpx
 import pytest
@@ -16,6 +14,7 @@ from tests.integration.conftest import (
     MCPClient,
     ServerInfo,
     requires_llama_server,
+    search_until,
     wait_for_index_ready,
 )
 
@@ -220,199 +219,6 @@ class TestSearchNotes:
 
 
 # ---------------------------------------------------------------------------
-# Contextual upsert — neighbors
-# ---------------------------------------------------------------------------
-
-
-class TestUpsertNeighbors:
-    """Verify that upsert returns similar-note neighbors when index is available."""
-
-    def test_create_returns_neighbors(self, semantic_mcp, collection_server):
-        _wait_for_index_ready(collection_server)
-        result = semantic_mcp(
-            "upsert_notes",
-            {
-                "notes": [
-                    {
-                        "deck": "Biology",
-                        "note_type": "Basic",
-                        "fields": {
-                            "Front": "What is cellular respiration?",
-                            "Back": "The process cells use to convert glucose into ATP",
-                        },
-                        "tags": ["cell-biology"],
-                    }
-                ],
-            },
-        )
-        r = result["results"][0]
-        assert r["status"] == "created"
-        assert "neighbors" in r
-        neighbors = r["neighbors"]
-        assert len(neighbors) > 0
-        n = neighbors[0]
-        assert "id" in n
-        assert "score" in n
-        assert "tags" in n
-        assert "content" not in n
-        assert 0 < n["score"] <= 1.0
-
-        # Cleanup
-        semantic_mcp("delete_notes", {"ids": [r["id"]]})
-
-    def test_neighbors_are_topically_relevant(self, semantic_mcp, collection_server):
-        _wait_for_index_ready(collection_server)
-        result = semantic_mcp(
-            "upsert_notes",
-            {
-                "notes": [
-                    {
-                        "deck": "Physics",
-                        "note_type": "Basic",
-                        "fields": {
-                            "Front": "What is angular momentum?",
-                            "Back": "The rotational equivalent of linear momentum: L = Iw",
-                        },
-                        "tags": ["mechanics"],
-                    }
-                ],
-            },
-        )
-        r = result["results"][0]
-        neighbors = r.get("neighbors", [])
-        if neighbors:
-            neighbor_tags = {t for n in neighbors for t in n["tags"]}
-            assert "mechanics" in neighbor_tags or "electromagnetism" in neighbor_tags
-
-        semantic_mcp("delete_notes", {"ids": [r["id"]]})
-
-    def test_unrelated_note_returns_no_neighbors(self, semantic_mcp, collection_server):
-        # A note unrelated to everything in this bio/physics collection gets no
-        # neighbors — the holistic similarity gate ("none relevant → return
-        # nothing"): no semantic match clears the search floor, and a
-        # fuzzy-trigram / tag coincidence does NOT qualify as a neighbor. There
-        # is no magic neighbor_threshold; relevance is the gate.
-        _wait_for_index_ready(collection_server)
-        result = semantic_mcp(
-            "upsert_notes",
-            {
-                "notes": [
-                    {
-                        "deck": "Misc",
-                        "note_type": "Basic",
-                        "fields": {
-                            "Front": "What is the capital of Burkina Faso?",
-                            "Back": "Ouagadougou",
-                        },
-                    }
-                ],
-            },
-        )
-        r = result["results"][0]
-        neighbors = r.get("neighbors", [])
-        assert len(neighbors) == 0, f"unrelated note should have no neighbors, got {neighbors}"
-
-        semantic_mcp("delete_notes", {"ids": [r["id"]]})
-
-    def test_bulk_upsert_with_neighbors(self, semantic_mcp, collection_server):
-        _wait_for_index_ready(collection_server)
-        result = semantic_mcp(
-            "upsert_notes",
-            {
-                "notes": [
-                    {
-                        "deck": "Biology",
-                        "note_type": "Basic",
-                        "fields": {"Front": f"Bulk bio question {i}", "Back": "About cells"},
-                        "tags": ["cell-biology"],
-                    }
-                    for i in range(5)
-                ],
-                "top_k_neighbors": 3,
-            },
-        )
-        created = [r for r in result["results"] if r["status"] == "created"]
-        assert len(created) == 5
-        for r in created:
-            assert "neighbors" in r
-            assert len(r["neighbors"]) <= 3
-
-        ids = [r["id"] for r in created]
-        semantic_mcp("delete_notes", {"ids": ids})
-
-    def test_neighbors_are_gated_search_results_of_the_content(
-        self, semantic_mcp, collection_server
-    ):
-        # Neighbors ARE search results of the note's own content (capped at k,
-        # minus the note), gated to similarity-backed hits. This pins the
-        # principle — neighbors route through the SAME RRF search pipeline as
-        # search_notes — and is what makes the feature platform-robust (RRF
-        # doesn't break-empty on one borderline cosine, so neighbors inherit
-        # search's aarch64 behaviour).
-        #
-        # Asserted as the two load-bearing properties (not a brittle byte-equal
-        # set: the neighbor path queries the note's normalized embed text, a
-        # `search_notes(queries=[front+back])` queries the raw string, so the
-        # marginal top-k membership can differ — that tie-margin is not the
-        # contract):
-        #   1. every neighbor is SIMILARITY-BACKED — a semantic match (non-null
-        #      score) or an exact-text hit (`exact` provenance); never a
-        #      fuzzy-only / tag-only coincidence.
-        #   2. the neighbors are a SUBSET of a (generous) self-search of the
-        #      content — they come from that same fused pipeline.
-        _wait_for_index_ready(collection_server)
-        front = "What is cellular respiration?"
-        back = "The process cells use to convert glucose into ATP"
-        content = f"{front} {back}"
-        k = 5
-        result = semantic_mcp(
-            "upsert_notes",
-            {
-                "notes": [
-                    {
-                        "deck": "Biology",
-                        "note_type": "Basic",
-                        "fields": {"Front": front, "Back": back},
-                        "tags": ["cell-biology"],
-                    }
-                ],
-                "top_k_neighbors": k,
-            },
-        )
-        r = result["results"][0]
-        assert r["status"] == "created"
-        note_id = r["id"]
-        neighbors = r["neighbors"]
-        neighbor_ids = {n["id"] for n in neighbors}
-
-        # Property 1: every neighbor is similarity-backed.
-        for n in neighbors:
-            signals = {p["signal"] for p in n["provenance"]}
-            assert n["score"] is not None or "exact" in signals, (
-                f"neighbor {n['id']} is not similarity-backed (fuzzy/tag-only): {n}"
-            )
-        # A topically-close note has neighbors, at least one semantic-backed.
-        assert neighbor_ids, "a topically-close note must have neighbors"
-        assert any(n["score"] is not None for n in neighbors), (
-            "the cell-biology neighbors must be semantic-backed"
-        )
-
-        # Property 2: neighbors ⊆ a generous self-search of the same content.
-        search = semantic_mcp(
-            "search_notes",
-            {"queries": [content], "limit": k * 4, "exclude_ids": [note_id]},
-        )
-        groups = search["results"]
-        search_ids = {m["id"] for m in groups[0]["matches"]} if groups else set()
-        assert neighbor_ids <= search_ids, (
-            f"neighbors must come from a self-search of the content: "
-            f"neighbors={neighbor_ids} search={search_ids}"
-        )
-
-        semantic_mcp("delete_notes", {"ids": [note_id]})
-
-
-# ---------------------------------------------------------------------------
 # Delete + index updates
 # ---------------------------------------------------------------------------
 
@@ -440,14 +246,26 @@ class TestDeleteIndexUpdate:
         )
         note_id = created["results"][0]["id"]
 
-        before = semantic_mcp("search_notes", {"queries": ["unique xyzzy placeholder"], "limit": 5})
-        assert note_id in [m["id"] for m in before["results"][0]["matches"]]
+        # The upsert is write-only — the index reflects it after the ingest queue
+        # drains — so retry until the note is searchable.
+        before = search_until(
+            semantic_mcp,
+            ["unique xyzzy placeholder"],
+            lambda m: note_id in [x["id"] for x in m],
+            limit=5,
+        )
+        assert note_id in [m["id"] for m in before]
 
         semantic_mcp("delete_notes", {"ids": [note_id]})
 
-        after = semantic_mcp("search_notes", {"queries": ["unique xyzzy placeholder"], "limit": 5})
-        after_ids = [m["id"] for m in after["results"][0]["matches"]]
-        assert note_id not in after_ids
+        # The remove drains off the same queue — retry until it's gone.
+        after = search_until(
+            semantic_mcp,
+            ["unique xyzzy placeholder"],
+            lambda m: note_id not in [x["id"] for x in m],
+            limit=5,
+        )
+        assert note_id not in [m["id"] for m in after]
 
 
 # NOTE: the shared collection_server fixture IS the empty-boot-indexing contract
@@ -758,19 +576,14 @@ class TestSearchQuality:
         )
         nid = r["results"][0]["id"]
         try:
-            # The centroid refresh runs off the upsert tail — retry briefly
-            # until the new member's tag state lands.
-            deadline = time.monotonic() + 10
-            while True:
-                result = semantic_mcp(
-                    "search_notes",
-                    {"queries": ["mitochondria ATP production"], "limit": 10},
-                )
-                matches = result["results"][0]["matches"]
-                ids = [m["id"] for m in matches]
-                if nid in ids or time.monotonic() > deadline:
-                    break
-                time.sleep(0.2)
+            # The note embeds off the ingest queue and the centroid refresh runs
+            # off the upsert tail — retry until the new member's tag state lands.
+            matches = search_until(
+                semantic_mcp,
+                ["mitochondria ATP production"],
+                lambda m: nid in [x["id"] for x in m],
+            )
+            ids = [m["id"] for m in matches]
             assert nid in ids, "the tag signal surfaces the off-topic member"
             # …but never ABOVE the directly-relevant notes: the top hit is
             # semantically (or literally) on-topic, not tag-boosted filler.

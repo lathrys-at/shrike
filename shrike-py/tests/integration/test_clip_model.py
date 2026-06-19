@@ -127,6 +127,9 @@ class TestClipImageIndex:
 
         results = json.loads(await kernel.upsert_notes_json(json.dumps(notes), "allow", False))
         assert all(r["status"] in ("created", "updated") for r in results), results
+        # Writes are write-only: the embed + index add drain off the ingest
+        # queue, so settle before a caller inspects the engine.
+        await kernel.settle()
         return [r["id"] for r in results]
 
     @staticmethod
@@ -191,6 +194,7 @@ class TestClipImageIndex:
             await kernel.upsert_notes_json(
                 json.dumps([{"id": red, "fields": {"Front": "study card"}}]), "allow", False
             )
+            await kernel.settle()
             assert engine.size() == 2  # red: text only now ; rome: text
             assert engine.modality_keys("image") == []
             await kernel.close()
@@ -322,6 +326,7 @@ class TestClipNativeSeam:
             )
             assert all(r[0] == "created" for r in results)
             nid = results[0][1]
+            await kernel.settle()
             engine = kernel.engine_handle()
             has_image = engine.modality_contains("image", nid)
             await kernel.close()

@@ -244,6 +244,7 @@ class TestNativeAttach:
                 "error",
             )
             assert all(r[0] == "created" for r in results)
+            await kernel.settle()
             hits = await kernel.search("powerhouse organelle", 3)
             ndim = kernel.engine_handle().ndim()
             await kernel.close()
