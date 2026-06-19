@@ -1014,6 +1014,15 @@ impl AsyncKernel {
         self.inner.ingest_drain_panics()
     }
 
+    /// Whether the kernel is *settled* — the ingest queue drained and no rebuild
+    /// mid-flight, so the index/derived store reflect every committed write. A
+    /// cheap non-blocking read (it does NOT await the `settle` barrier): a
+    /// read-side action probes it to advise a possibly-stale result instead of
+    /// blocking on freshness.
+    fn is_settled(&self) -> bool {
+        self.inner.is_settled()
+    }
+
     /// Flush the index + sidecars now (shutdown path).
     fn save_index(&self, py: Python<'_>) -> PyResult<()> {
         py.detach(|| self.inner.index().save())

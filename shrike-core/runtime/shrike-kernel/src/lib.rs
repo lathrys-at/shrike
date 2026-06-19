@@ -1201,6 +1201,18 @@ impl Kernel {
         self.ingest.drain_panics()
     }
 
+    /// Whether the kernel is *settled*: the ingest queue has drained and no bulk
+    /// rebuild/reconcile is mid-flight, so the index and derived store reflect
+    /// every write committed before this read. A non-blocking probe (it reads a
+    /// counter, it does not await the [`settle`](Self::settle) barrier) — the
+    /// freshness signal a read-side caller threads into its response to
+    /// serve-and-advise on possibly-stale data rather than block. False whenever
+    /// a just-committed write is still draining through the embed queue, so a
+    /// search issued right after a write can warn it may not see that write yet.
+    pub fn is_settled(&self) -> bool {
+        self.ingest.is_settled()
+    }
+
     /// The N-space index coordinator — removal + the watermark advance
     /// fan out across it.
     pub fn index_set(&self) -> &index_set::IndexSet {
@@ -2899,6 +2911,92 @@ mod no_cpython_smoke {
             // torn down mid-flight.
             let _stamp = collection.run(|core| core.col_mod()).await.unwrap();
             collection.shutdown().await;
+            let _ = std::fs::remove_dir_all(dir);
+        });
+    }
+
+    /// `is_settled` is the non-blocking freshness probe behind the stale-read
+    /// advisory: it reads false while a just-committed write is still draining
+    /// through the embed queue and true once the queue has drained. A gated
+    /// embedder parks the embed so the not-settled window is observable
+    /// deterministically (HashEmbedder would drain too fast to catch the race).
+    #[test]
+    fn is_settled_tracks_the_ingest_drain() {
+        use tokio::sync::Notify;
+
+        /// Embeds only after `release` is notified, so the test owns when the
+        /// ingest queue drains.
+        struct GatedEmbedder {
+            release: Arc<Notify>,
+        }
+        impl Embedder for GatedEmbedder {
+            fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+                let release = Arc::clone(&self.release);
+                Box::pin(async move {
+                    release.notified().await;
+                    Ok(HashEmbedder::embed_sync(&texts))
+                })
+            }
+            fn fingerprint(&self) -> Option<String> {
+                Some("gated-embedder:v1".to_string())
+            }
+            fn dim(&self) -> Option<usize> {
+                Some(64)
+            }
+        }
+
+        crate::runtime::testing::run_with_sync(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            let release = Arc::new(Notify::new());
+            kernel.attach_embedder(
+                Arc::new(GatedEmbedder {
+                    release: Arc::clone(&release),
+                }),
+                None,
+            );
+            kernel.reindex_if_needed().await.unwrap();
+            // An idle, drained kernel is settled.
+            kernel.settle().await;
+            assert!(kernel.is_settled(), "an idle kernel is settled");
+
+            // The write commits immediately and enqueues the embed maintenance —
+            // which parks in the gated embedder, so the queue is NOT drained yet.
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+            kernel
+                .upsert_note(
+                    basic,
+                    1,
+                    vec!["paris capital france".into(), "geo".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .unwrap();
+            // Hand the drain task a chance to dequeue the item and reach the parked
+            // embed; the outstanding count is still 1 (the embed hasn't returned).
+            tokio::task::yield_now().await;
+            assert!(
+                !kernel.is_settled(),
+                "a write whose embed is still in flight is NOT settled"
+            );
+
+            // Release the embed; once it drains, the kernel is settled again.
+            // `notify_one` stores a permit if the embed hasn't parked yet, so the
+            // release is never lost to a race with the drain task.
+            release.notify_one();
+            kernel.settle().await;
+            assert!(
+                kernel.is_settled(),
+                "the queue drained → settled, the advisory clears"
+            );
+
+            kernel.close().await.unwrap();
             let _ = std::fs::remove_dir_all(dir);
         });
     }

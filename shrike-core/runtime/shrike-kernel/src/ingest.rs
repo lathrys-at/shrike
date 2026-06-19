@@ -157,6 +157,16 @@ pub struct IngestHandle {
     /// drain panics, so the kernel (which holds only this handle) can report a
     /// degraded sole writer on `/status`.
     drain_panics: Arc<std::sync::atomic::AtomicU64>,
+    /// Work units (`Item`s and `Job`s) enqueued but not yet fully processed —
+    /// incremented at every send, decremented by the drain loop once a unit's
+    /// processing returns (an `Item` batch by its length, a `Job` by one). Zero
+    /// means the queue has drained AND no bulk rebuild/reconcile is mid-flight,
+    /// since those ride the same channel as `Job`s and flip their build state
+    /// inside the job future. The non-blocking complement of [`flush`](Self::flush):
+    /// [`is_settled`](Self::is_settled) reads it without awaiting the barrier, so a
+    /// read can serve-and-advise instead of blocking. `Flush` barriers are not
+    /// work and never touch it.
+    outstanding: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// A cheap, cloneable enqueue handle captured INTO a collection-write job, so
@@ -165,13 +175,28 @@ pub struct IngestHandle {
 /// the job and move it in; call [`IngestEnqueuer::enqueue`] after the write
 /// commits and `col.mod` is read, still inside the same job closure.
 #[derive(Clone)]
-pub struct IngestEnqueuer(Option<mpsc::UnboundedSender<IngestMsg>>);
+pub struct IngestEnqueuer {
+    tx: Option<mpsc::UnboundedSender<IngestMsg>>,
+    /// The handle's outstanding-work counter; bumped here so an item enqueued
+    /// from inside the write job is reflected in `is_settled` the instant the
+    /// write commits (see [`IngestHandle::outstanding`]).
+    outstanding: Arc<std::sync::atomic::AtomicU64>,
+}
 
 impl IngestEnqueuer {
     /// Enqueue a maintenance item (no-op after shutdown).
     pub fn enqueue(&self, item: IngestItem) {
-        if let Some(tx) = &self.0 {
-            let _ = tx.send(IngestMsg::Item(item));
+        if let Some(tx) = &self.tx {
+            // Bump BEFORE the send, so a concurrent `is_settled` can never observe
+            // the item on the queue (or in flight) while the counter still reads 0.
+            self.outstanding
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if tx.send(IngestMsg::Item(item)).is_err() {
+                // Channel closed (post-shutdown): the item will never be drained,
+                // so undo the bump or the counter would never return to 0.
+                self.outstanding
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
         }
     }
 }
@@ -188,7 +213,10 @@ impl IngestHandle {
     ///
     /// Panics if the sender mutex is poisoned (a prior holder panicked).
     pub fn enqueuer(&self) -> IngestEnqueuer {
-        IngestEnqueuer(self.tx.lock().expect("ingest sender poisoned").clone())
+        IngestEnqueuer {
+            tx: self.tx.lock().expect("ingest sender poisoned").clone(),
+            outstanding: Arc::clone(&self.outstanding),
+        }
     }
 
     /// Enqueue a maintenance item. Fire-and-forget: returns immediately, the
@@ -196,7 +224,12 @@ impl IngestHandle {
     /// outcome — the next boot's drift reconcile heals.
     pub fn enqueue(&self, item: IngestItem) {
         if let Some(tx) = self.sender() {
-            let _ = tx.send(IngestMsg::Item(item));
+            self.outstanding
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if tx.send(IngestMsg::Item(item)).is_err() {
+                self.outstanding
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
         }
     }
 
@@ -215,13 +248,36 @@ impl IngestHandle {
                 let _ = done_tx.send(r);
             })
         }));
-        self.sender()
-            .ok_or_else(|| NativeError::internal("the ingest actor is gone"))?
-            .send(msg)
-            .map_err(|_| NativeError::internal("the ingest actor is gone"))?;
+        // A bulk job counts as outstanding work: a rebuild/reconcile rides this
+        // channel, so `is_settled` reading 0 must mean no build is mid-flight too.
+        self.outstanding
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let sent = self
+            .sender()
+            .ok_or_else(|| NativeError::internal("the ingest actor is gone"))
+            .and_then(|tx| {
+                tx.send(msg)
+                    .map_err(|_| NativeError::internal("the ingest actor is gone"))
+            });
+        if let Err(e) = sent {
+            self.outstanding
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(e);
+        }
         done_rx
             .await
             .map_err(|_| NativeError::internal("the ingest actor dropped a job"))?
+    }
+
+    /// Whether the queue has drained AND no bulk rebuild/reconcile is mid-flight
+    /// — a non-blocking read of the outstanding-work counter, the cheap
+    /// complement of [`flush`](Self::flush)'s barrier. A read-side caller probes
+    /// this to serve-and-advise on possibly-stale data instead of blocking on
+    /// settle. Briefly over-reports "not settled" in the window between a `Job`'s
+    /// result resolving and the drain loop decrementing — never under-reports, so
+    /// it can advise a retry one beat too long but never miss real staleness.
+    pub fn is_settled(&self) -> bool {
+        self.outstanding.load(std::sync::atomic::Ordering::SeqCst) == 0
     }
 
     /// Whole-collection drift reconcile of the index. See
@@ -340,6 +396,11 @@ pub struct Ingestor {
     /// `Arc`-shared with the [`IngestHandle`] so `/status` can read it (the
     /// drain task owns the `Ingestor`, the kernel holds only the handle).
     drain_panics: Arc<std::sync::atomic::AtomicU64>,
+    /// `Arc`-shared with the [`IngestHandle`]'s `outstanding`: the send sites bump
+    /// it, the drain loop decrements it once a unit's processing returns (see
+    /// [`IngestHandle::is_settled`]). The drain task owns the `Ingestor`, so the
+    /// decrement lives here.
+    outstanding: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Ingestor {
@@ -364,6 +425,7 @@ impl Ingestor {
             tag_refresh,
             floors: Arc::new(Mutex::new(WatermarkFloors::default())),
             drain_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            outstanding: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -1122,17 +1184,27 @@ async fn drain_loop(ingestor: Arc<Ingestor>, mut rx: mpsc::UnboundedReceiver<Ing
                         Err(_) => break,
                     }
                 }
+                // Each coalesced item was counted once at its send; clear the whole
+                // batch's worth once it's processed (whether it succeeds or a panic
+                // is contained — the work is done either way, no retry).
+                let drained = batch.len() as u64;
                 let ing = Arc::clone(&ingestor);
                 let work = async move { ing.process_batch(batch).await }.boxed();
                 if process_caught(&ingestor.drain_panics, "batch", work).await {
                     ingestor.poison_floors_after_panic();
                 }
+                ingestor
+                    .outstanding
+                    .fetch_sub(drained, std::sync::atomic::Ordering::SeqCst);
             }
             IngestMsg::Job(run) => {
                 let ing = Arc::clone(&ingestor);
                 if process_caught(&ingestor.drain_panics, "job", run(ing)).await {
                     ingestor.poison_floors_after_panic();
                 }
+                ingestor
+                    .outstanding
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             }
             IngestMsg::Flush(done) => {
                 let _ = done.send(());
@@ -1322,11 +1394,13 @@ pub(crate) fn compose_embed_inputs_with_overlay(
 pub fn spawn(ingestor: Arc<Ingestor>) -> IngestHandle {
     let (tx, rx) = mpsc::unbounded_channel::<IngestMsg>();
     let drain_panics = Arc::clone(&ingestor.drain_panics);
+    let outstanding = Arc::clone(&ingestor.outstanding);
     let task = runtime::handle().spawn(drain_loop(ingestor, rx));
     IngestHandle {
         tx: Mutex::new(Some(tx)),
         task: Mutex::new(Some(task)),
         drain_panics,
+        outstanding,
     }
 }
 
