@@ -110,11 +110,8 @@ class TestStopServerNotRunning:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any, calls: dict[str, Any]
     ) -> None:
         monkeypatch.setattr(daemon, "is_server_alive", lambda *a, **k: False)
-        # No stale state files present.
-        monkeypatch.setattr(daemon, "META_FILE", tmp_path / "nope.json")
-        monkeypatch.setattr(daemon, "PID_FILE", tmp_path / "nope.pid")
-
-        result = daemon.stop_server()
+        # No stale state files present in the (empty) state dir.
+        result = daemon.stop_server(sd=tmp_path)
 
         assert result == {"stopped": False, "reason": "not running"}
         assert calls["force_kill"] == []
@@ -123,12 +120,10 @@ class TestStopServerNotRunning:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any, calls: dict[str, Any]
     ) -> None:
         monkeypatch.setattr(daemon, "is_server_alive", lambda *a, **k: False)
-        stale = tmp_path / "server.json"
-        stale.write_text("{}")
-        monkeypatch.setattr(daemon, "META_FILE", stale)
-        monkeypatch.setattr(daemon, "PID_FILE", tmp_path / "nope.pid")
+        # A stale server.json in the state dir → cleanup is invoked.
+        (tmp_path / "server.json").write_text("{}")
 
-        result = daemon.stop_server()
+        result = daemon.stop_server(sd=tmp_path)
 
         assert result["stopped"] is False
         assert "stale state" in result["reason"]

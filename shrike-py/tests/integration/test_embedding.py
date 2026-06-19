@@ -34,10 +34,6 @@ pytestmark = [pytest.mark.integration, pytest.mark.embedding, requires_llama_ser
 _wait_for_index_ready = wait_for_index_ready
 
 
-def _base_url(server: ServerInfo) -> str:
-    return server.url.rsplit("/", 1)[0]
-
-
 class TestEmbeddingHealth:
     """The /status embedding block is wired through from the live service."""
 
@@ -45,8 +41,7 @@ class TestEmbeddingHealth:
         # One /status fetch, every field of the embedding block asserted together —
         # these are all properties of the same response. `available is True`
         # subsumes a separate llama /health probe (availability requires it).
-        status_url = llama_collection_server.url.rsplit("/", 1)[0] + "/status"
-        resp = httpx.get(status_url, timeout=5.0)
+        resp = llama_collection_server.control_request("GET", "/status", timeout=5.0)
         assert resp.status_code == 200
         body = resp.json()
         assert "embedding" in body
@@ -215,7 +210,7 @@ class TestAttachMode:
         # poll is unbounded, so it just waits it out.
         attached = server_factory("attach-client", extra_args=["--config", str(cfg)])
 
-        status = httpx.get(attached.url.rsplit("/", 1)[0] + "/status", timeout=5.0).json()
+        status = attached.control_request("GET", "/status", timeout=5.0).json()
         emb = status["embedding"]
         assert emb["available"] is True
         # Attached, not owned: it points at the upstream's port and reports no
@@ -232,9 +227,7 @@ class TestAttachMode:
         }
 
         # And the upstream is untouched — still serving its own daemon.
-        upstream = httpx.get(
-            llama_collection_server.url.rsplit("/", 1)[0] + "/status", timeout=5.0
-        ).json()
+        upstream = llama_collection_server.control_request("GET", "/status", timeout=5.0).json()
         assert upstream["embedding"]["available"] is True
 
 
@@ -334,19 +327,19 @@ class TestEmbeddingLifecycle:
         embedding_model,
         tmp_path_factory: pytest.TempPathFactory,
     ) -> None:
-        base = _base_url(lifecycle_server)
         mcp = MCPClient(lifecycle_server.url)
+        ctl = lifecycle_server.control_request
 
         # (a) Cold: --no-embedding suppressed auto-start despite the configured
         # model.
-        status = httpx.get(f"{base}/status", timeout=5.0).json()
+        status = ctl("GET", "/status", timeout=5.0).json()
         assert status["embedding"]["available"] is False
         assert status["index"]["state"] == "unavailable"
 
         # (b) Empty-body start uses the boot-configured model (llama boot #1).
-        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
+        resp = ctl("POST", "/embedding/start", json={}, timeout=120.0)
         assert resp.json()["status"] == "started"
-        status = httpx.get(f"{base}/status", timeout=5.0).json()
+        status = ctl("GET", "/status", timeout=5.0).json()
         assert status["embedding"]["available"] is True
 
         # (c) Seed two notes; the empty-at-boot index materialized at start, so
@@ -384,9 +377,9 @@ class TestEmbeddingLifecycle:
 
         # (d) Stop: embedding unavailable, index unavailable, search degrades to
         # the exact tier (no index needed; "ATP" is literal in the seeds).
-        resp = httpx.post(f"{base}/embedding/stop", timeout=30.0)
+        resp = ctl("POST", "/embedding/stop", timeout=30.0)
         assert resp.json()["status"] == "stopped"
-        status = httpx.get(f"{base}/status", timeout=5.0).json()
+        status = ctl("GET", "/status", timeout=5.0).json()
         assert status["embedding"]["available"] is False
         assert status["index"]["state"] == "unavailable"
         degraded = mcp("search_notes", {"queries": ["ATP"], "limit": 5})
@@ -396,7 +389,7 @@ class TestEmbeddingLifecycle:
         assert matches[0]["substring"]["matched_fields"]
         assert "not running" in degraded["message"].lower()
         # Stopping again is a no-op.
-        assert httpx.post(f"{base}/embedding/stop", timeout=10.0).json()["status"] == "not_running"
+        assert ctl("POST", "/embedding/stop", timeout=10.0).json()["status"] == "not_running"
 
         # (e) CLI start with explicit model + port (llama boot #2) — the CLI
         # wiring half.
@@ -407,7 +400,7 @@ class TestEmbeddingLifecycle:
             f"collection: {lifecycle_server.collection_path}\n"
             f"logging:\n  dir: {lifecycle_server.log_dir}\n"
         )
-        runner = CLIRunner(lifecycle_server.url, str(cfg))
+        runner = CLIRunner(lifecycle_server.url, str(cfg), state_dir=lifecycle_server.state_dir)
         started = runner.invoke(
             [
                 "server",
@@ -428,17 +421,17 @@ class TestEmbeddingLifecycle:
         assert after
 
         # (f) Idempotent start while running.
-        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=30.0)
+        resp = ctl("POST", "/embedding/start", json={}, timeout=30.0)
         assert resp.json()["status"] == "already_running"
 
         # (g) The fingerprint came from llama-server's /v1/models meta block,
         # not the file-size fallback.
-        idx = httpx.get(f"{base}/status", timeout=5.0).json()["index"]
+        idx = ctl("GET", "/status", timeout=5.0).json()["index"]
         assert idx.get("model_id", "").startswith("meta:")
 
         # (h) CLI stop — the other half of the CLI wiring.
         stopped = runner.invoke(["server", "embedding", "stop"])
         assert stopped.exit_code == 0, stopped.output
         assert "stopped" in stopped.output.lower()
-        status = httpx.get(f"{base}/status", timeout=5.0).json()
+        status = ctl("GET", "/status", timeout=5.0).json()
         assert status["embedding"]["available"] is False

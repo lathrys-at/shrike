@@ -246,10 +246,9 @@ class TestServerStop:
     def test_not_running_cleans_stale_state(self, run):
         with (
             patch(f"{SC}.is_server_alive", return_value=False),
-            patch(f"{SC}.META_FILE") as meta_file,
+            patch(f"{SC}.read_server_meta", return_value={"pid": 1}),
             patch(f"{SC}.cleanup_state") as cleanup,
         ):
-            meta_file.exists.return_value = True
             result = run("server", "stop")
         cleanup.assert_called_once()
         assert "stale state" in result.output

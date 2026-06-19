@@ -139,8 +139,9 @@ class TestWireVersionHeader:
     assert it, and a mismatch is refused before the op runs."""
 
     def test_response_echoes_wire_version(self, server: ServerInfo) -> None:
-        # Discover the server's version from /status (its canonical report).
-        status = httpx.get(f"{_base_url(server)}/status", timeout=5.0).json()
+        # Discover the server's version from /health (the data-plane liveness probe
+        # carries the wire version).
+        status = httpx.get(f"{_base_url(server)}/health", timeout=5.0).json()
         version = str(status["wire_protocol_version"])
 
         resp = _action(server, "collection_info", {})
@@ -149,7 +150,7 @@ class TestWireVersionHeader:
 
     def test_matching_request_version_accepted(self, server: ServerInfo) -> None:
         version = str(
-            httpx.get(f"{_base_url(server)}/status", timeout=5.0).json()["wire_protocol_version"]
+            httpx.get(f"{_base_url(server)}/health", timeout=5.0).json()["wire_protocol_version"]
         )
         resp = httpx.post(
             f"{_base_url(server)}/actions/collection_info",

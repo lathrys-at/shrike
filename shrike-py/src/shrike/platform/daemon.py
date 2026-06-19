@@ -21,9 +21,11 @@ when the HTTP endpoint is unresponsive.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
+import stat
 import sys
 import time
 from datetime import UTC, datetime
@@ -49,6 +51,35 @@ def _pid_file(sd: Path) -> Path:
 
 def _meta_file(sd: Path) -> Path:
     return sd / "server.json"
+
+
+def control_socket_path(sd: Path) -> Path:
+    """The control-plane Unix socket path for a daemon rooted at state dir ``sd``.
+
+    AF_UNIX paths are length-limited (~104 bytes on macOS, 108 on Linux), and a
+    state dir under a deep temp/profile path would overflow that — so the socket
+    does NOT live in the state dir. It lives in a short, user-private runtime dir
+    (``$XDG_RUNTIME_DIR`` when set, else a ``0700`` per-uid dir under ``/tmp``),
+    under a name derived (lexically, so existence-independent) from ``sd``. The
+    name is deterministic so a restart and ``cleanup_state`` recompute the same
+    path to unlink a stale socket; the full path is also recorded in server.json
+    for client discovery. POSIX only — Windows uses a loopback-TCP control plane.
+    """
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg and os.path.isdir(xdg):
+        runtime = Path(xdg)  # short and user-private (0700) by the XDG spec
+    else:
+        runtime = Path("/tmp") / f"shrike-{os.getuid()}"
+        runtime.mkdir(mode=0o700, exist_ok=True)
+        info = runtime.lstat()
+        # Refuse a pre-existing dir we don't own or that's a symlink — the classic
+        # /tmp hijack: an attacker who owns the path could read the socket.
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise RuntimeError(f"refusing unsafe control-socket dir {runtime} (wrong owner/type)")
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            os.chmod(runtime, 0o700)
+    digest = hashlib.sha1(os.path.abspath(str(sd)).encode()).hexdigest()[:10]
+    return runtime / f"shrike-{digest}.sock"
 
 
 # Module-level aliases for the default state dir (used by CLI commands)
@@ -136,6 +167,32 @@ def read_server_meta(sd: Path | None = None) -> dict[str, Any] | None:
         return None
 
 
+def control_channel(meta: dict[str, Any] | None) -> tuple[str, str | None]:
+    """Resolve the control-plane ``(base_url, uds_path)`` from server metadata.
+
+    The privileged control routes (shutdown/reload/index/embedding, full status)
+    live on a separate always-local listener; ``server.json`` records its address
+    under ``control``. Returns the base URL to issue control requests against and
+    the Unix-socket path (``None`` for the loopback-TCP fallback). Falls back to
+    the *data* plane's base URL when the metadata predates the plane split, so a
+    stale daemon mid-upgrade still stops cleanly.
+    """
+    control = meta.get("control") if meta else None
+    if isinstance(control, dict):
+        uds = control.get("uds")
+        if uds:
+            # httpx routes by the transport's socket; the base host is a synthetic
+            # authority the UDS control guard ignores.
+            return "http://localhost", str(uds)
+        url = control.get("url")
+        if url:
+            return str(url).rstrip("/"), None
+    data_url = meta.get("url") if meta else None
+    if data_url:
+        return str(data_url).rsplit("/", 1)[0], None
+    return "", None
+
+
 def read_pid(sd: Path | None = None) -> int | None:
     """Read the PID from the PID file, or None if missing/invalid."""
     pf = _pid_file(sd or _DEFAULT_STATE_DIR)
@@ -148,20 +205,51 @@ def read_pid(sd: Path | None = None) -> int | None:
 
 
 def cleanup_state(sd: Path | None = None) -> None:
-    """Remove PID and metadata files (not the lock file — that's managed by filelock)."""
+    """Remove PID/metadata files and the control socket (not the lock file —
+    that's managed by filelock). Removing a stale control socket here keeps a
+    crashed daemon's socket from lingering."""
     sd = sd or _DEFAULT_STATE_DIR
-    for f in (_pid_file(sd), _meta_file(sd)):
+    files = [_pid_file(sd), _meta_file(sd)]
+    # The control socket is POSIX-only and lives outside the state dir (a short
+    # runtime dir); Windows has none. Prefer the path the daemon *recorded* in
+    # server.json (authoritative even if XDG_RUNTIME_DIR differs in this process),
+    # read before the meta file is unlinked below; recompute only as a fallback,
+    # and never let that recompute (which can raise on a hijacked runtime dir)
+    # abort cleanup.
+    if sys.platform != "win32":
+        sock: str | None = None
+        meta = read_server_meta(sd)
+        if meta:
+            _, sock = control_channel(meta)
+        if sock is None:
+            with contextlib.suppress(Exception):
+                sock = str(control_socket_path(sd))
+        if sock is not None:
+            files.append(Path(sock))
+    for f in files:
         with contextlib.suppress(OSError):
             f.unlink(missing_ok=True)
 
 
-def _request_http_shutdown(url: str) -> bool:
-    """POST /shutdown to the server. Returns True if accepted."""
+def _request_http_shutdown(meta: dict[str, Any] | None) -> bool:
+    """POST /shutdown on the control plane. Returns True if accepted.
+
+    /shutdown is a privileged control route, so it goes over the control channel
+    (a Unix socket, or the loopback-TCP fallback) resolved from ``meta`` — falling
+    back to the data base URL for a pre-split daemon.
+    """
     import httpx
 
-    shutdown_url = url.rsplit("/", 1)[0] + "/shutdown"
+    base, uds = control_channel(meta)
+    if not base:
+        return False
+    shutdown_url = f"{base}/shutdown"
     try:
-        resp = httpx.post(shutdown_url, timeout=5.0)
+        if uds is not None:
+            with httpx.Client(transport=httpx.HTTPTransport(uds=uds)) as client:
+                resp = client.post(shutdown_url, timeout=5.0)
+        else:
+            resp = httpx.post(shutdown_url, timeout=5.0)
         return resp.status_code == 200
     except (httpx.ConnectError, httpx.TimeoutException):
         return False
@@ -190,30 +278,33 @@ def _signal_term(pid: int) -> bool:
         return False
 
 
-def stop_server(timeout: float = 5.0) -> dict[str, Any]:
+def stop_server(timeout: float = 5.0, sd: Path | None = None) -> dict[str, Any]:
     """Stop a running server. Returns status dict.
+
+    ``sd`` targets a daemon at a non-default state dir (its lock/meta/control all
+    live there); ``None`` is the platform default.
 
     Shutdown strategy (cross-platform):
       1. HTTP POST /shutdown — clean, works on all platforms
       2. SIGTERM (Unix only) — fallback if HTTP fails
       3. SIGKILL / TerminateProcess — last resort if server is hung
     """
-    if not is_server_alive():
-        if META_FILE.exists() or PID_FILE.exists():
-            cleanup_state()
+    resolved = sd or _DEFAULT_STATE_DIR
+    if not is_server_alive(sd):
+        if _meta_file(resolved).exists() or _pid_file(resolved).exists():
+            cleanup_state(sd)
             return {"stopped": False, "reason": "not running (cleaned stale state)"}
         return {"stopped": False, "reason": "not running"}
 
-    meta = read_server_meta()
-    pid = read_pid()
-    url = meta.get("url") if meta else None
+    meta = read_server_meta(sd)
+    pid = read_pid(sd)
 
-    # 1. Try HTTP shutdown (works on all platforms)
-    if url and _request_http_shutdown(url):
+    # 1. Try HTTP shutdown over the control plane (works on all platforms)
+    if _request_http_shutdown(meta):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if not is_server_alive():
-                cleanup_state()
+            if not is_server_alive(sd):
+                cleanup_state(sd)
                 return {"stopped": True, "pid": pid, "forced": False}
             time.sleep(0.1)
         logger.warning("HTTP shutdown accepted but server did not exit within %ss", timeout)
@@ -222,8 +313,8 @@ def stop_server(timeout: float = 5.0) -> dict[str, Any]:
     if pid is not None and _signal_term(pid):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if not is_server_alive():
-                cleanup_state()
+            if not is_server_alive(sd):
+                cleanup_state(sd)
                 return {"stopped": True, "pid": pid, "forced": False}
             time.sleep(0.1)
         logger.warning("SIGTERM sent but server did not exit within %ss", timeout)
@@ -234,7 +325,7 @@ def stop_server(timeout: float = 5.0) -> dict[str, Any]:
             _force_kill(pid)
         time.sleep(0.5)
 
-    cleanup_state()
+    cleanup_state(sd)
     return {"stopped": True, "pid": pid, "forced": True}
 
 

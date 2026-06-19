@@ -22,18 +22,14 @@ def _base_url(server: ServerInfo) -> str:
     return server.url.rsplit("/", 1)[0]
 
 
-# Every custom HTTP route the server registers (each wrapped by `_guard`). A
-# forged Host/Origin is rejected *before* the handler runs, so probing even the
-# destructive POSTs is non-destructive (the server survives — asserted below).
+# The DATA-plane custom routes (each wrapped by the data `_guard`). A forged
+# Host/Origin is rejected *before* the handler runs. The privileged control routes
+# (/shutdown, /index/*, /embedding/*, /reload, full /status) are NOT on this
+# listener at all — they live on the always-local control plane (see
+# TestControlPlaneSplit), so they can't be probed here.
 _CUSTOM_ROUTES = [
-    ("GET", "/status"),
+    ("GET", "/health"),
     ("GET", "/media/probe.png"),
-    ("POST", "/shutdown"),
-    ("POST", "/index/rebuild"),
-    ("POST", "/index/save"),
-    ("POST", "/embedding/start"),
-    ("POST", "/embedding/stop"),
-    ("POST", "/reload"),
     ("POST", "/actions/collection_info"),  # the actions-over-HTTP edge
 ]
 
@@ -51,7 +47,7 @@ class TestEveryCustomRouteGuard:
         )
         assert resp.status_code == 403
         # The guard ran before the handler — the server is still alive.
-        assert httpx.get(f"{_base_url(server)}/status", timeout=5.0).status_code == 200
+        assert httpx.get(f"{_base_url(server)}/health", timeout=5.0).status_code == 200
 
     @pytest.mark.parametrize(("method", "path"), _CUSTOM_ROUTES)
     def test_route_rejects_forged_host(self, server: ServerInfo, method: str, path: str) -> None:
@@ -62,7 +58,7 @@ class TestEveryCustomRouteGuard:
             timeout=5.0,
         )
         assert resp.status_code == 421
-        assert httpx.get(f"{_base_url(server)}/status", timeout=5.0).status_code == 200
+        assert httpx.get(f"{_base_url(server)}/health", timeout=5.0).status_code == 200
 
 
 class TestMcpEndpointGuard:
@@ -99,30 +95,29 @@ class TestOriginAndMethodEdges:
     def test_origin_null_rejected(self, server: ServerInfo) -> None:
         # `Origin: null` is what a sandboxed iframe / file:// page sends — must not
         # be treated as same-origin.
-        resp = httpx.get(f"{_base_url(server)}/status", headers={"Origin": "null"}, timeout=5.0)
+        resp = httpx.get(f"{_base_url(server)}/health", headers={"Origin": "null"}, timeout=5.0)
         assert resp.status_code == 403
 
     def test_no_origin_loopback_host_allowed(self, server: ServerInfo) -> None:
         # The native-client path (mcp-remote, CLI): no Origin header + a loopback
         # Host is allowed. Pinned explicitly so a future tightening can't silently
         # break native clients.
-        resp = httpx.get(f"{_base_url(server)}/status", timeout=5.0)
+        resp = httpx.get(f"{_base_url(server)}/health", timeout=5.0)
         assert resp.status_code == 200
 
-    @pytest.mark.parametrize(
-        "path", ["/shutdown", "/index/rebuild", "/reload", "/actions/collection_info"]
-    )
-    def test_get_on_post_only_route_is_405(self, server: ServerInfo, path: str) -> None:
-        # POST-only routes can't be fired by a no-preflight GET (`<img src=...>`):
-        # a GET is 405, before any guard/handler. The /actions/* family is POST-
-        # only too, so a write action can never ride a cross-origin <img>/<form>.
-        resp = httpx.get(f"{_base_url(server)}{path}", timeout=5.0)
+    def test_get_on_post_only_route_is_405(self, server: ServerInfo) -> None:
+        # The data plane's POST-only route (/actions/*) can't be fired by a
+        # no-preflight GET (`<img src=...>`): a GET is 405, before any handler, so a
+        # write action can never ride a cross-origin <img>/<form>.
+        resp = httpx.get(f"{_base_url(server)}/actions/collection_info", timeout=5.0)
         assert resp.status_code == 405
-        assert httpx.get(f"{_base_url(server)}/status", timeout=5.0).status_code == 200
+        assert httpx.get(f"{_base_url(server)}/health", timeout=5.0).status_code == 200
 
 
 class TestEscapeHatchesFlipBehavior:
-    """The disable flag must actually disable the guard (not just be wired)."""
+    """The disable flag must actually disable the data-plane guard (not just be
+    wired). It governs the data plane only — the control plane stays always-local
+    regardless (see TestControlPlaneSplit)."""
 
     def test_no_dns_rebinding_protection_accepts_forged_headers(self, server_factory) -> None:
         srv = server_factory("nodns", extra_args=["--no-dns-rebinding-protection"])
@@ -130,102 +125,110 @@ class TestEscapeHatchesFlipBehavior:
         # A forged Origin/Host that would 403/421 by default is now accepted.
         assert (
             httpx.get(
-                f"{base}/status", headers={"Origin": "http://evil.example.com"}, timeout=5.0
+                f"{base}/health", headers={"Origin": "http://evil.example.com"}, timeout=5.0
             ).status_code
             == 200
         )
         assert (
             httpx.get(
-                f"{base}/status", headers={"Host": "evil.example.com"}, timeout=5.0
+                f"{base}/health", headers={"Host": "evil.example.com"}, timeout=5.0
             ).status_code
             == 200
         )
 
 
-class TestEmbeddingStartInputRobustness:
-    """`/embedding/start` best-effort-parses an arbitrary JSON body into
-    `runtime.start(**overrides)`. Within the trust model it must not 500 on
-    garbage: the body parse is suppressed and only *known* keys are forwarded
-    (an unknown key reaching start as **overrides would TypeError → 500). On the
-    shared server (no model configured) every variant lands on the clean 400
-    "no model" path. Placed here, not in the llama-gated test_embedding.py, so it
-    runs in the normal suite — it needs no embedding service."""
+class TestControlPlaneSplit:
+    """The privileged control routes live on a separate always-local listener, not
+    the data plane. This is the structural guarantee that supersedes the per-request
+    exec-override gate: a remote/proxied caller can't reach the embedding spawn (or
+    shutdown/reload/index/full-status) at all, regardless of data-plane exposure."""
 
-    @pytest.mark.parametrize(
-        "body",
-        [
-            "not json at all",  # malformed → parse suppressed → overrides={}
-            "[]",  # valid JSON but not a dict → ignored
-            '{"unknown_key": 1, "another": [1, 2, 3]}',  # unknown keys filtered out
-            '{"port": "not-an-int"}',  # wrong-typed known key (never used: no model)
-            '{"model": null}',  # explicit null is skipped
-        ],
-    )
-    def test_garbage_body_yields_clean_400_not_500(self, server: ServerInfo, body: str) -> None:
-        resp = httpx.post(
-            f"{_base_url(server)}/embedding/start",
-            content=body,
-            headers={"Content-Type": "application/json"},
-            timeout=10.0,
-        )
-        assert resp.status_code == 400, resp.text  # no model configured, handled cleanly
-        assert httpx.get(f"{_base_url(server)}/status", timeout=5.0).status_code == 200
+    # The routes that must NOT be reachable on the data listener.
+    _CONTROL_ROUTES = [
+        ("GET", "/status"),
+        ("POST", "/shutdown"),
+        ("POST", "/index/rebuild"),
+        ("POST", "/index/save"),
+        ("POST", "/embedding/start"),
+        ("POST", "/embedding/stop"),
+        ("POST", "/reload"),
+    ]
 
-
-class TestEmbeddingStartExecGate:
-    """`/embedding/start` must not let a caller choose the spawned binary, model,
-    subprocess args, or onnx providers unless the server is purely-local — the
-    #791 capability hole (an unauthenticated body reaching subprocess spawn was a
-    network RCE under --allow-remote). A non-purely-local server (here
-    `--no-dns-rebinding-protection`, the behind-a-proxy posture) refuses the
-    execution-shaping overrides with a 400 BEFORE anything spawns; a purely-local
-    server forwards them (the local operator IS the caller)."""
-
-    @pytest.mark.parametrize(
-        "body",
-        [
-            {"llama_server": "/tmp/evil-binary"},  # the direct-RCE param
-            {"extra_args": ["--rpc", "attacker:1234"]},  # attacker-influenced argv
-            {"model": "/tmp/attacker.gguf"},  # attacker-chosen file to load
-            {"onnx_providers": ["EvilExecutionProvider"]},  # provider .so loading
-            {"backend": "llama", "llama_server": "/tmp/evil"},  # combined
-        ],
-    )
-    def test_non_local_server_refuses_exec_overrides(self, server_factory, body: dict) -> None:
-        srv = server_factory("execgate-nolocal", extra_args=["--no-dns-rebinding-protection"])
-        resp = httpx.post(f"{_base_url(srv)}/embedding/start", json=body, timeout=10.0)
-        assert resp.status_code == 400, resp.text
-        assert "Execution-shaping parameters" in resp.json()["error"]
-        # The gate ran before any spawn — the server is unharmed.
-        assert httpx.get(f"{_base_url(srv)}/status", timeout=5.0).status_code == 200
-
-    def test_non_local_server_allows_runtime_knobs(self, server_factory) -> None:
-        # A body with only non-execution-shaping knobs is NOT gated; with no model
-        # configured it lands on the clean no-model 400, not the gate's 400.
-        srv = server_factory("execgate-knobs", extra_args=["--no-dns-rebinding-protection"])
-        resp = httpx.post(
-            f"{_base_url(srv)}/embedding/start",
-            json={"port": 9999, "threads": 2},
-            timeout=10.0,
-        )
-        assert resp.status_code == 400, resp.text
-        assert "Execution-shaping parameters" not in resp.json()["error"]
-
-    def test_purely_local_server_forwards_exec_overrides_past_the_gate(
-        self, server: ServerInfo
+    @pytest.mark.parametrize(("method", "path"), _CONTROL_ROUTES)
+    def test_control_routes_absent_from_data_plane(
+        self, server: ServerInfo, method: str, path: str
     ) -> None:
-        # The default `server` fixture is purely-local: the same binary override a
-        # non-local server refuses is forwarded here, landing on the clean
-        # "no model configured" 400 — proving the gate let it through (a different
-        # 400 than the gate's, and still no spawn since no model is set).
-        resp = httpx.post(
-            f"{_base_url(server)}/embedding/start",
-            json={"llama_server": "/tmp/whatever"},
-            timeout=10.0,
-        )
-        assert resp.status_code == 400, resp.text
-        assert "Execution-shaping parameters" not in resp.json()["error"]
-        assert httpx.get(f"{_base_url(server)}/status", timeout=5.0).status_code == 200
+        # Not registered on the data app → 404 (route not found), never the handler.
+        resp = httpx.request(method, f"{_base_url(server)}{path}", timeout=5.0)
+        assert resp.status_code == 404, resp.text
+        # And the server is unharmed (the /shutdown probe did nothing).
+        assert httpx.get(f"{_base_url(server)}/health", timeout=5.0).status_code == 200
+
+    @pytest.mark.parametrize(("method", "path"), _CONTROL_ROUTES)
+    def test_control_routes_absent_even_with_remote_exposure(
+        self, server_factory, method: str, path: str
+    ) -> None:
+        # The capability hole the split closes: with the data plane's guard disabled
+        # (the behind-a-proxy posture), the control routes are STILL not on the
+        # data listener — the structural guarantee doesn't depend on the guard.
+        srv = server_factory("splitnodns", extra_args=["--no-dns-rebinding-protection"])
+        resp = httpx.request(method, f"{_base_url(srv)}{path}", timeout=5.0)
+        assert resp.status_code == 404, resp.text
+
+    def test_control_routes_reachable_on_control_plane(self, server: ServerInfo) -> None:
+        # Full /status is served on the control channel (UDS or loopback TCP).
+        resp = server.control_request("GET", "/status", timeout=5.0)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["running"] is True
+        assert "collection" in body  # the full diagnostics, not the minimal /health
+
+    def test_health_is_minimal_and_leaks_nothing(self, server: ServerInfo) -> None:
+        # The data plane's liveness probe carries running + wire version, and none
+        # of the sensitive diagnostics the full control-plane /status does.
+        body = httpx.get(f"{_base_url(server)}/health", timeout=5.0).json()
+        assert body["running"] is True
+        assert "wire_protocol_version" in body
+        for leaky in ("pid", "collection", "log_dir", "url", "embedding", "index"):
+            assert leaky not in body
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="UDS control socket is POSIX-only")
+    def test_control_socket_is_owner_only(self, server: ServerInfo) -> None:
+        import stat
+
+        from shrike.platform import daemon
+
+        # The socket lives in a short runtime dir (AF_UNIX length limit), its path
+        # recorded in server.json — resolve it the way the client does.
+        _, uds = daemon.control_channel(daemon.read_server_meta(Path(server.state_dir)))
+        assert uds is not None
+        sock = Path(uds)
+        assert sock.exists()
+        assert stat.S_IMODE(sock.stat().st_mode) == 0o600
+
+
+class TestEmbeddingStartControlPlane:
+    """`/embedding/start` is a control route. It best-effort-parses an
+    arbitrary JSON body and must not 500 on garbage within the trust model: the
+    parse is suppressed and only *known* keys are forwarded. With no model
+    configured every variant lands on the clean 400 "no model" path. Driven over
+    the control channel since the route isn't on the data listener."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"unknown_key": 1, "another": [1, 2, 3]},  # unknown keys filtered out
+            {"port": "not-an-int"},  # wrong-typed known key (never used: no model)
+            {"model": None},  # explicit null is skipped
+            {"llama_server": "/tmp/whatever"},  # an exec override (allowed: local control plane)
+        ],
+    )
+    def test_garbage_body_yields_clean_400_not_500(self, server: ServerInfo, body: dict) -> None:
+        resp = server.control_request("POST", "/embedding/start", json=body, timeout=10.0)
+        assert resp.status_code == 400, resp.text  # no model configured, handled cleanly
+        # Not the exec-override gate's refusal — the local control plane forwards it.
+        assert "Execution-shaping parameters" not in resp.text
+        assert server.control_request("GET", "/status", timeout=5.0).status_code == 200
 
 
 class TestActionsErrorEnvelope:

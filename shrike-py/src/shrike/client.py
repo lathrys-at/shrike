@@ -184,12 +184,22 @@ class ShrikeClient:
         spec: ServerSpec | None = None,
         autostart: bool = True,
         collection: str | None = None,
+        state_dir: Path | None = None,
     ) -> None:
         self.url = url
         self.spec = spec
         self.autostart = autostart and spec is not None
         self._autostarted = False
         self._http = httpx.Client()
+        # The privileged control routes (status/index/embedding/reload/shutdown)
+        # live on a separate always-local listener whose address — a Unix socket
+        # or loopback-TCP port — is recorded in the daemon's server.json. Discover
+        # it lazily from there; `state_dir` overrides which state dir to read (the
+        # default daemon writes the platform default, but a test/isolated daemon
+        # uses its own). A UDS needs its own httpx transport, built + cached here.
+        self._control_state_dir = state_dir
+        self._control_http: httpx.Client | None = None
+        self._control_uds: str | None = None
         # The per-call collection selector: injected into every tool
         # call's arguments (as `collection`) when set, so the CLI's
         # --collection/--profile routes without each typed method carrying the
@@ -204,10 +214,32 @@ class ShrikeClient:
         return self.url.rsplit("/", 1)[0]
 
     def close(self) -> None:
-        """Close the underlying HTTP connection pool. Idempotent."""
-        http = getattr(self, "_http", None)
-        if http is not None:
-            http.close()
+        """Close the underlying HTTP connection pools (data + control). Idempotent."""
+        for attr in ("_http", "_control_http"):
+            http = getattr(self, attr, None)
+            if http is not None:
+                http.close()
+
+    def _control_target(self) -> tuple[httpx.Client, str]:
+        """The ``(client, base_url)`` for a control-plane request.
+
+        Resolves the control channel from the running daemon's ``server.json``: a
+        Unix socket (its own cached httpx transport) or a loopback-TCP base. Falls
+        back to the data client + ``_base_url`` when no metadata is found yet or
+        the daemon predates the plane split, so the call surfaces a clean
+        unreachable error rather than a wrong-channel one.
+        """
+        base, uds = daemon.control_channel(daemon.read_server_meta(self._control_state_dir))
+        if not base:
+            return self._http, self._base_url
+        if uds is not None:
+            if self._control_http is None or self._control_uds != uds:
+                if self._control_http is not None:
+                    self._control_http.close()
+                self._control_http = httpx.Client(transport=httpx.HTTPTransport(uds=uds))
+                self._control_uds = uds
+            return self._control_http, base
+        return self._http, base
 
     def __enter__(self) -> ShrikeClient:
         return self
@@ -794,12 +826,15 @@ class ShrikeClient:
     # -- Custom HTTP endpoints ----------------------------------------------
 
     def server_status(self) -> ServerStatus | None:
-        """Probe ``GET /status``. Returns the status, or None if unreachable.
+        """Probe the full ``GET /status`` diagnostics on the control plane.
 
-        A non-raising liveness probe — does NOT auto-start.
+        Returns the status, or None if unreachable. A non-raising probe — does NOT
+        auto-start. The full diagnostics are control-plane only, so this rides the
+        control channel.
         """
+        client, base = self._control_target()
         try:
-            resp = self._http.get(f"{self._base_url}/status", timeout=5.0)
+            resp = client.get(f"{base}/status", timeout=5.0)
         except (httpx.ConnectError, httpx.TimeoutException):
             return None
         if resp.status_code == 200:
@@ -807,8 +842,15 @@ class ShrikeClient:
         return None
 
     def ping(self) -> bool:
-        """True if the server responds to ``/status``. Does not auto-start."""
-        return self.server_status() is not None
+        """True if the server answers the data plane's ``GET /health`` liveness
+        probe. Does not auto-start. Cheaper than the full control-plane status,
+        and the right "is it up" signal — the data plane is always locally
+        reachable when the daemon is alive."""
+        try:
+            resp = self._http.get(f"{self._base_url}/health", timeout=5.0)
+        except (httpx.ConnectError, httpx.TimeoutException):
+            return False
+        return resp.status_code == 200
 
     def status(self) -> ServerStatus:
         """``GET /status`` — raises if unreachable."""
@@ -855,9 +897,14 @@ class ShrikeClient:
         json: dict[str, Any] | None = None,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
-        """Call a custom endpoint, raising typed errors on failure."""
+        """Call a privileged control endpoint, raising typed errors on failure.
+
+        Every caller (status/index/embedding/reload/shutdown) is a control route,
+        so this targets the control channel resolved from the daemon's metadata.
+        """
+        client, base = self._control_target()
         try:
-            resp = self._http.request(method, f"{self._base_url}{path}", json=json, timeout=timeout)
+            resp = client.request(method, f"{base}{path}", json=json, timeout=timeout)
         except httpx.ConnectError as err:
             raise ServerUnreachableError(self._unreachable_msg()) from err
         except httpx.TimeoutException as err:

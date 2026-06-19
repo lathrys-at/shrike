@@ -87,6 +87,19 @@ class ShrikeGroup(OrderedGroup):
     help="Server URL (overrides config). [env: SHRIKE_URL]",
 )
 @click.option(
+    "--state-dir",
+    "state_dir",
+    envvar="SHRIKE_STATE_DIR",
+    type=click.Path(path_type=Path),
+    default=None,
+    help=(
+        "State directory of the target daemon (where it wrote server.json). Only "
+        "needed when the daemon runs with a non-default --state-dir; the privileged "
+        "control routes (status/stop/embedding/index) are discovered there. "
+        "[env: SHRIKE_STATE_DIR]"
+    ),
+)
+@click.option(
     "--profile",
     "--collection",
     "profile",
@@ -115,6 +128,7 @@ def cli(
     ctx: click.Context,
     config_path: Path,
     url: str | None,
+    state_dir: Path | None,
     profile: str | None,
     json_output: bool,
     pretty: bool,
@@ -161,8 +175,11 @@ def cli(
     ctx.obj["json"] = json_output
     ctx.obj["profile"] = profile
     # The client injects --profile/--collection into every routed tool call;
-    # None uses the server's active default.
-    ctx.obj["client"] = ShrikeClient(server_url, spec=spec, collection=profile)
+    # None uses the server's active default. `state_dir` is where the daemon wrote
+    # server.json (the control-channel address lives there); None → platform
+    # default, correct for the default daemon.
+    ctx.obj["state_dir"] = state_dir
+    ctx.obj["client"] = ShrikeClient(server_url, spec=spec, collection=profile, state_dir=state_dir)
 
     from shrike.cli import output
 

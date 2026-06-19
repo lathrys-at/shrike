@@ -21,7 +21,6 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import httpx
 import pytest
 
 from tests.integration.conftest import (
@@ -71,10 +70,6 @@ _CONCEPTS: list[dict[str, Any]] = [
 _TOTAL_NOTES = sum(len(c["cards"]) for c in _CONCEPTS)
 
 
-def _base_url(server: ServerInfo) -> str:
-    return server.url.rsplit("/", 1)[0]
-
-
 @pytest.fixture(
     scope="module",
     params=[
@@ -105,9 +100,9 @@ def backend_server(request: pytest.FixtureRequest, server_factory) -> tuple[Serv
     # should just wait, not false-skip on a wall-clock budget (the move-right
     # anti-pattern). Fail fast if the subprocess has died (a real failure); a
     # backend that never warms while alive hits the bazel per-target
-    # ``test_timeout``.
-    base = _base_url(srv)
-    while not httpx.get(f"{base}/status", timeout=5.0).json()["embedding"]["available"]:
+    # ``test_timeout``. /status is a control-plane route, so it goes over the
+    # control channel.
+    while not srv.control_request("GET", "/status", timeout=5.0).json()["embedding"]["available"]:
         _raise_if_dead(srv.proc, f"{backend} embedding service became available")
         time.sleep(0.05)
 
@@ -126,7 +121,7 @@ def backend_server(request: pytest.FixtureRequest, server_factory) -> tuple[Serv
     created = sum(1 for r in result["results"] if r["status"] == "created")
     assert created == _TOTAL_NOTES, f"expected {_TOTAL_NOTES} created, got {created}"
 
-    httpx.post(f"{base}/index/rebuild", timeout=60.0)
+    srv.control_request("POST", "/index/rebuild", timeout=60.0)
     wait_for_index_ready(srv)
     return srv, backend, ndim
 
@@ -144,7 +139,7 @@ class TestBackendParity:
         # The fingerprint prefix is what keeps a backend's vectors from ever colliding
         # with another's for the "same" model (onnx-rs: vs meta:/file:).
         srv, backend, _ = backend_server
-        idx = httpx.get(f"{_base_url(srv)}/status", timeout=5.0).json()["index"]
+        idx = srv.control_request("GET", "/status", timeout=5.0).json()["index"]
         model_id = idx.get("model_id", "")
         if backend.startswith("onnx"):
             assert model_id.startswith("onnx-rs:")

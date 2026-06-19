@@ -36,7 +36,11 @@ def media_mcp(media_server: ServerInfo) -> MCPClient:
 
 @pytest.fixture(scope="module")
 def media_runner(media_server: ServerInfo, tmp_path_factory: pytest.TempPathFactory) -> CLIRunner:
-    return CLIRunner(media_server.url, str(_write_cli_config(media_server, tmp_path_factory)))
+    return CLIRunner(
+        media_server.url,
+        str(_write_cli_config(media_server, tmp_path_factory)),
+        state_dir=media_server.state_dir,
+    )
 
 
 RAW = b"\x89PNG\r\n\x1a\n-fake-image-bytes"

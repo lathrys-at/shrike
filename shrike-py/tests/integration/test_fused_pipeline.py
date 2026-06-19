@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import time
 
-import httpx
 import pytest
 
 from tests.integration.conftest import (
@@ -40,10 +39,11 @@ class TestFullyNativeServer:
             embedding_model=str(onnx_model),
             extra_args=["--embedding-backend", "onnx-rs"],
         )
-        base = server.url.rsplit("/", 1)[0]
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:
-            if httpx.get(f"{base}/status", timeout=5.0).json()["embedding"]["available"]:
+            if server.control_request("GET", "/status", timeout=5.0).json()["embedding"][
+                "available"
+            ]:
                 return server
             time.sleep(0.05)
         pytest.fail("fully-native embedding service did not become available")
@@ -51,13 +51,11 @@ class TestFullyNativeServer:
     def test_status_normalizes_alias_and_reports_providers(self, srv: ServerInfo) -> None:
         # The onnx-rs alias normalizes to the canonical kind in /status, and the
         # loaded ort providers surface.
-        base = srv.url.rsplit("/", 1)[0]
-        emb = httpx.get(f"{base}/status", timeout=5.0).json()["embedding"]
+        emb = srv.control_request("GET", "/status", timeout=5.0).json()["embedding"]
         assert emb["backend"] == "onnx"
         assert emb["active_providers"]
 
     def test_upsert_index_search_round_trip(self, srv: ServerInfo) -> None:
-        base = srv.url.rsplit("/", 1)[0]
         mcp = MCPClient(srv.url)
         result = mcp(
             "upsert_notes",
@@ -79,7 +77,7 @@ class TestFullyNativeServer:
         )
         assert all(r["status"] == "created" for r in result["results"])
 
-        httpx.post(f"{base}/index/rebuild", timeout=60.0)
+        srv.control_request("POST", "/index/rebuild", timeout=60.0)
         idx = wait_for_index_ready(srv)
 
         # The native engine's fingerprint namespace shows up as the index

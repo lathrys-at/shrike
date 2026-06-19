@@ -108,10 +108,14 @@ def _render_status(status: ServerStatus) -> None:
 
 
 def _wait_for_server(
-    url: str, timeout: float = 15.0, *, show_spinner: bool = True
+    url: str,
+    timeout: float = 15.0,
+    *,
+    show_spinner: bool = True,
+    state_dir: Path | None = None,
 ) -> ServerStatus | None:
     """Poll until the daemon responds to /status. Returns the status or None."""
-    client = ShrikeClient(url, autostart=False)
+    client = ShrikeClient(url, autostart=False, state_dir=state_dir)
     deadline = time.monotonic() + timeout
 
     with output.spinner("Starting server…") if show_spinner else contextlib.nullcontext():
@@ -332,6 +336,13 @@ def server_start(
     """
     config = ctx.obj["config"]
 
+    # An explicit --state-dir targets the daemon's lock/meta/control location: the
+    # spawned server must write there, and our liveness/ready checks must read
+    # there, so the CLI and daemon agree. None → the platform default.
+    state_dir_override = ctx.obj.get("state_dir")
+    target_state_dir = Path(state_dir_override) if state_dir_override else None
+    state_dir_args = ["--state-dir", str(state_dir_override)] if state_dir_override else []
+
     # Resolve collection path
     collection_path = resolve_collection(config, collection)
     if not collection_path:
@@ -435,8 +446,8 @@ def server_start(
     locking_cli_args = locking_args(resolved_locking)
 
     # Check if already running (via lock, not PID)
-    if is_server_alive():
-        meta = read_server_meta()
+    if is_server_alive(target_state_dir):
+        meta = read_server_meta(target_state_dir)
         existing_url = meta.get("url", "unknown") if meta else "unknown"
         existing_pid = meta.get("pid", "unknown") if meta else "unknown"
         raise click.ClickException(
@@ -502,6 +513,7 @@ def server_start(
             "--log-level",
             resolved_log_level,
             "--foreground",
+            *state_dir_args,
             *remote_args,
             *transport_cli_args,
             *cache_args,
@@ -516,7 +528,7 @@ def server_start(
         return
 
     # Daemon mode
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    (target_state_dir or STATE_DIR).mkdir(parents=True, exist_ok=True)
 
     bootstrap_log = Path(resolved_log_dir)
     bootstrap_log.mkdir(parents=True, exist_ok=True)
@@ -539,6 +551,7 @@ def server_start(
                 resolved_log_dir,
                 "--log-level",
                 resolved_log_level,
+                *state_dir_args,
                 *remote_args,
                 *transport_cli_args,
                 *cache_args,
@@ -553,7 +566,7 @@ def server_start(
         )
 
     log_file = get_log_file(config, log_dir_override=resolved_log_dir)
-    status = _wait_for_server(url)
+    status = _wait_for_server(url, state_dir=target_state_dir)
     if status is not None:
         status.log = str(log_file)
         if json_out:
@@ -590,19 +603,21 @@ def server_start(
 def server_stop(ctx: click.Context) -> None:
     """Stop the Shrike MCP server daemon."""
     json_out: bool = ctx.obj["json"]
+    state_dir_override = ctx.obj.get("state_dir")
+    target_state_dir = Path(state_dir_override) if state_dir_override else None
 
-    if not is_server_alive():
+    if not is_server_alive(target_state_dir):
         if json_out:
             output.emit_json({"stopped": False, "reason": "not running"})
         else:
             output.console.print("[dim]Server is not running.[/dim]")
-            if META_FILE.exists():
-                cleanup_state()
+            if read_server_meta(target_state_dir) is not None:
+                cleanup_state(target_state_dir)
                 output.console.print("[dim](cleaned up stale state)[/dim]")
         return
 
     with output.spinner("Stopping server…"):
-        result = stop_server()
+        result = stop_server(sd=target_state_dir)
 
     if json_out:
         output.emit_json(result)
@@ -622,7 +637,9 @@ def server_status_cmd(ctx: click.Context) -> None:
     """Check whether the Shrike MCP server is running."""
     url = ctx.obj["url"]
     json_out: bool = ctx.obj["json"]
-    client = ShrikeClient(url, autostart=False)
+    state_dir_override = ctx.obj.get("state_dir")
+    target_state_dir = Path(state_dir_override) if state_dir_override else None
+    client = ShrikeClient(url, autostart=False, state_dir=target_state_dir)
     with output.spinner("Checking server…"):
         status = client.server_status()
 
@@ -636,8 +653,8 @@ def server_status_cmd(ctx: click.Context) -> None:
         return
 
     # Not responsive: connection state is the client's call, from the daemon lock.
-    if is_server_alive():
-        meta = read_server_meta() or {}
+    if is_server_alive(target_state_dir):
+        meta = read_server_meta(target_state_dir) or {}
         if json_out:
             output.emit_json(
                 {

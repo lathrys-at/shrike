@@ -457,9 +457,11 @@ class TestDerivedLexicalSearch:
 
     def _derived(self, server, timeout: float = 10.0):
         """Wait for the boot build to finish; return the derived-status (or skip if no FTS5)."""
+        from pathlib import Path
+
         from shrike.client import ShrikeClient
 
-        client = ShrikeClient(server.url, autostart=False)
+        client = ShrikeClient(server.url, autostart=False, state_dir=Path(server.state_dir))
         deadline = time.monotonic() + timeout
         der = client.status().derived
         while der.state != "ready" and time.monotonic() < deadline:
@@ -1404,6 +1406,8 @@ class TestCooperativeLocking:
     """End-to-end cooperative locking on an isolated server."""
 
     def test_status_reports_and_idle_release(self, server_factory):
+        from pathlib import Path
+
         from shrike.client import ShrikeClient
 
         def wait_for_release(client: ShrikeClient, deadline: float) -> bool:
@@ -1414,7 +1418,7 @@ class TestCooperativeLocking:
         info = server_factory(
             "coop", extra_args=["--cooperative-lock", "--lock-hold-seconds", "2.0"]
         )
-        client = ShrikeClient(info.url, autostart=False)
+        client = ShrikeClient(info.url, autostart=False, state_dir=Path(info.state_dir))
 
         st = client.status()
         assert st.locking == "cooperative"
@@ -1444,9 +1448,11 @@ class TestCooperativeLocking:
         assert client.query("deck:Coop").total == 1
 
     def test_default_server_is_permanent(self, server):
+        from pathlib import Path
+
         from shrike.client import ShrikeClient
 
-        st = ShrikeClient(server.url, autostart=False).status()
+        st = ShrikeClient(server.url, autostart=False, state_dir=Path(server.state_dir)).status()
         assert st.locking == "permanent"
         assert st.collection_held is True
 
@@ -1455,8 +1461,7 @@ class TestStatusEndpoint:
     """Verify the GET /status endpoint."""
 
     def test_status_returns_running(self, server):
-        status_url = server.url.rsplit("/", 1)[0] + "/status"
-        resp = httpx.get(status_url, timeout=5.0)
+        resp = server.control_request("GET", "/status", timeout=5.0)
         assert resp.status_code == 200
         body = resp.json()
         assert body["running"] is True
@@ -1465,16 +1470,14 @@ class TestStatusEndpoint:
         assert "collection" in body
 
     def test_status_has_uptime(self, server):
-        status_url = server.url.rsplit("/", 1)[0] + "/status"
-        resp = httpx.get(status_url, timeout=5.0)
+        resp = server.control_request("GET", "/status", timeout=5.0)
         body = resp.json()
         assert "uptime" in body
 
     def test_status_no_embedding_without_model(self, server):
         # Embedding and index are always reported now; without a model the
         # embedding is unavailable and the index reports the unavailable state.
-        status_url = server.url.rsplit("/", 1)[0] + "/status"
-        resp = httpx.get(status_url, timeout=5.0)
+        resp = server.control_request("GET", "/status", timeout=5.0)
         body = resp.json()
         assert body["embedding"]["available"] is False
         assert body["embedding"]["state"] == "not_configured"
@@ -1486,9 +1489,8 @@ class TestHttpShutdown:
 
     def test_shutdown_returns_ok_and_server_exits(self, server_factory):
         srv = server_factory("shutdown")
-        shutdown_url = srv.url.rsplit("/", 1)[0] + "/shutdown"
 
-        resp = httpx.post(shutdown_url, timeout=5.0)
+        resp = srv.control_request("POST", "/shutdown", timeout=5.0)
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "ok"
@@ -1560,16 +1562,16 @@ class TestSigtermShutdown:
         import signal as _signal
 
         info = server_factory("sigterm")
-        status_url = info.url.rsplit("/", 1)[0] + "/status"
-        pid = httpx.get(status_url, timeout=5.0).json()["pid"]
+        pid = info.control_request("GET", "/status", timeout=5.0).json()["pid"]
+        health_url = info.url.rsplit("/", 1)[0] + "/health"
 
         os.kill(pid, _signal.SIGTERM)
-        # Liveness via the endpoint, not os.kill(pid, 0): the spawned server
-        # stays a zombie under the test runner until reaped, so signal-0
-        # keeps succeeding after exit.
+        # Liveness via the data-plane endpoint, not os.kill(pid, 0): the spawned
+        # server stays a zombie under the test runner until reaped, so signal-0
+        # keeps succeeding after exit. SIGTERM drains both listeners.
         for _ in range(75):
             try:
-                httpx.get(status_url, timeout=1.0)
+                httpx.get(health_url, timeout=1.0)
             except httpx.HTTPError:
                 break
             time.sleep(0.2)

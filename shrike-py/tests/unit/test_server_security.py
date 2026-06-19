@@ -11,6 +11,7 @@ from mcp.server.transport_security import TransportSecurityMiddleware
 from shrike.server.server import (
     _EXEC_SHAPING_OVERRIDES,
     _build_transport_security,
+    _ControlListener,
     _is_loopback,
     _rejected_exec_overrides,
     _server_is_purely_local,
@@ -327,3 +328,41 @@ def test_empty_body_is_never_rejected() -> None:
     # A no-override start ("start what the daemon was configured with") is always
     # allowed, even on a non-purely-local server.
     assert _rejected_exec_overrides({}, purely_local=False) == []
+
+
+# -- _ControlListener.operator_gated drives the /embedding/start exec gate --
+#
+# The gate keys on the control transport's trust: a filesystem-gated UDS confines
+# callers to the operator (overrides allowed); the Windows loopback-TCP fallback
+# is reachable by any local user (overrides refused — the #791 RCE class).
+
+
+def test_uds_control_listener_is_operator_gated(tmp_path) -> None:
+    listener = _ControlListener(tmp_path)
+    try:
+        assert listener.uds is not None  # POSIX default
+        assert listener.operator_gated is True
+        # The gate therefore ACCEPTS exec overrides on a UDS control plane.
+        assert (
+            _rejected_exec_overrides({"llama_server": "/x"}, purely_local=listener.operator_gated)
+            == []
+        )
+    finally:
+        listener.cleanup()
+
+
+def test_loopback_tcp_control_listener_is_not_operator_gated(monkeypatch, tmp_path) -> None:
+    # Force the Windows branch: a pre-bound loopback-TCP socket, reachable by any
+    # local user — so it must NOT be operator-gated, and the gate must REFUSE
+    # caller-supplied exec params there.
+    monkeypatch.setattr("shrike.server.server.sys.platform", "win32")
+    listener = _ControlListener(tmp_path)
+    try:
+        assert listener.uds is None
+        assert listener.host == "127.0.0.1" and listener.port  # ephemeral TCP
+        assert listener.operator_gated is False
+        assert _rejected_exec_overrides(
+            {"llama_server": "/x"}, purely_local=listener.operator_gated
+        ) == ["llama_server"]
+    finally:
+        listener.cleanup()

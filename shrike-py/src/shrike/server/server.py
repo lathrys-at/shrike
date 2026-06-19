@@ -8,12 +8,16 @@ import ipaddress
 import logging
 import os
 import signal
+import socket
 import sys
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from starlette.applications import Starlette
 
 import shrike_native
 from mcp.server.fastmcp import FastMCP
@@ -33,7 +37,7 @@ from shrike.harness.engines.embedding.runtime import (
     EmbeddingRuntime,
 )
 from shrike.harness.harness import CollectionManager, Harness, HarnessParams, KernelConfigError
-from shrike.platform.daemon import AlreadyRunningError, ServerLock
+from shrike.platform.daemon import AlreadyRunningError, ServerLock, control_socket_path
 from shrike.platform.driven_runtime import DrivenRuntime
 from shrike.platform.log import configure_logging
 from shrike.platform.paths import cache_dir, state_dir
@@ -242,6 +246,186 @@ def _rejected_exec_overrides(overrides: dict[str, Any], *, purely_local: bool) -
     return [k for k in _EXEC_SHAPING_OVERRIDES if k in overrides]
 
 
+def _make_guard(
+    security: TransportSecuritySettings | None,
+) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
+    """A per-plane route decorator: validate Host/Origin under ``security`` (a
+    no-op when ``None``) and emit the one-INFO-line-per-served-call.
+
+    Each listener carries its own settings — the data plane honors the operator's
+    exposure flags, the control plane is pinned local — so the middleware is built
+    once per plane here and closed over, rather than shared.
+    """
+    security_mw = TransportSecurityMiddleware(security)
+
+    def guard(
+        handler: Callable[..., Awaitable[Any]],
+    ) -> Callable[..., Awaitable[Any]]:
+        @functools.wraps(handler)
+        async def wrapped(request: Any) -> Any:
+            # is_post=False: validate Host/Origin only. Content-Type is not
+            # enforced here because several endpoints are intentionally bodyless
+            # POSTs (/shutdown, /index/rebuild, /embedding/stop). A no-op when
+            # security is None.
+            started = time.perf_counter()
+            path = request.url.path
+            rejection = await security_mw.validate_request(request, is_post=False)
+            if rejection is not None:
+                logger.warning(
+                    "%s %s rejected by Host/Origin guard (%d) from %s",
+                    request.method,
+                    path,
+                    rejection.status_code,
+                    request.client,
+                )
+                return rejection
+            response = await handler(request)
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            # Every served route logs at INFO — including /status polls. The one
+            # exception is the actions edge: when an action reaches its impl, the
+            # _safe_tool wrapper ALREADY emits the canonical one-INFO-line-per-call,
+            # so the transport line here would be a SECOND INFO line for the same
+            # call. Demote it to DEBUG for /actions/* (the handler logs its own INFO
+            # line for the early-return errors that never reach a tool).
+            level = logging.DEBUG if path.startswith("/actions/") else logging.INFO
+            logger.log(
+                level,
+                "%s %s -> %d (%.0fms)",
+                request.method,
+                path,
+                response.status_code,
+                elapsed_ms,
+            )
+            return response
+
+        return wrapped
+
+    return guard
+
+
+class _ControlListener:
+    """Where the privileged control plane listens — always local, never widened
+    by ``--allow-remote``.
+
+    A Unix-domain socket on POSIX (``<state_dir>/control.sock``, filesystem-gated,
+    off the network entirely); a loopback-only TCP port on Windows, where asyncio
+    has no Unix-socket support. The address is recorded in ``server.json`` so the
+    CLI/client can reach it; the data plane's exposure flags never touch this
+    listener.
+    """
+
+    def __init__(self, state_dir: Path) -> None:
+        self.uds: str | None = None
+        self.host: str | None = None
+        self.port: int | None = None
+        self._sock: socket.socket | None = None
+        if sys.platform == "win32":
+            # No asyncio UDS on Windows: pre-bind an ephemeral loopback socket so
+            # the chosen port is known before server.json is written, and hand the
+            # bound socket to uvicorn (no re-bind race).
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", 0))
+            self.host, self.port = sock.getsockname()[:2]
+            self._sock = sock
+        else:
+            # A short, user-private path (AF_UNIX is length-limited, and the state
+            # dir can be deep); shared with daemon.cleanup_state so a restart finds
+            # the same socket. A stale socket from a crashed daemon would make
+            # bind() fail; the daemon lock guarantees no live peer owns it, so
+            # remove it.
+            uds = control_socket_path(state_dir)
+            with contextlib.suppress(OSError):
+                uds.unlink()
+            self.uds = str(uds)
+
+    @property
+    def meta(self) -> dict[str, Any]:
+        """The ``control`` block recorded in ``server.json`` for client discovery."""
+        if self.uds is not None:
+            return {"uds": self.uds}
+        return {"url": f"http://{self.host}:{self.port}"}
+
+    @property
+    def operator_gated(self) -> bool:
+        """Whether the transport restricts callers to the daemon's operator.
+
+        A Unix-domain socket is ``0600`` inside a ``0700`` runtime dir, so only the
+        daemon's own uid can connect — the caller IS the operator. The loopback-TCP
+        fallback (Windows, which lacks asyncio UDS) is reachable by ANY local user
+        on the host, so a caller there is *not* provably the operator. This gates
+        whether ``/embedding/start`` trusts caller-supplied execution params
+        (binary/model/args): a non-operator-gated transport must refuse them, since
+        a hostile local user could otherwise drive the daemon to spawn an arbitrary
+        binary as the daemon's user.
+        """
+        return self.uds is not None
+
+    @property
+    def security(self) -> TransportSecuritySettings | None:
+        """The control listener's Host/Origin policy — fixed local, never widened.
+
+        A Unix-domain socket is filesystem-gated and unreachable by a browser
+        (there is no ``fetch`` to a Unix socket), so DNS-rebinding/Host validation
+        adds nothing — skip it (``None``). The loopback-TCP fallback, by contrast,
+        *is* reachable by a same-host browser at ``127.0.0.1:<port>``, so it keeps
+        the loopback-only guard. Independent of the data plane's settings either
+        way — the data plane's exposure flags never reach here.
+        """
+        if self.uds is not None:
+            return None
+        return TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=list(_LOOPBACK_HOSTS),
+            allowed_origins=list(_LOOPBACK_ORIGINS),
+        )
+
+    def uvicorn_config_kwargs(self) -> dict[str, Any]:
+        """uvicorn ``Config`` kwargs binding this listener (``uds=`` on POSIX)."""
+        if self.uds is not None:
+            return {"uds": self.uds}
+        # The pre-bound socket is passed to serve(sockets=...); Config still needs
+        # a host/port for its own bookkeeping/logging.
+        return {"host": self.host, "port": self.port}
+
+    def serve_kwargs(self) -> dict[str, Any]:
+        """uvicorn ``Server.serve`` kwargs (the pre-bound Windows socket)."""
+        if self._sock is not None:
+            return {"sockets": [self._sock]}
+        return {}
+
+    async def harden(self, server: Any) -> None:
+        """Best-effort tighten the UDS to owner-only once uvicorn has bound it.
+
+        uvicorn creates the socket file during startup; wait for that, then chmod
+        0o600. A no-op on the TCP fallback. Defense-in-depth on top of the state
+        dir's own (user-owned) permissions.
+
+        Gives up if the server stops/never binds (``should_exit`` or a bounded
+        deadline) rather than spinning forever — a control-startup that exits early
+        leaves ``started`` False, and an unbounded wait here would wedge the gather
+        (and the whole daemon).
+        """
+        if self.uds is None:
+            return
+        deadline = time.monotonic() + 10.0
+        while not getattr(server, "started", False):
+            if getattr(server, "should_exit", False) or time.monotonic() > deadline:
+                return
+            await asyncio.sleep(0.01)
+        with contextlib.suppress(OSError):
+            os.chmod(self.uds, 0o600)
+
+    def cleanup(self) -> None:
+        """Remove the UDS path on shutdown; close the pre-bound TCP socket."""
+        if self.uds is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(self.uds)
+        if self._sock is not None:
+            with contextlib.suppress(OSError):
+                self._sock.close()
+
+
 def create_mcp(
     *,
     host: str,
@@ -283,85 +467,72 @@ def _register_custom_routes(
     *,
     meta: dict[str, Any],
     security: TransportSecuritySettings | None,
+    control_security: TransportSecuritySettings | None,
     request_shutdown: Callable[[], None],
     action_tools: dict[str, Tool] | None = None,
     manager: CollectionManager | None = None,
     export_store: Any | None = None,
-    server_purely_local: bool = False,
-) -> None:
-    """Register custom HTTP endpoints on the server.
+    control_purely_local: bool = False,
+) -> Starlette:
+    """Register the custom HTTP routes, split across the data and control planes.
 
-    The custom routes bypass the MCP transport middleware, so they get the same
-    Host/Origin validation applied here via ``_guard`` — otherwise a browser page
-    could drive ``/shutdown`` etc. through a no-preflight POST.
+    The privileged *control* routes (shutdown/reload/index/embedding, the full
+    ``/status`` diagnostics) are registered on a separate Starlette app this
+    function builds and returns — served on the always-local control listener,
+    never widened by ``--allow-remote``. The *data* routes (``/actions/{name}``,
+    media, export, the minimal ``/health`` liveness) are registered on the FastMCP
+    ``app`` alongside ``/mcp``, honoring the operator's exposure flags.
 
-    Each handler is parse → harness coroutine → JSONResponse: the operational
-    verbs live on the kernel-mode Harness and await natively; only what is
-    genuinely host-specific stays here (the guard, uptime/pid/url assembly, the
-    media FileResponse, process exit).
+    Both planes bypass the MCP transport middleware, so each route gets Host/Origin
+    validation via its plane's ``_make_guard`` — the data guard under ``security``,
+    the control guard under ``control_security``. Each handler is parse → harness
+    coroutine → JSONResponse; only host-specific work (uptime/pid assembly, the
+    media FileResponse, process exit) stays here.
 
     ``action_tools`` (the ``name -> Tool`` map from :func:`register_tools`) backs
-    the actions-over-HTTP edge: a single ``POST /actions/{name}`` route, behind
-    the same ``_guard``, runs each named action through the *same*
-    ``_safe_tool``-wrapped impl the MCP tools bind — the UI edge of the one
-    catalog. When None (a host that wants only the operational routes) the actions
-    route isn't registered.
+    the actions-over-HTTP data edge; when None the actions route isn't registered.
+    ``control_purely_local`` gates whether ``/embedding/start`` trusts
+    caller-supplied execution params: True for a filesystem-gated UDS control
+    transport (callers confined to the operator), False for the Windows
+    loopback-TCP fallback (reachable by other local users) — see
+    :attr:`_ControlListener.operator_gated`.
     """
     wrapper = harness.wrapper
+    from starlette.applications import Starlette
     from starlette.requests import Request
     from starlette.responses import FileResponse, JSONResponse, Response
+    from starlette.routing import Route
 
     from shrike.harness.collection import CollectionBusyError, _safe_media_name
 
-    security_mw = TransportSecurityMiddleware(security)
+    data_guard = _make_guard(security)
+    control_guard = _make_guard(control_security)
+    control_routes: list[Route] = []
+    _Handler = Callable[[Request], Awaitable[Response]]
 
-    def _guard(
-        handler: Callable[[Request], Awaitable[Response]],
-    ) -> Callable[[Request], Awaitable[Response]]:
-        @functools.wraps(handler)
-        async def wrapped(request: Request) -> Response:
-            # is_post=False: validate Host/Origin only. Content-Type is not
-            # enforced here because several endpoints are intentionally bodyless
-            # POSTs (/shutdown, /index/rebuild, /embedding/stop). A no-op when
-            # security is None (non-loopback bind).
-            started = time.perf_counter()
-            path = request.url.path
-            rejection = await security_mw.validate_request(request, is_post=False)
-            if rejection is not None:
-                logger.warning(
-                    "%s %s rejected by Host/Origin guard (%d) from %s",
-                    request.method,
-                    path,
-                    rejection.status_code,
-                    request.client,
-                )
-                return rejection
-            response = await handler(request)
-            elapsed_ms = (time.perf_counter() - started) * 1000
-            # Every served route logs at INFO — including /status polls: knowing
-            # what the server did (and how long it took) is the point. The one
-            # exception is the actions edge: when an action reaches its impl, the
-            # _safe_tool wrapper ALREADY emits the canonical
-            # one-INFO-line-per-call (tool name + params + outcome + duration),
-            # so the transport line here would be a SECOND INFO line for the
-            # same call. Demote it to DEBUG for /actions/* (the handler logs its
-            # own INFO line for the early-return errors that never reach a tool,
-            # so the "one INFO line per served call" rule holds either way).
-            level = logging.DEBUG if path.startswith("/actions/") else logging.INFO
-            logger.log(
-                level,
-                "%s %s -> %d (%.0fms)",
-                request.method,
-                path,
-                response.status_code,
-                elapsed_ms,
-            )
-            return response
+    def _route(plane: str, path: str, methods: list[str]) -> Callable[[_Handler], _Handler]:
+        """Register a handler on its plane: the FastMCP data ``app`` (alongside
+        ``/mcp``) or the control Starlette app, each behind its own guard."""
 
-        return wrapped
+        def deco(handler: _Handler) -> _Handler:
+            if plane == "control":
+                control_routes.append(Route(path, control_guard(handler), methods=methods))
+            else:
+                app.custom_route(path, methods=methods)(data_guard(handler))
+            return handler
 
-    @app.custom_route("/status", methods=["GET"])
-    @_guard
+        return deco
+
+    @_route("data", "/health", ["GET"])
+    async def handle_health(request: Request) -> JSONResponse:
+        # The data plane's minimal, unauthenticated liveness probe: enough to
+        # confirm the daemon is up and assert the wire version, and NOTHING the
+        # full /status carries (paths, PID, model fingerprints, lock state) — that
+        # diagnostic surface is control-plane only, so an --allow-remote'd data
+        # plane leaks nothing sensitive.
+        return JSONResponse({"running": True, "wire_protocol_version": WIRE_PROTOCOL_VERSION})
+
+    @_route("control", "/status", ["GET"])
     async def handle_status(request: Request) -> JSONResponse:
         import contextlib
 
@@ -406,8 +577,7 @@ def _register_custom_routes(
 
         return JSONResponse(status)
 
-    @app.custom_route("/media/{filename:path}", methods=["GET"])
-    @_guard
+    @_route("data", "/media/{filename:path}", ["GET"])
     async def handle_media(request: Request) -> Response:
         # Serve a media file by name — the model-friendly retrieval path that
         # fetch_media/list_media point at (no base64). Read-only; same Host/Origin
@@ -421,8 +591,7 @@ def _register_custom_routes(
             return Response(status_code=404)
         return FileResponse(full, filename=safe)
 
-    @app.custom_route("/export/{token}", methods=["GET"])
-    @_guard
+    @_route("data", "/export/{token}", ["GET"])
     async def handle_export(request: Request) -> Response:
         # Serve a pending export package by its one-shot token — the download
         # path export_package's `url` points at (no base64). Read-only; same
@@ -449,21 +618,18 @@ def _register_custom_routes(
             background=BackgroundTask(export_store.reap, token),
         )
 
-    @app.custom_route("/index/rebuild", methods=["POST"])
-    @_guard
+    @_route("control", "/index/rebuild", ["POST"])
     async def handle_index_rebuild(request: Request) -> JSONResponse:
         try:
             return JSONResponse(await harness.rebuild_index())
         except KernelConfigError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 
-    @app.custom_route("/index/save", methods=["POST"])
-    @_guard
+    @_route("control", "/index/save", ["POST"])
     async def handle_index_save(request: Request) -> JSONResponse:
         return JSONResponse(await harness.save_index())
 
-    @app.custom_route("/embedding/start", methods=["POST"])
-    @_guard
+    @_route("control", "/embedding/start", ["POST"])
     async def handle_embedding_start(request: Request) -> JSONResponse:
         import contextlib
 
@@ -487,18 +653,21 @@ def _register_custom_routes(
                     if body.get(key) is not None:
                         overrides[key] = body[key]
 
-        # Execution-shaping overrides (the binary, model, subprocess args, onnx
-        # providers, backend kind) are refused unless the server is purely-local
-        # — otherwise a remote/proxied caller could point the spawned embedding
-        # process at an attacker-chosen binary/args. Runtime knobs in the body
-        # still pass through; the daemon falls back to its boot-configured
-        # binary/model for the refused keys.
-        rejected = _rejected_exec_overrides(overrides, purely_local=server_purely_local)
+        # Execution-shaping overrides (binary, model, subprocess args, onnx
+        # providers, backend kind) are trusted only when the control transport
+        # confines callers to the daemon's operator. A filesystem-gated UDS does
+        # (``control_purely_local`` True → accept); the Windows loopback-TCP control
+        # listener does NOT — any local user on the host can reach it, so a
+        # caller-chosen binary there is the #791 RCE class. There the overrides are
+        # refused and the daemon falls back to its boot-configured settings; runtime
+        # knobs still pass through.
+        rejected = _rejected_exec_overrides(overrides, purely_local=control_purely_local)
         if rejected:
             logger.warning(
-                "Refusing /embedding/start overrides %s: the server is not purely-local, so "
-                "the caller-supplied binary/model/args are ignored in favour of the daemon's "
-                "boot-configured embedding settings",
+                "Refusing /embedding/start overrides %s: the control channel is not confined "
+                "to the operator (a loopback-TCP control listener is reachable by other local "
+                "users), so the caller-supplied binary/model/args are ignored in favour of the "
+                "daemon's boot-configured embedding settings",
                 rejected,
             )
             return JSONResponse(
@@ -506,10 +675,10 @@ def _register_custom_routes(
                     "error": (
                         "Execution-shaping parameters ("
                         + ", ".join(_EXEC_SHAPING_OVERRIDES)
-                        + ") may only be set via /embedding/start on a purely-local server "
-                        "(loopback bind, no --allow-remote, DNS-rebinding guard on, no extra "
-                        "--allowed-host/--allowed-origin). Configure them at daemon startup "
-                        "(--embedding-*/--llama-server/--config) instead."
+                        + ") can't be set via /embedding/start when the control channel isn't "
+                        "confined to the daemon's operator (a loopback-TCP control listener is "
+                        "reachable by other local users on this host). Configure them at daemon "
+                        "startup (--embedding-*/--llama-server/--config) instead."
                     )
                 },
                 status_code=400,
@@ -527,13 +696,11 @@ def _register_custom_routes(
             logger.error("Failed to start embedding service: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
-    @app.custom_route("/embedding/stop", methods=["POST"])
-    @_guard
+    @_route("control", "/embedding/stop", ["POST"])
     async def handle_embedding_stop(request: Request) -> JSONResponse:
         return JSONResponse(await harness.stop_embedding())
 
-    @app.custom_route("/reload", methods=["POST"])
-    @_guard
+    @_route("control", "/reload", ["POST"])
     async def handle_reload(request: Request) -> JSONResponse:
         return JSONResponse(await harness.reload())
 
@@ -554,8 +721,7 @@ def _register_custom_routes(
 
     if action_tools is not None:
 
-        @app.custom_route("/actions/{name}", methods=["POST"])
-        @_guard
+        @_route("data", "/actions/{name}", ["POST"])
         async def handle_action(request: Request) -> JSONResponse:
             name = request.path_params.get("name", "")
 
@@ -655,8 +821,7 @@ def _register_custom_routes(
             )
             return JSONResponse(structured, headers=_wire_headers())
 
-    @app.custom_route("/shutdown", methods=["POST"])
-    @_guard
+    @_route("control", "/shutdown", ["POST"])
     async def handle_shutdown(request: Request) -> JSONResponse:
         # Graceful exit via uvicorn's own machinery: flag should_exit and return
         # a plain 200. Uvicorn completes in-flight responses — this one
@@ -668,6 +833,10 @@ def _register_custom_routes(
         # saturated runner, while a graceful close cannot.
         request_shutdown()
         return JSONResponse({"status": "ok", "pid": os.getpid()})
+
+    # The control plane is its own Starlette ASGI app, served on the always-local
+    # control listener. The data routes were registered on the FastMCP `app` above.
+    return Starlette(routes=control_routes)
 
 
 def main() -> None:
@@ -976,12 +1145,19 @@ def main() -> None:
 
     # Acquire the daemon lock before touching the collection
     state_dir_override = Path(args.state_dir) if args.state_dir else None
+    resolved_state_dir = state_dir_override or state_dir()
+    # The privileged control plane's own listener — a Unix-domain socket (POSIX)
+    # or a loopback-only TCP port (Windows), built BEFORE server.json is written so
+    # its address can be recorded for the CLI/client to discover. Always local; the
+    # data-plane exposure flags below never touch it.
+    control_listener = _ControlListener(resolved_state_dir)
     server_lock = ServerLock(state_dir_override=state_dir_override)
     server_meta = {
         "pid": None,
         "url": f"http://{args.host}:{args.port}/mcp",
         "host": args.host,
         "port": args.port,
+        "control": control_listener.meta,
         "collection": args.collection,
         "log_dir": str(log_dir),
         "log_level": args.log_level or "info",
@@ -1014,7 +1190,6 @@ def main() -> None:
 
     # llama-server stays on loopback regardless of the MCP bind host — there is
     # never a reason to expose the embedding backend to the network.
-    resolved_state_dir = state_dir_override or state_dir()
     emb_params: dict[str, Any] = {
         "backend": args.embedding_backend or DEFAULT_BACKEND,
         "model": args.embedding_model,
@@ -1495,6 +1670,7 @@ def main() -> None:
                 harness.runtime.stop()
             with contextlib.suppress(Exception):
                 export_store.close()  # reap any pending download temps
+            control_listener.cleanup()  # unlink the control UDS (signal path skips the gather tail)
             server_lock.release()
             # Close the driven pools and join the committed threads last: the
             # index saves above are the durability point (runtime-independent),
@@ -1536,49 +1712,87 @@ def main() -> None:
             # plane and bypass this — they are not actions.
             readiness=harness.await_ready,
         )
-        # The uvicorn Server is created after route registration, so the
-        # /shutdown route reaches it through this late-bound holder.
+        # Both uvicorn Servers are created after route registration, so the
+        # /shutdown route reaches them through this late-bound holder. /shutdown
+        # (a control route) drains BOTH listeners — the data plane and the control
+        # plane exit together.
         server_holder: list[Any] = []
 
         def _request_shutdown() -> None:
-            if server_holder:
-                server_holder[0].should_exit = True
+            for server in server_holder:
+                server.should_exit = True
 
-        _register_custom_routes(
+        # The data routes land on the FastMCP `mcp` app (alongside /mcp); the
+        # control routes come back as their own Starlette app, served on the
+        # always-local control listener. The /embedding/start exec-override gate
+        # keys on the control transport's trust: a filesystem-gated UDS confines
+        # callers to the operator (overrides allowed), but the Windows loopback-TCP
+        # fallback is reachable by any local user, so overrides are refused there.
+        control_app = _register_custom_routes(
             mcp,
             harness,
             server_lock,
             meta=server_meta,
             security=transport_security,
+            control_security=control_listener.security,
             request_shutdown=_request_shutdown,
             action_tools=action_tools,
             manager=manager,
             export_store=export_store,
-            server_purely_local=purely_local,
+            control_purely_local=control_listener.operator_gated,
         )
 
         logger.info(
-            "Listening on %s:%s (log_dir=%s, log_level=%s)",
+            "Listening on %s:%s (data) + %s (control); log_dir=%s, log_level=%s",
             args.host,
             args.port,
+            control_listener.uds or f"127.0.0.1:{control_listener.port}",
             log_dir,
             args.log_level or "info",
         )
         import uvicorn
 
-        config = uvicorn.Config(
+        # Bound the graceful drain so a hung in-flight request can't wedge a
+        # /shutdown forever (the daemon's stop path escalates to SIGTERM/SIGKILL).
+        data_config = uvicorn.Config(
             mcp.streamable_http_app(),
             host=args.host,
             port=args.port,
             log_config=None,
-            # Bound the graceful drain so a hung in-flight request can't
-            # wedge a /shutdown forever (the daemon's stop path escalates to
-            # SIGTERM/SIGKILL regardless).
             timeout_graceful_shutdown=5,
         )
-        server = uvicorn.Server(config)
-        server_holder.append(server)
-        await server.serve()
+        control_config = uvicorn.Config(
+            control_app,
+            log_config=None,
+            timeout_graceful_shutdown=5,
+            **control_listener.uvicorn_config_kwargs(),
+        )
+        data_server = uvicorn.Server(data_config)
+        control_server = uvicorn.Server(control_config)
+        server_holder.extend((data_server, control_server))
+        # Run both listeners on the one loop. Harden the control socket (UDS →
+        # owner-only) once it is bound. A /shutdown or signal sets should_exit on
+        # both, so both serve()s return and the gather completes.
+        try:
+            await asyncio.gather(
+                data_server.serve(),
+                control_server.serve(**control_listener.serve_kwargs()),
+                control_listener.harden(control_server),
+            )
+        except BaseException:
+            # A listener failed to bind/serve at startup (or a signal-path exit
+            # replayed through here): release the OS-visible state so the next
+            # start isn't blocked by a held lock or a stale socket, then propagate.
+            # Every action is idempotent, so re-running after _signal_shutdown's
+            # own teardown is harmless (the graceful drain below is NOT repeated —
+            # it owns the kernel close, which must run exactly once).
+            control_listener.cleanup()
+            with contextlib.suppress(Exception):
+                server_lock.release()
+            with contextlib.suppress(Exception):
+                driven.shutdown()
+            raise
+        control_listener.cleanup()
 
         # serve() returned: either /shutdown set should_exit (the graceful path;
         # teardown belongs here, after the listener drained) or uvicorn exited

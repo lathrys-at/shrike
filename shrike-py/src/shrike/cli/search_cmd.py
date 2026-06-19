@@ -236,7 +236,7 @@ def coverage(ctx: click.Context) -> None:
     from shrike.client import ShrikeClient
 
     url = ctx.obj["url"]
-    client = ShrikeClient(url, autostart=False)
+    client = ShrikeClient(url, autostart=False, state_dir=ctx.obj.get("state_dir"))
     with output.spinner("Checking coverage…"):
         status = client.server_status()
 

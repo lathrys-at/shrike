@@ -181,6 +181,66 @@ class TestCustomEndpoints:
         with patch("httpx.Client.get", side_effect=httpx.ConnectError("down")):
             assert c.server_status() is None
 
+
+class TestControlChannelRouting:
+    """Control methods (status/index/embedding/reload/shutdown) target the control
+    channel resolved from the daemon's server.json; data methods stay on the data
+    base. With no metadata the control target falls back to the data base."""
+
+    def test_control_method_uses_control_uds_transport(self) -> None:
+        # A control block with a UDS path builds a dedicated Unix-socket client and
+        # routes the control request there (not the data base).
+        c = ShrikeClient("http://x:1/mcp", autostart=False)
+        captured: dict = {}
+
+        def req(method, url, *, json=None, timeout=None):  # type: ignore[no-untyped-def]
+            captured["url"] = url
+            return _resp(200, {"status": "saved", "size": 0, "pending": 0})
+
+        uds_client = MagicMock()
+        uds_client.request.side_effect = req
+        with (
+            patch(
+                "shrike.platform.daemon.read_server_meta",
+                return_value={"control": {"uds": "/run/ctl.sock"}},
+            ),
+            patch("httpx.HTTPTransport") as transport,
+            patch("httpx.Client", return_value=uds_client) as mk_client,
+        ):
+            c.index_save()
+        transport.assert_called_once_with(uds="/run/ctl.sock")
+        assert mk_client.call_args.kwargs["transport"] is transport.return_value
+        assert captured["url"] == "http://localhost/index/save"
+
+    def test_control_method_falls_back_to_data_base_without_meta(self) -> None:
+        # No server.json (pre-split daemon / not yet discovered) → the control
+        # request rides the data client at the data base, surfacing a normal error.
+        c = ShrikeClient("http://host:1/mcp", autostart=False)
+        captured: dict = {}
+
+        def req(method, url, *, json=None, timeout=None):  # type: ignore[no-untyped-def]
+            captured["url"] = url
+            return _resp(200, {"status": "saved", "size": 0, "pending": 0})
+
+        with (
+            patch("shrike.platform.daemon.read_server_meta", return_value=None),
+            patch("httpx.Client.request", side_effect=req),
+        ):
+            c.index_save()
+        assert captured["url"] == "http://host:1/index/save"
+
+    def test_ping_uses_data_health_probe(self) -> None:
+        c = ShrikeClient("http://host:1/mcp", autostart=False)
+        captured: dict = {}
+
+        def get(url, *, timeout=None):  # type: ignore[no-untyped-def]
+            captured["url"] = url
+            return _resp(200, {"running": True, "wire_protocol_version": 1})
+
+        with patch("httpx.Client.get", side_effect=get):
+            assert c.ping() is True
+        assert captured["url"] == "http://host:1/health"
+
     def test_index_status_extracts_section(self) -> None:
         c = ShrikeClient("http://x:1/mcp", autostart=False)
         status = {

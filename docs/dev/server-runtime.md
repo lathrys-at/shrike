@@ -58,17 +58,36 @@ The server uses FastMCP with streamable HTTP transport (`stateless_http=True`,
 communication is JSON-RPC 2.0: clients POST `tools/call` and receive structured
 JSON.
 
-### Trust boundary
+### Two planes: data and control
 
-Every endpoint is unauthenticated, so the server binds loopback by default.
+The server runs **two listeners**. The **data plane** (the FastMCP app) serves
+`/mcp`, `/actions/{name}`, `/media/{name}`, `/export/{token}`, and a minimal
+`/health`; it binds loopback by default and honors the exposure flags below. The
+**control plane** is a separate Starlette app serving the privileged routes —
+`/shutdown`, `/reload`, `/index/*`, `/embedding/*`, and the full `/status`
+diagnostics — on its own **always-local** listener: a Unix-domain socket
+(`<state_dir>/control.sock`, POSIX) or an ephemeral loopback-TCP port (Windows,
+which lacks asyncio Unix sockets). The control plane **never** honors
+`--allow-remote`/`--allowed-host`/`--no-dns-rebinding-protection`, so the
+privileged surface is unreachable from the network no matter how the data plane is
+exposed. Its address is recorded in `server.json`; the CLI/client discover it
+there (`daemon.control_channel`). Rationale and the rejected alternatives are in
+[`decisions.md`](decisions.md) ("The control plane is a separate, always-local
+listener").
+
+### Trust boundary (data plane)
+
+Every endpoint is unauthenticated, so the data plane binds loopback by default.
 Binding a non-loopback host requires `--allow-remote` (the server refuses to
 start otherwise), and llama-server stays pinned to `127.0.0.1` regardless.
 
 DNS-rebinding/CSRF protection (`_build_transport_security`) validates `Host` and
 `Origin` headers. It applies to the MCP endpoint *and*, via the `_guard` wrapper,
-to the custom routes (`/status`, `/media/{name}`, `/shutdown`, `/index/*`,
-`/embedding/*`, `/reload`), which bypass MCP middleware. Every route's guard is
-asserted in `tests/integration/test_security.py`.
+to the data custom routes (`/health`, `/media/{name}`, `/export/{token}`,
+`/actions/{name}`), which bypass MCP middleware. The control plane carries its own
+fixed-local guard (none needed for the filesystem-gated UDS; loopback-only for the
+TCP fallback). Every route's guard is asserted in
+`tests/integration/test_security.py`.
 
 The guard is independent of the bind address:
 
@@ -101,23 +120,34 @@ lives in `platform/daemon.py`.
   exclusive lock on `server.lock` for its lifetime; the OS releases it on exit;
   clients probe by a non-blocking acquisition. This sidesteps PID-recycling
   issues entirely.
-- **Shutdown** is cross-platform via `POST /shutdown`. The CLI's `stop_server`
-  escalates: clean HTTP shutdown → SIGTERM (Unix, if HTTP is unresponsive) →
-  SIGKILL/TerminateProcess (hung). Signal handlers (SIGTERM, SIGINT) remain a
-  secondary path for `kill` and Ctrl+C.
+- **Shutdown** is cross-platform via `POST /shutdown` on the control plane (one
+  request drains both listeners). The CLI's `stop_server` escalates: clean HTTP
+  shutdown → SIGTERM (Unix, if HTTP is unresponsive) → SIGKILL/TerminateProcess
+  (hung). Signal handlers (SIGTERM, SIGINT) remain a secondary path for `kill` and
+  Ctrl+C.
 
 ### HTTP endpoints beyond MCP
 
-All custom routes sit behind the same `_guard` check.
+Each custom route sits behind its plane's `_guard` check.
+
+**Data plane** (FastMCP listener, honors the exposure flags):
 
 | Route | Purpose |
 |-------|---------|
-| `GET /status` | pid, url, collection, uptime, embedding/index/recognition state, lock state. Backs `shrike server status`. |
+| `GET /health` | Minimal liveness: `running` + wire-protocol version. Leaks nothing sensitive; backs `client.ping()`. |
 | `GET /media/{filename}` | Streams a media file (`FileResponse`); read-only, basename-sanitized, media dir resolved lock-free. 404 for missing/escaping names. |
-| `POST /shutdown` | Graceful shutdown. |
+| `GET /export/{token}` | Streams a pending export package by its one-shot token; reaped after the stream. |
+| `POST /actions/{name}` | The actions-over-HTTP edge — the UI mirror of the MCP tool catalog. |
+
+**Control plane** (always-local listener — UDS or loopback TCP, never `--allow-remote`):
+
+| Route | Purpose |
+|-------|---------|
+| `GET /status` | Full diagnostics: pid, url, collection, uptime, embedding/index/recognition state, lock state, per-collection rows. Backs `shrike server status`. |
+| `POST /shutdown` | Graceful shutdown of both listeners. |
 | `POST /index/rebuild` | Full rebuild (returns immediately with status/progress); requires embedding running. |
 | `POST /index/save` | Immediate flush off the event loop. |
-| `POST /embedding/start` / `/embedding/stop` | Cycle the embedding service on a running server. Execution-shaping overrides in the start body (`backend`/`model`/`llama_server`/`extra_args`/`onnx_providers`) are honored only on a purely-local server; otherwise refused (400) so a remote/proxied caller can't redirect the spawned process — the daemon falls back to its boot-configured settings. Runtime knobs (port/threads/…) pass through on any bind. |
+| `POST /embedding/start` / `/embedding/stop` | Cycle the embedding service on a running server. Execution-shaping overrides in the start body (`backend`/`model`/`llama_server`/`extra_args`/`onnx_providers`) are accepted only when the control transport confines callers to the operator — i.e. the filesystem-gated UDS (POSIX). On the Windows loopback-TCP fallback (reachable by any local user) they are refused and the daemon uses its boot-configured settings. Runtime knobs (port/threads/…) pass through. |
 | `POST /reload` | Close and re-open the collection (picks up a restored backup or sync swap) and re-check drift. Backs `shrike collection reload`. |
 
 `/reload` shares its reopen primitive (`CollectionWrapper.reopen` plus reading
@@ -125,8 +155,9 @@ All custom routes sit behind the same `_guard` check.
 lifecycle. It is a control endpoint, not an MCP tool.
 
 State files live in the platform state directory: `server.lock` (the exclusive
-lock), `server.pid` (diagnostics only, not liveness), and `server.json` (URL,
-port, collection path, start time, log dir).
+lock), `server.pid` (diagnostics only, not liveness), `server.json` (the data URL
++ port, the `control` channel address, collection path, start time, log dir), and
+— on POSIX — `control.sock` (the control-plane Unix socket, owner-only).
 
 ## Platform directories
 

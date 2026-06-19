@@ -31,8 +31,8 @@ def mocked_daemon(monkeypatch, tmp_path):
     not yet responding" path) — enough to reach and pass the config-save block.
     """
     monkeypatch.setattr("shrike.cli.server_cmd.STATE_DIR", tmp_path / "state")
-    monkeypatch.setattr("shrike.cli.server_cmd.is_server_alive", lambda: False)
-    monkeypatch.setattr("shrike.cli.server_cmd._wait_for_server", lambda url: None)
+    monkeypatch.setattr("shrike.cli.server_cmd.is_server_alive", lambda *a, **k: False)
+    monkeypatch.setattr("shrike.cli.server_cmd._wait_for_server", lambda url, **kw: None)
 
     proc = MagicMock()
     proc.poll.return_value = None

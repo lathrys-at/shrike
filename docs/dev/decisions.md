@@ -624,6 +624,54 @@ recovers the pure coalesce-loop. The synchronous shutdown write stays the host's
 (`DebouncedSaver::flush` calls `cancel` then writes inline), so `close()` returns only after the
 write lands.
 
+
+### The control plane is a separate, always-local listener
+
+Privileged operations — shutdown, reload, index rebuild/save, embedding spawn/stop, and the full
+`/status` diagnostics — are served on their **own listener**, distinct from the data/MCP plane
+(`/mcp`, `/actions/*`, media, export, a minimal `/health`). The data plane honors the operator's
+exposure flags (`--allow-remote` and friends); the control plane **never** does — it binds a
+Unix-domain socket (POSIX) or a loopback-only TCP port (Windows), recorded in `server.json` for the
+CLI/client to discover. The invariant is structural: *the control plane is never reachable
+unauthenticated from the network*, regardless of how the data plane is exposed.
+
+- **Why a second listener, not per-request gating.** Sharing one listener meant `--allow-remote`
+  (intended to expose only the data/MCP surface) inadvertently exposed shutdown and the embedding
+  spawn too — the root of the `/embedding/start` RCE. A per-request "is this caller local" gate is
+  guard *logic* that a refactor or a forwarded header can defeat; a separate local-only listener is
+  *topology* — the privileged routes simply aren't bound where the network can reach them. The
+  per-endpoint gate stays as defense-in-depth (it refuses execution-shaping overrides), but it is no
+  longer the only thing standing between a remote caller and a subprocess spawn.
+- **Why UDS by default, loopback-TCP only as a fallback.** A Unix-domain socket is gated by
+  filesystem permissions and is off the network entirely — and unreachable by a browser (there is no
+  `fetch` to a Unix socket), so it needs no DNS-rebinding/Host guard at all. asyncio has no
+  Unix-socket support on Windows, so there the control plane falls back to an ephemeral
+  `127.0.0.1`-only TCP port, which *does* keep the loopback Host/Origin guard (a same-host browser
+  can reach `127.0.0.1:<port>`). The socket is pre-bound before `server.json` is written so its
+  address is known to record.
+- **The two transports have different *local* trust, and the embedding gate keys on it.** The UDS is
+  `0600` inside a `0700` runtime dir, so only the daemon's own uid can connect — the caller IS the
+  operator. A loopback-TCP port has no such confinement: **any** local user on the host can connect
+  (the Host/Origin guard stops browsers, not a local process sending `Host: 127.0.0.1`). So on the
+  Windows fallback the control plane is reachable by other local users, and `/embedding/start`
+  refuses caller-supplied execution params (binary/model/args) there — accepting them would let a
+  hostile local user spawn an arbitrary binary as the daemon's user (the #791 RCE class). On the UDS
+  the same overrides are accepted, since the caller is provably the operator. This is what
+  `_ControlListener.operator_gated` expresses; it is *not* a hardened control plane on a shared
+  Windows host (a local DoS via `/shutdown` and other privileged verbs remains), which is why
+  authenticated exposure is deferred (below).
+- **Why `/status` moves but `/health` stays.** The full `/status` leaks operationally sensitive
+  detail (paths, PID, model fingerprints, lock state), so it belongs on the control plane. The data
+  plane keeps a minimal `/health` (running + wire version) so liveness needs no privileged access
+  and an exposed data plane leaks nothing.
+- **Discovery, not configuration.** The control channel is never user-configured; the daemon writes
+  its address into `server.json` and the client reads it back. A client built against a daemon that
+  predates the split falls back to the data base URL, so a stale daemon mid-upgrade still stops
+  cleanly.
+- **Deferred.** Authenticated exposure of the control plane (a reverse proxy with OIDC/basic auth in
+  front of the loopback-TCP listener) and the management-pane subdomain are out of scope here — they
+  are the authn/authz and management-UI tracks. This decision is the transport split they build on.
+
 ## Performance engineering
 
 ### Stub-vs-real embedding is a profile choice, via a first-class `synthetic` runtime (#865)

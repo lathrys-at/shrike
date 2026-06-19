@@ -9,13 +9,11 @@ test_embedding.py. Tests exercise the full pipeline: embedding, indexing, search
 
 from __future__ import annotations
 
-import httpx
 import pytest
 
 from tests.integration.conftest import (
     CLIRunner,
     MCPClient,
-    ServerInfo,
     requires_onnxruntime,
     requires_shrike_native,
     search_until,
@@ -56,11 +54,9 @@ def semantic_cli_config(collection_server, tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def semantic_runner(collection_server, semantic_cli_config) -> CLIRunner:
-    return CLIRunner(collection_server.url, str(semantic_cli_config))
-
-
-def _base_url(server: ServerInfo) -> str:
-    return server.url.rsplit("/", 1)[0]
+    return CLIRunner(
+        collection_server.url, str(semantic_cli_config), state_dir=collection_server.state_dir
+    )
 
 
 _wait_for_index_ready = wait_for_index_ready
@@ -78,8 +74,7 @@ class TestIndexBuild:
         # Trigger + wait as ONE test: a test that starts a rebuild must wait it
         # out before returning, or the running rebuild leaks into whichever test
         # samples /status next (the 'building' != 'ready' flake).
-        base = _base_url(collection_server)
-        resp = httpx.post(f"{base}/index/rebuild", timeout=30.0)
+        resp = collection_server.control_request("POST", "/index/rebuild", timeout=30.0)
         assert resp.status_code == 200
         body = resp.json()
         assert body.get("status") in ("started", "already_building", "complete")
@@ -90,8 +85,7 @@ class TestIndexBuild:
     def test_status_endpoint_index_and_embedding_blocks(self, collection_server):
         # One settled /status response; both blocks are properties of it.
         _wait_for_index_ready(collection_server)
-        base = _base_url(collection_server)
-        body = httpx.get(f"{base}/status", timeout=5.0).json()
+        body = collection_server.control_request("GET", "/status", timeout=5.0).json()
         idx = body["index"]
         assert idx["state"] == "ready"
         assert idx["size"] >= 50
@@ -110,8 +104,7 @@ class TestIndexBuild:
 
     def test_save_endpoint(self, collection_server):
         _wait_for_index_ready(collection_server)
-        base = _base_url(collection_server)
-        resp = httpx.post(f"{base}/index/save", timeout=30.0)
+        resp = collection_server.control_request("POST", "/index/save", timeout=30.0)
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "saved"

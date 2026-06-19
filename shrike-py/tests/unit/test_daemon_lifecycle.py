@@ -19,11 +19,34 @@ from shrike.platform.daemon import (
     _force_kill,
     _request_http_shutdown,
     _signal_term,
+    control_channel,
     is_server_alive,
     read_pid,
     read_server_meta,
     server_status,
 )
+
+
+class TestControlChannel:
+    """`control_channel` resolves where the privileged control routes live."""
+
+    def test_uds_block(self):
+        base, uds = control_channel({"control": {"uds": "/run/control.sock"}})
+        assert (base, uds) == ("http://localhost", "/run/control.sock")
+
+    def test_tcp_url_block(self):
+        base, uds = control_channel({"control": {"url": "http://127.0.0.1:9999/"}})
+        # The trailing slash is trimmed so `{base}/shutdown` is well-formed.
+        assert (base, uds) == ("http://127.0.0.1:9999", None)
+
+    def test_falls_back_to_data_base_when_no_control(self):
+        # A pre-split daemon: derive the base from the data /mcp url.
+        base, uds = control_channel({"url": "http://127.0.0.1:8372/mcp"})
+        assert (base, uds) == ("http://127.0.0.1:8372", None)
+
+    def test_empty_when_no_metadata(self):
+        assert control_channel(None) == ("", None)
+        assert control_channel({}) == ("", None)
 
 
 class TestServerLock:
@@ -101,17 +124,47 @@ class TestReadStateFiles:
 
 
 class TestRequestHttpShutdown:
+    # Pre-split daemon metadata (no `control` block) → /shutdown falls back to the
+    # data base URL over plain httpx.post (the path these mocks exercise).
+    _LEGACY_META = {"url": "http://127.0.0.1:8372/mcp"}
+
     def test_returns_true_on_200(self):
         with patch("httpx.post", return_value=MagicMock(status_code=200)):
-            assert _request_http_shutdown("http://127.0.0.1:8372/mcp") is True
+            assert _request_http_shutdown(self._LEGACY_META) is True
 
     def test_returns_false_on_non_200(self):
         with patch("httpx.post", return_value=MagicMock(status_code=503)):
-            assert _request_http_shutdown("http://127.0.0.1:8372/mcp") is False
+            assert _request_http_shutdown(self._LEGACY_META) is False
 
     def test_returns_false_on_connect_error(self):
         with patch("httpx.post", side_effect=httpx.ConnectError("boom")):
-            assert _request_http_shutdown("http://127.0.0.1:8372/mcp") is False
+            assert _request_http_shutdown(self._LEGACY_META) is False
+
+    def test_returns_false_when_no_metadata(self):
+        # Nothing to reach — no data URL and no control block.
+        assert _request_http_shutdown(None) is False
+
+    def test_control_tcp_channel_is_used(self):
+        # A control block with a TCP url targets that base's /shutdown.
+        meta = {"url": "http://127.0.0.1:8372/mcp", "control": {"url": "http://127.0.0.1:9999"}}
+        with patch("httpx.post", return_value=MagicMock(status_code=200)) as post:
+            assert _request_http_shutdown(meta) is True
+        assert post.call_args.args[0] == "http://127.0.0.1:9999/shutdown"
+
+    def test_control_uds_channel_uses_unix_transport(self):
+        # A control block with a UDS path routes over a Unix-socket httpx client.
+        meta = {"url": "http://127.0.0.1:8372/mcp", "control": {"uds": "/tmp/control.sock"}}
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.post.return_value = MagicMock(status_code=200)
+        with (
+            patch("httpx.Client", return_value=client) as mk_client,
+            patch("httpx.HTTPTransport") as mk_transport,
+        ):
+            assert _request_http_shutdown(meta) is True
+        mk_transport.assert_called_once_with(uds="/tmp/control.sock")
+        assert mk_client.call_args.kwargs["transport"] is mk_transport.return_value
+        assert client.post.call_args.args[0] == "http://localhost/shutdown"
 
 
 class TestSignalHelpers:

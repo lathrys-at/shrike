@@ -382,10 +382,10 @@ def wait_for_index_ready(server: ServerInfo) -> dict:
     connection errors, so a crashed server raises here at once (a real
     failure); a rebuild that never completes hangs and the bazel per-target
     ``test_timeout`` (the single global hang guard) fails it. The per-request
-    ``timeout=5.0`` bounds ONE socket read, not the poll."""
-    base = server.url.rsplit("/", 1)[0]
+    ``timeout=5.0`` bounds ONE socket read, not the poll. /status is a
+    control-plane route, so it goes over the control channel."""
     while True:
-        idx = httpx.get(f"{base}/status", timeout=5.0).json().get("index", {})
+        idx = server.control_request("GET", "/status", timeout=5.0).json().get("index", {})
         if idx.get("state") == "ready" and idx.get("size", 0) > 0:
             return idx
         time.sleep(0.05)
@@ -425,6 +425,7 @@ class ServerInfo:
         log_dir: str,
         proc: subprocess.Popen,
         embedding_port: int | None = None,
+        state_dir: str | None = None,
     ) -> None:
         self.url = url
         self.port = port
@@ -433,6 +434,31 @@ class ServerInfo:
         self.proc = proc
         self.embedding_port = embedding_port
         self.embedding_url = f"http://127.0.0.1:{embedding_port}" if embedding_port else None
+        # The isolated state dir holds this server's server.json, which records the
+        # control-plane channel (UDS or loopback TCP). Tests reach the privileged
+        # control routes (full /status, /embedding/*, /index/*) through it.
+        self.state_dir = state_dir
+
+    def control_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict | None = None,
+        timeout: float = 10.0,
+    ) -> httpx.Response:
+        """Issue a request to this server's control plane, resolving the channel
+        (UDS or loopback TCP) from its server.json. The CLI/client use the same
+        `daemon.control_channel` discovery."""
+        from shrike.platform import daemon
+
+        assert self.state_dir is not None, "control_request needs the server's state_dir"
+        meta = daemon.read_server_meta(Path(self.state_dir))
+        base, uds = daemon.control_channel(meta)
+        if uds is not None:
+            with httpx.Client(transport=httpx.HTTPTransport(uds=uds)) as client:
+                return client.request(method, f"{base}{path}", json=json, timeout=timeout)
+        return httpx.request(method, f"{base}{path}", json=json, timeout=timeout)
 
 
 class MCPClient:
@@ -497,19 +523,27 @@ class MCPClient:
 class CLIRunner:
     """Click test runner pre-configured to target a specific test server."""
 
-    def __init__(self, url: str, config_path: str) -> None:
+    def __init__(self, url: str, config_path: str, state_dir: str | None = None) -> None:
         self._runner = CliRunner()
         self._url = url
         self._config = config_path
+        # The control routes (server status/stop, embedding/index) are discovered
+        # from the daemon's server.json, which an isolated test server writes to
+        # its own --state-dir. Pass it through so the CLI's client reaches the
+        # right control channel.
+        self._state_dir = state_dir
 
     def invoke(self, args: list[str], **kwargs: Any) -> Any:
         # Anything that isn't a known read command is treated as a mutation
         # (default-dirty is safe — at worst the reset enumerates needlessly).
         if not _cli_is_read(args):
             _reset_tracker.dirty = True
+        base = ["--config", self._config, "--url", self._url]
+        if self._state_dir is not None:
+            base += ["--state-dir", self._state_dir]
         return self._runner.invoke(
             cli,
-            ["--config", self._config, "--url", self._url, *args],
+            [*base, *args],
             catch_exceptions=False,
             **kwargs,
         )
@@ -659,7 +693,9 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
                 f"stdout: {stdout.decode()}\nstderr: {stderr.decode()}\n" + "\n".join(log_tails)
             ) from died
 
-        return ServerInfo(url, port, collection_path, str(log_dir), proc, embedding_port)
+        return ServerInfo(
+            url, port, collection_path, str(log_dir), proc, embedding_port, state_dir=str(state_dir)
+        )
 
     yield create
 
@@ -825,7 +861,7 @@ def cli_config(server: ServerInfo, tmp_path_factory: pytest.TempPathFactory) -> 
 @pytest.fixture(scope="session")
 def runner(server: ServerInfo, cli_config: Path) -> CLIRunner:
     """CLI test runner bound to the shared server."""
-    return CLIRunner(server.url, str(cli_config))
+    return CLIRunner(server.url, str(cli_config), state_dir=server.state_dir)
 
 
 # -- Opt-in isolation: a dedicated, exclusive collection for one test ----------
@@ -850,7 +886,11 @@ def isolated_runner(
     isolated_server: ServerInfo, tmp_path_factory: pytest.TempPathFactory
 ) -> CLIRunner:
     """CLI runner bound to a dedicated `isolated_server`."""
-    return CLIRunner(isolated_server.url, str(_write_cli_config(isolated_server, tmp_path_factory)))
+    return CLIRunner(
+        isolated_server.url,
+        str(_write_cli_config(isolated_server, tmp_path_factory)),
+        state_dir=isolated_server.state_dir,
+    )
 
 
 # -- Embedding fixtures --
@@ -1163,14 +1203,14 @@ def _wait_for_embedding_available(srv: ServerInfo) -> None:
     a DEAD subprocess instead (``_raise_if_dead``) — a real boot failure, distinct
     from a slow boot. A genuinely-stuck-but-alive boot hits the bazel per-target
     ``test_timeout``. The per-request ``timeout=10.0`` bounds ONE socket read.
+    ``/status`` is a control-plane route, so it goes over the control channel.
     """
-    status_url = srv.url.rsplit("/", 1)[0] + "/status"
     status: dict[str, Any] = {}
     try:
         while True:
             _raise_if_dead(srv.proc, "embedding service became available")
             try:
-                status = httpx.get(status_url, timeout=10.0).json()
+                status = srv.control_request("GET", "/status", timeout=10.0).json()
             except (httpx.ReadTimeout, httpx.ConnectError):
                 time.sleep(0.05)
                 continue
@@ -1238,15 +1278,15 @@ def collection_server(server_factory, onnx_model: Path) -> ServerInfo:
     # count reflects every note, the drain has processed each maintain item and
     # the derived (FTS5) rows landed with them, so dependent tests never start
     # against a half-drained collection.
-    base = srv.url.rsplit("/", 1)[0]
     # Poll UNBOUNDED until every seeded note is indexed — no wall-clock deadline,
     # which would flake a slow-but-not-hung cold runner. A drain that never
     # completes hangs and the bazel per-target ``test_timeout`` (the single global
     # hang guard) fails it; a crashed server raises a connection error here (a real
     # failure, not a hang). The per-request ``timeout=5.0`` bounds ONE socket read,
-    # not the poll.
+    # not the poll. /status is a control-plane route, so it goes over the control
+    # channel.
     while True:
-        idx = httpx.get(f"{base}/status", timeout=5.0).json().get("index", {})
+        idx = srv.control_request("GET", "/status", timeout=5.0).json().get("index", {})
         if idx.get("state") == "ready" and idx.get("size", 0) >= created:
             return srv
         time.sleep(0.05)
