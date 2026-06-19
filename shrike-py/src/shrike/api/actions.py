@@ -233,6 +233,18 @@ class ActionDef:
     doc: str | None
 
 
+# The control-plane action allowlist: actions that BYPASS the data-plane
+# readiness gate (Theme C / #833). The control plane proper — /status, /reload,
+# /shutdown, /embedding/*, /index/rebuild — is the operational HTTP routes,
+# which are not actions and never reach the gate; so this set is EMPTY: every
+# registered action is data-plane and gates on readiness. It exists as an
+# explicit, tested seam — if a future control-plane action is added (one that
+# must serve before the data plane is ready), naming it here is the one place
+# that opts it out, and the gate-classification test pins the membership so the
+# split can't drift silently.
+CONTROL_PLANE_ACTIONS: frozenset[str] = frozenset()
+
+
 def build_actions(ctx: ActionContext) -> list[ActionDef]:
     """Build the full action registry against one context (27 actions)."""
     from urllib.parse import quote

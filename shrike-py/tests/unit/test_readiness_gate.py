@@ -11,7 +11,9 @@ import inspect
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from shrike.api.mcp_adapter import _gate_ready
+from shrike.api import mcp_adapter
+from shrike.api.actions import CONTROL_PLANE_ACTIONS, build_actions
+from shrike.api.mcp_adapter import ServerNotReadyError, _gate_ready
 from shrike.api.tools import register_tools
 
 
@@ -82,6 +84,77 @@ def test_gate_propagates_the_action_result_and_errors() -> None:
     gated = _gate_ready(boom, readiness)
     with pytest.raises(ValueError, match="from the action"):
         asyncio.run(gated(1))
+
+
+def test_gate_fails_safe_on_a_wedged_barrier(monkeypatch) -> None:
+    # The DEFENSIVE bound: a barrier that never resolves must surface a clear
+    # ServerNotReadyError instead of hanging the call forever, so a future
+    # readiness regression can't wedge every data-plane call.
+    monkeypatch.setattr(mcp_adapter, "READINESS_GATE_TIMEOUT_S", 0.05)
+
+    async def never_ready() -> None:
+        await asyncio.Event().wait()
+
+    gated = _gate_ready(_impl, never_ready)
+    with pytest.raises(ServerNotReadyError, match="did not become ready"):
+        asyncio.run(gated(1))
+
+
+class TestControlPlaneAllowlist:
+    """The data/control split is EXPLICIT and TESTED: every action gates on
+    readiness; the control plane (/status, /reload, /shutdown, /embedding/*,
+    /index/rebuild) is the operational HTTP routes, which are not actions — so
+    the action allowlist is empty. Pinned so the split can't drift silently."""
+
+    def test_no_action_is_control_plane(self, kharness) -> None:
+        # Every registered action is data-plane: none bypasses the gate.
+        from shrike.api.actions import ActionContext
+
+        actions = build_actions(ActionContext(wrapper=kharness.wrapper, kernel=kharness.kernel))
+        action_names = {a.name for a in actions}
+        assert not CONTROL_PLANE_ACTIONS, (
+            "the control plane lives on the HTTP routes, not actions — keep this empty "
+            "unless a genuine control-plane ACTION is added (and gate-test it)"
+        )
+        # A guard against a stale name: every allowlisted action must exist.
+        assert action_names >= CONTROL_PLANE_ACTIONS
+
+    def test_a_control_plane_action_would_bypass_the_gate(self, kharness) -> None:
+        # If a control-plane action existed, it must NOT be gated. Inject one and
+        # assert it bypasses while a sibling data-plane action still gates.
+        from shrike.api.actions import ActionDef
+
+        async def never_ready() -> None:
+            await asyncio.Event().wait()
+
+        async def admin() -> str:
+            return "served while not ready"
+
+        async def data() -> str:
+            return "data"
+
+        control = ActionDef(name="_admin_probe", impl=admin, doc=None)
+        ordinary = ActionDef(name="_data_probe", impl=data, doc=None)
+
+        def flow() -> None:
+            import shrike.api.mcp_adapter as adapter
+
+            with pytest.MonkeyPatch.context() as m:
+                m.setattr(adapter, "CONTROL_PLANE_ACTIONS", frozenset({"_admin_probe"}))
+                m.setattr(adapter, "READINESS_GATE_TIMEOUT_S", 0.05)
+                bound_control = adapter._bound_impl(control, never_ready)
+                bound_data = adapter._bound_impl(ordinary, never_ready)
+
+                async def run() -> None:
+                    # The control-plane action serves despite the wedged barrier.
+                    assert await bound_control() == "served while not ready"
+                    # The data-plane action fails safe on the same barrier.
+                    with pytest.raises(ServerNotReadyError):
+                        await bound_data()
+
+                asyncio.run(run())
+
+        flow()
 
 
 class TestServerWiring:
