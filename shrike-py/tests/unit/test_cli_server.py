@@ -14,6 +14,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
+# Force ``shrike.server.__init__`` to completion at collection time, before any test in
+# this module patches ``shrike.server.main``. A worker otherwise imports the package only
+# when a test first touches it, and both touchpoints — ``mock.patch("shrike.server.main",
+# ...)`` and the foreground path's ``from shrike.server import main`` — resolve the target
+# by import side-effect. The flake (#872) was ``main`` observed absent from
+# ``shrike.server.__dict__`` under xdist, i.e. the package observed mid-``__init__`` (before
+# the eager ``def main`` line runs). Completing the import once here closes that window for
+# the whole worker: ``main`` is then a settled, permanently-bound attribute that no later
+# resolution can see partial. The heavy serve graph stays deferred to ``main()`` call time.
+import shrike.server
 from shrike.cli import cli
 from shrike.cli.server_cmd import _wait_for_server
 from shrike.schemas import (
@@ -566,13 +576,18 @@ class TestWaitForServer:
     def test_server_main_is_eager_and_patchable(self):
         """``shrike.server.main`` is an eager attribute — a thin wrapper that defers the
         ``shrike.server.server`` import to call time — so it is always present on the
-        package and ``mock.patch("shrike.server.main", ...)`` is deterministic regardless
-        of import order, with no lazy ``__getattr__`` resolution that could observe a
-        mid-initialization submodule."""
-        import shrike.server
+        package and ``mock.patch("shrike.server.main", ...)`` round-trips deterministically.
 
-        assert "main" in shrike.server.__dict__, "main is a real, eager package attribute"
+        With no lazy ``__getattr__`` fallback, a patch can only resolve ``main`` from the
+        real ``__dict__`` entry, so ``unittest.mock`` records ``local=True`` and restores
+        via ``setattr`` — never the ``delattr`` restore path (taken when a name resolves
+        only through ``__getattr__``) that would drop ``main`` for the rest of the worker."""
+        # ``shrike.server`` is imported at module top, so ``main`` is already bound here.
+        # Attribute access, not ``__dict__`` membership: the contract is "``main`` is a
+        # present, callable attribute", and access is what ``mock.patch`` exercises.
+        assert not hasattr(shrike.server, "__getattr__"), "no lazy fallback to delattr-trap"
         assert callable(shrike.server.main)
-        with patch("shrike.server.main", MagicMock()) as m:
-            assert shrike.server.main is m
-        assert callable(shrike.server.main)  # restored to the real wrapper
+        for _ in range(3):  # a patch round-trip must leave ``main`` callable, repeatably
+            with patch("shrike.server.main", MagicMock()) as m:
+                assert shrike.server.main is m
+            assert callable(shrike.server.main)  # restored to the real wrapper
