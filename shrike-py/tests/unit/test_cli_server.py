@@ -563,47 +563,16 @@ class TestWaitForServer:
         main.assert_called_once()
         assert "foreground" in result.output
 
-    def test_server_main_resolves_and_caches(self):
-        """The first access to `shrike.server.main` resolves it via the lazy
-        `__getattr__` and caches it as a real attribute, so subsequent accesses
-        (and `mock.patch`'s read-the-original) never re-import a possibly-
-        mid-initialization `shrike.server.server` — the window behind the
-        intermittent `AttributeError`."""
+    def test_server_main_is_eager_and_patchable(self):
+        """``shrike.server.main`` is an eager attribute — a thin wrapper that defers the
+        ``shrike.server.server`` import to call time — so it is always present on the
+        package and ``mock.patch("shrike.server.main", ...)`` is deterministic regardless
+        of import order, with no lazy ``__getattr__`` resolution that could observe a
+        mid-initialization submodule."""
         import shrike.server
 
-        # Start from the unresolved state, then access to force a resolve.
-        shrike.server.__dict__.pop("main", None)
+        assert "main" in shrike.server.__dict__, "main is a real, eager package attribute"
         assert callable(shrike.server.main)
-        assert "main" in shrike.server.__dict__, "the resolve cached `main` as a real attribute"
-
-    def test_server_main_patchable_even_without_real_attr(self):
-        """`mock.patch("shrike.server.main", ...)` must hold even when `main` is not
-        a real attribute on the `shrike.server` module object.
-
-        `shrike.server` re-exports `main` eagerly AND keeps a module `__getattr__`
-        (PEP 562) fallback that resolves *and caches* `main`. Under the
-        shared-process test runner (xdist) the package could be observed in a
-        partially-initialized state where the real attribute was absent, making
-        this exact `patch` raise `AttributeError: module 'shrike.server' ... does
-        not have the attribute 'main'`.
-
-        This reproduces that state deterministically by removing the real `main`
-        attribute before patching: the `__getattr__` fallback must still resolve
-        it (so `patch` reads an original to restore), and after the patch `main`
-        is back as a real cached attribute.
-        """
-        import shrike.server
-
-        # Simulate the partial/contaminated module state: no real `main` attribute.
-        shrike.server.__dict__.pop("main", None)
-
         with patch("shrike.server.main", MagicMock()) as m:
-            import shrike.server
-
             assert shrike.server.main is m
-        # After the patch exits, `main` still resolves and is cached back as a
-        # real attribute (the fallback's caching), not re-resolved each access.
-        import shrike.server
-
-        assert callable(shrike.server.main)
-        assert "main" in shrike.server.__dict__
+        assert callable(shrike.server.main)  # restored to the real wrapper
