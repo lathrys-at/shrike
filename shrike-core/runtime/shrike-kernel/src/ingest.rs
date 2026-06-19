@@ -604,6 +604,15 @@ impl Ingestor {
 
         // Re-read the maintain ids' content at drain (the drain-merge truth):
         // present ⇒ embed + derived ingest, absent ⇒ remove its vectors/rows.
+        //
+        // This read (and the embed it feeds) is intentionally NOT chunked, unlike
+        // the bulk reconcile/rebuild paths: those scan the whole collection
+        // (O(collection), must stream), whereas a coalesced hot-path batch only
+        // ever holds ids from queued CLIENT writes — each bounded by the upsert
+        // cap (≤100 notes), so the peak is O(coalesced burst), never
+        // O(collection). Under the single-user assumption write bursts are rare,
+        // so the merged batch stays small; chunking here would buy nothing and
+        // would complicate the contiguous-col.mod-prefix watermark advance below.
         let (raw_inputs, rows, tagged) = if maintain_ids.is_empty() {
             (Vec::new(), Vec::new(), false)
         } else {
