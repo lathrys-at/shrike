@@ -1268,4 +1268,64 @@ mod tests {
         });
         std::panic::set_hook(prev);
     }
+
+    /// The C2 recognition re-embed composes from collection field text + THIS
+    /// source's NOT-YET-DURABLE text (the in-memory overlay) + the OTHER
+    /// sources' DURABLE text. A note with both OCR (already stored) and ASR
+    /// (being processed now) must fold BOTH recognized texts into the embed
+    /// input, so its vector reflects all of its recognized content.
+    #[test]
+    fn overlay_compose_folds_in_memory_source_with_other_durable_sources() {
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-ingest-overlay-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let derived = shrike_derived::DerivedEngine::open(
+            dir.join("shrike.db").to_str().unwrap(),
+            shrike_derived::DerivedEngine::SCHEMA_VERSION,
+        )
+        .unwrap();
+        // Note 7 already has DURABLE ocr text; its asr text is being processed
+        // now and lives only in the in-memory overlay (not yet written). Both
+        // texts clear the gate's vector-worthy char floor.
+        derived
+            .ingest(
+                7,
+                "ocr",
+                &[(
+                    "diagram.png".into(),
+                    "krebs cycle diagram clearly visible".into(),
+                )],
+            )
+            .unwrap();
+        let gate = RecognitionGate::default();
+        let overlay: std::collections::HashMap<i64, Vec<String>> = [(
+            7i64,
+            vec!["lecture transcript about glycolysis".to_string()],
+        )]
+        .into_iter()
+        .collect();
+
+        let raw = vec![(7i64, "the field text".to_string(), Vec::<String>::new())];
+        let inputs =
+            compose_embed_inputs_with_overlay(&derived, &gate, raw, Some(&[7]), "asr", &overlay);
+
+        assert_eq!(inputs.len(), 1);
+        let recognized = &inputs[0].ocr_texts;
+        assert!(
+            recognized.iter().any(|t| t.contains("krebs cycle")),
+            "the OTHER source's (ocr) durable text must be folded in: {recognized:?}"
+        );
+        assert!(
+            recognized.iter().any(|t| t.contains("glycolysis")),
+            "THIS source's (asr) in-memory overlay text must be folded in: {recognized:?}"
+        );
+        assert_eq!(inputs[0].text, "the field text");
+        std::fs::remove_dir_all(dir).ok();
+    }
 }
