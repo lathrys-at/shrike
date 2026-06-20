@@ -5144,6 +5144,7 @@ dependencies = [
  "shrike-error",
  "shrike-store",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]

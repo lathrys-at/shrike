@@ -21,6 +21,7 @@ rust_library(
         "//shrike-core/contracts/shrike-store:shrike_store",
         "@crates//:rusqlite",
         "@crates//:tracing",
+        "@crates//:unicode-normalization",
     ],
 )
 

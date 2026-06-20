@@ -30,6 +30,16 @@ use std::sync::Mutex;
 
 use rusqlite::Connection;
 use shrike_error::{ErrorKind, NativeError, NativeResult};
+use unicode_normalization::UnicodeNormalization;
+
+/// NFC-normalize text, so canonically-equivalent forms (a precomposed `é` versus
+/// an `e` followed by a combining accent) produce the same trigrams and match.
+/// Applied to BOTH indexed text and queries — the single canonical form that makes
+/// the FTS index and the query agree (and keeps the Rust-side trigram overlap
+/// consistent with what FTS5 indexed). Idempotent: normalizing NFC text is a no-op.
+pub fn nfc(text: &str) -> String {
+    text.nfc().collect()
+}
 
 /// Mirrors `shrike.derived.SNIPPET_TOKENS` (the facade doesn't pass it — it's
 /// part of the pinned engine behaviour).
@@ -420,8 +430,9 @@ impl DerivedEngine {
             }
             // The idx→rowmap pairing rides last_insert_rowid() on THIS
             // connection — sound only under the engine's single mutexed
-            // connection (the module-docs invariant; verified at open).
-            ins_idx.execute([text]).map_err(db_err)?;
+            // connection (the module-docs invariant; verified at open). The text
+            // is NFC-normalized so the index agrees with NFC-normalized queries.
+            ins_idx.execute([nfc(text)]).map_err(db_err)?;
             let rowid = conn.last_insert_rowid();
             ins_map
                 .execute(rusqlite::params![rowid, note_id, source, reference])
@@ -720,7 +731,9 @@ impl DerivedEngine {
             if text.trim().is_empty() {
                 continue;
             }
-            ins_idx.execute([text]).map_err(db_err)?;
+            // NFC-normalize (also re-normalizes recognition rows carried from a
+            // pre-normalization index on rebuild — idempotent for already-NFC text).
+            ins_idx.execute([nfc(text)]).map_err(db_err)?;
             let rowid = tx.last_insert_rowid();
             ins_map
                 .execute(rusqlite::params![rowid, note_id, source, reference])
@@ -2119,7 +2132,11 @@ impl DerivedEngine {
     /// [`FUZZY_MIN_SHARED`] trigram windows (too short to rank). Shared by the
     /// singular and batched fuzzy paths so they build the same expression.
     fn fuzzy_expr(query: &str) -> Option<(std::collections::BTreeSet<String>, String)> {
-        let grams = trigrams(query.trim());
+        // NFC-normalize so the query trigrams match the NFC-normalized index (and
+        // the NFC-normalized text fuzzy_filter re-trigrams). Shared by both fuzzy
+        // paths, so this is the one place fuzzy queries are normalized.
+        let normalized = nfc(query);
+        let grams = trigrams(normalized.trim());
         if grams.len() < FUZZY_MIN_SHARED {
             return None;
         }
@@ -2176,7 +2193,9 @@ impl DerivedEngine {
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
     ) -> NativeResult<Option<Vec<LexicalRow>>> {
-        let q = query.trim();
+        // NFC-normalize so the phrase matches the NFC-normalized index.
+        let normalized = nfc(query);
+        let q = normalized.trim();
         if q.chars().count() < MIN_TRIGRAM {
             return Ok(None);
         }
@@ -2233,7 +2252,9 @@ impl DerivedEngine {
         let mut exprs: Vec<String> = Vec::new();
         let mut served: Vec<bool> = Vec::with_capacity(queries.len());
         for q in queries {
-            let trimmed = q.trim();
+            // NFC-normalize so the phrase matches the NFC-normalized index.
+            let normalized = nfc(q);
+            let trimmed = normalized.trim();
             if trimmed.chars().count() < MIN_TRIGRAM {
                 served.push(false);
             } else {
@@ -2535,6 +2556,68 @@ mod lexical_tests {
                 );
             }
         }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn nfc_nfd_equivalent_forms_match() {
+        // Canonically-equivalent strings in different normalization forms must
+        // match — both indexed text and queries are NFC-normalized. Tests BOTH
+        // directions: an NFD query against an NFC index (query normalization) and
+        // an NFC query against an NFD-indexed note (index normalization).
+        let composed = "café"; // NFC: c a f é(U+00E9)
+        let decomposed = "cafe\u{0301}"; // NFD: c a f e + combining acute
+        assert_ne!(
+            composed, decomposed,
+            "the two forms are distinct byte sequences"
+        );
+
+        let mk = |label: &str, stored: &str| {
+            let dir = std::env::temp_dir().join(format!(
+                "shrike-derived-nfc-{}-{}-{}",
+                label,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
+            build_snapshot_live(&e, &[(1, "field".into(), "Front".into(), stored.into())], 1)
+                .unwrap();
+            (e, dir)
+        };
+
+        // (1) NFC-indexed, queried in NFD — the query is normalized to match.
+        let (e, dir) = mk("idxnfc", composed);
+        assert!(
+            e.search_substring(decomposed, 10, None, &[])
+                .unwrap()
+                .unwrap()
+                .iter()
+                .any(|(nid, ..)| *nid == 1),
+            "NFD query finds NFC-indexed substring"
+        );
+        assert!(
+            e.search_fuzzy(decomposed, 10, None, &[])
+                .unwrap()
+                .iter()
+                .any(|(nid, ..)| *nid == 1),
+            "NFD query finds NFC-indexed fuzzy"
+        );
+        std::fs::remove_dir_all(dir).ok();
+
+        // (2) NFD-indexed, queried in NFC — the indexed text is normalized.
+        let (e, dir) = mk("idxnfd", decomposed);
+        assert!(
+            e.search_substring(composed, 10, None, &[])
+                .unwrap()
+                .unwrap()
+                .iter()
+                .any(|(nid, ..)| *nid == 1),
+            "NFC query finds NFD-indexed substring (index normalized on insert)"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 }

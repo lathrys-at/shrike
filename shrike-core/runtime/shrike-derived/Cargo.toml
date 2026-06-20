@@ -27,3 +27,6 @@ shrike-store = { path = "../../contracts/shrike-store" }
 # and the anki workspace (shrike-collection, #278) brings rusqlite 0.36.
 rusqlite = { version = "0.36" }
 tracing = "0.1"
+# NFC-normalize indexed text + queries so canonically-equivalent forms (NFC/NFD)
+# match. Already in the workspace lock (transitive via anki); pinned here direct.
+unicode-normalization = "0.1"

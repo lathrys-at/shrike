@@ -383,7 +383,10 @@ fn escape_anki_text(text: &str) -> String {
 /// `None` content (a meta-mode note dict carries no fields) yields `None`, the
 /// "no literal match" answer.
 pub fn substring_info(content: Option<&NoteContent>, text: &str) -> Option<SubstringInfo> {
-    let needle: Vec<char> = text.to_lowercase().chars().collect();
+    // NFC-normalize the needle so it matches NFC field content (Anki normalizes
+    // fields to NFC on write) — the same canonical form the derived store indexes
+    // and queries with, so an NFD query still confirms an FTS candidate here.
+    let needle: Vec<char> = shrike_derived::nfc(text).to_lowercase().chars().collect();
     let mut matched: Vec<String> = Vec::new();
     let mut snippet: Option<String> = None;
     let fields = content?;
@@ -2032,6 +2035,18 @@ mod search_tests {
         assert!(substring_info(Some(&content), "absent").is_none());
         // Absent content (a meta-mode note dict carries no fields) is no match.
         assert!(substring_info(None, "x").is_none());
+    }
+
+    #[test]
+    fn substring_info_normalizes_nfd_needle() {
+        // An NFD query confirms NFC field content: the needle is NFC-normalized so
+        // it agrees with the NFC-normalized FTS candidate the derived store found.
+        let content: NoteContent =
+            BTreeMap::from([("Front".to_owned(), "le café du coin".to_owned())]); // NFC é
+        let nfd_needle = "cafe\u{0301}"; // c a f e + combining acute
+        let info =
+            substring_info(Some(&content), nfd_needle).expect("NFD needle confirms NFC field");
+        assert_eq!(info.matched_fields, vec!["Front".to_owned()]);
     }
 
     // ── Cross-space fusion + the relative activation gate ────────────────────
