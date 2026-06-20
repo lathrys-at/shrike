@@ -25,6 +25,7 @@ def _conditions(**overrides) -> Conditions:
         "corpus_variant": "text",
         "repeats": 5,
         "warmup": 1,
+        "ops": 100,
     }
     base.update(overrides)
     return Conditions(**base)
@@ -74,6 +75,18 @@ def test_multiphase_result_round_trips_and_renders_one_row_per_phase():
     assert table.count("upsert-batch") == 1
     for phase in ("response", "settle", "total"):
         assert phase in table
+    # The amortized (per-op) column: each phase p50 over items (100). response
+    # 4.0 -> 0.040, settle 20.0 -> 0.200, total 24.0 -> 0.240.
+    assert "p50 (amortized) ms" in table
+    assert "0.040" in table
+    assert "0.200" in table
+
+
+def test_render_table_amortizes_p50_over_items():
+    run = _run(_conditions(), 10.0)  # one workload, items=500, response p50=10.0
+    table = render_table(run)
+    assert "p50 (amortized) ms" in table
+    assert "0.020" in table  # 10.0 / 500
 
 
 def test_compatible_when_invariants_match_despite_advisory_differences():
@@ -84,6 +97,16 @@ def test_compatible_when_invariants_match_despite_advisory_differences():
 def test_incompatible_lists_the_differing_invariants():
     diffs = _conditions().differs_from(_conditions(machine="x86_64", corpus_size=5000))
     assert set(diffs) == {"machine", "corpus_size"}
+
+
+def test_ops_is_an_invariant_so_different_n_never_compares():
+    # A different N changes the per-iteration work, so the latencies aren't
+    # comparable — the diff must refuse rather than read more-work as a regression.
+    assert "ops" in _conditions().differs_from(_conditions(ops=50))
+    a = _run(_conditions(ops=100), 10.0)
+    b = _run(_conditions(ops=50), 6.0)  # fewer ops -> less work per iteration
+    with pytest.raises(IncomparableRuns, match="ops"):
+        compare(a, b)
 
 
 def test_optimized_is_an_invariant_so_debug_and_release_never_compare():

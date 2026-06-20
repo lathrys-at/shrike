@@ -203,7 +203,7 @@ async def time_iterations(
     warmup: int,
     prepare: Callable[[int], Awaitable[None]] | None = None,
     settle: Callable[[int], Awaitable[None]] | None = None,
-    on_tick: Callable[[int, int], None] | None = None,
+    on_tick: Callable[[int, int, bool], None] | None = None,
 ) -> tuple[list[float], list[float], int]:
     """Run ``run_one(i)`` ``warmup + repeats`` times, returning the per-iteration
     *response* times (ms), the per-iteration *settle* times (ms; empty when no
@@ -217,8 +217,11 @@ async def time_iterations(
     the per-iteration setup a workload needs out of the timed region (reconcile
     introducing fresh out-of-band drift). ``settle(i)``, if given, runs TIMED
     after ``run_one`` and contributes the second (settle) sample series.
-    ``on_tick(done, total)``, if given, is called once per completed iteration
-    (outside both timed regions) for progress reporting."""
+    ``on_tick(done, total, warming)``, if given, is called once per completed
+    iteration (outside both timed regions) for progress reporting: ``warming`` is
+    true through the warmup samples (``done``/``total`` count the warmup), false
+    once the timed repeats begin (``done``/``total`` count the repeats only, so the
+    progress bar excludes warmup)."""
     response: list[float] = []
     settle_samples: list[float] = []
     items = 0
@@ -234,7 +237,10 @@ async def time_iterations(
             await settle(i)
             settle_samples.append((time.perf_counter() - settle_start) * 1000.0)
         if on_tick is not None:
-            on_tick(i + 1, total)
+            if i < warmup:
+                on_tick(i + 1, warmup, True)
+            else:
+                on_tick(i + 1 - warmup, repeats, False)
     return response, settle_samples, items
 
 
@@ -244,7 +250,7 @@ async def measure(
     *,
     repeats: int,
     warmup: int,
-    on_tick: Callable[[int, int], None] | None = None,
+    on_tick: Callable[[int, int, bool], None] | None = None,
 ) -> WorkloadResult:
     """Run a workload's setup, then time it, then summarize into a phase-keyed
     result. A workload may expose optional ``prepare(booted, iteration)`` (untimed)
@@ -292,7 +298,7 @@ async def measure_ingest(
     repeats: int,
     warmup: int,
     with_media: bool = True,
-    on_tick: Callable[[int, int], None] | None = None,
+    on_tick: Callable[[int, int, bool], None] | None = None,
 ) -> WorkloadResult:
     """The cold-ingest scenario: import a synthetic package into a FRESH empty
     collection, end-to-end (parse -> write -> derive -> embed -> index, all driven
@@ -348,7 +354,10 @@ async def measure_ingest(
         finally:
             await booted.close()
         if on_tick is not None:
-            on_tick(i + 1, total)
+            if i < warmup:
+                on_tick(i + 1, warmup, True)
+            else:
+                on_tick(i + 1 - warmup, repeats, False)
     # import_package drives the full pipeline to completion itself (no follow-up
     # settle), so ingest is a single response phase.
     return WorkloadResult(

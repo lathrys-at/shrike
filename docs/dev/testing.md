@@ -91,7 +91,9 @@ Both modes boot the **same** harness from a config profile
 (`tests/manual/perf/profiles/perf-{stub,real}.yml`); the only difference is the
 embedder, and the two are comparable because they share the modality shape.
 `--profile stub` selects `runtime: synthetic`, which a lean build refuses — hence
-the `--synthetic` extension build.
+the `--synthetic` extension build. To benchmark a different engine set, pass
+`--profile-path PATH` (a path-free profile YAML of the same shape) in place of a
+built-in `--profile`.
 
 - **Workloads** drive the transport-neutral **actions API** directly (the
   maintained serving path, off the FastMCP transport — we measure the system, not
@@ -102,7 +104,14 @@ the `--synthetic` extension build.
   maintenance *enqueued*, so each write/reconcile workload is timed in two phases —
   `response` (the action returns) and `settle` (drain to quiescence) — and reports
   both plus their per-iteration `total`. Read workloads have no tail and report
-  `response` only.
+  `response` only. Under `--profile stub` the synthetic embedder makes
+  `settle`/`total` reflect orchestration cost only, not real embed/index work; the
+  runner prints a note when a settling workload runs under it.
+- **`--ops N`** scales the operations each data-plane workload performs per timed
+  iteration (search queries, upsert/delete notes, reconcile drift) — the N in
+  `N ops × M repeats`, where `--repeats` is M. Default 100; `rebuild` ignores it
+  (one O(collection) pass). It's a comparison invariant: runs at different N don't
+  diff.
 - **Sizes** 500 / 5k / 50k notes; **variants** `text` and `text+image`. Corpora
   are deterministic, built through the real write path, and cached + gitignored
   under `.cache/perf/corpora/`.

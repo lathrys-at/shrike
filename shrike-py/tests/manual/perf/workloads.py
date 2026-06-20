@@ -46,7 +46,7 @@ import random
 
 from shrike.schemas import NoteInput
 from tests.manual.perf.corpus import VOCAB
-from tests.manual.perf.driver import Booted
+from tests.manual.perf.driver import Booted, Workload
 
 
 def _query(rng: random.Random) -> str:
@@ -54,21 +54,29 @@ def _query(rng: random.Random) -> str:
     return " ".join(rng.choice(VOCAB) for _ in range(rng.randint(1, 4)))
 
 
-# How many queries each search iteration issues — as one batched call
-# (``search-batch``) or as that many single-query calls (``search-seq``). Same
-# total work either way, so the pair isolates the batching win (one query-embed
-# vs N). Kept well under the action's 50-query cap.
-_SEARCH_COUNT = 16
+#: N — the operations each data-plane workload performs per timed iteration: the
+#: search queries, the upserted/deleted notes, the reconcile drift. The complement
+#: to the runner's M repeats (a workload runs N ops × M repeats), scaled uniformly
+#: across the workloads by ``run.py --ops``. ``rebuild`` is the one exception — an
+#: O(collection) pass with no per-op N. 100 is a representative add/edit-session
+#: size and the upsert/delete batch cap.
+DEFAULT_OPS = 100
 
 
+# ``search-batch`` issues all N queries in ONE call. At the default N that is past
+# the action's wire-level 50-query cap, but the harness drives the action *impl*
+# directly (below FastMCP's arg validation), so the cap never applies and the impl
+# — the path being benchmarked — sees the whole batch.
 class _SearchWorkload:
     """Drive the real ``search_notes`` action over a fixed bank of synthetic
     queries — the headline read path (embed the query, fan out, fuse). Read-only,
-    so no settle phase. Subclasses choose batched vs sequential issue."""
+    so no settle phase. Subclasses choose batched vs sequential issue. ``run_one``
+    reports the number of queries issued (the work done), not the matches returned,
+    so ``items`` is the per-iteration query count like the other workloads."""
 
     mutates = False
 
-    def __init__(self, *, count: int = _SEARCH_COUNT, limit: int = 20) -> None:
+    def __init__(self, *, count: int = DEFAULT_OPS, limit: int = 20) -> None:
         self._count = count
         self._limit = limit
         self._batches: list[list[str]] = []
@@ -79,11 +87,10 @@ class _SearchWorkload:
         rng = random.Random(0x5EED)
         self._batches = [[_query(rng) for _ in range(self._count)] for _ in range(iterations)]
 
-    async def _search(self, booted: Booted, queries: list[str]) -> int:
-        resp = await booted.call(
+    async def _search(self, booted: Booted, queries: list[str]) -> None:
+        await booted.call(
             "search_notes", queries=queries, ids=[], limit=self._limit, tags=[], exclude_ids=[]
         )
-        return sum(len(g.matches) for g in resp.results)
 
 
 class SearchBatchWorkload(_SearchWorkload):
@@ -93,7 +100,8 @@ class SearchBatchWorkload(_SearchWorkload):
     name = "search-batch"
 
     async def run_one(self, booted: Booted, iteration: int) -> int:
-        return await self._search(booted, self._batches[iteration])
+        await self._search(booted, self._batches[iteration])
+        return self._count
 
 
 class SearchSeqWorkload(_SearchWorkload):
@@ -104,10 +112,9 @@ class SearchSeqWorkload(_SearchWorkload):
     name = "search-seq"
 
     async def run_one(self, booted: Booted, iteration: int) -> int:
-        matched = 0
         for q in self._batches[iteration]:
-            matched += await self._search(booted, [q])
-        return matched
+            await self._search(booted, [q])
+        return self._count
 
 
 class RebuildWorkload:
@@ -118,19 +125,18 @@ class RebuildWorkload:
     name = "rebuild"
     mutates = False
 
+    def __init__(self, *, count: int = DEFAULT_OPS) -> None:
+        # A rebuild is one O(collection) pass; the per-op N (``--ops``) doesn't
+        # apply. The uniform ``count`` keyword lets the runner build every workload
+        # identically — here it's accepted and discarded.
+        del count
+
     async def setup(self, booted: Booted, iterations: int) -> None:
         return None
 
     async def run_one(self, booted: Booted, iteration: int) -> int:
         await booted.harness.kernel.rebuild_index()
         return 1  # one full-collection rebuild
-
-
-# The fresh-note count each upsert iteration writes against the loaded corpus —
-# the upsert action measures "add N notes to a {500,5k,50k} collection", not
-# "build a collection". 100 is a representative add-session size and the action's
-# batch cap.
-_UPSERT_COUNT = 100
 
 
 def _upsert_note(iteration: int, j: int) -> NoteInput:
@@ -160,7 +166,7 @@ class _UpsertWorkload:
 
     mutates = True
 
-    def __init__(self, *, count: int = _UPSERT_COUNT) -> None:
+    def __init__(self, *, count: int = DEFAULT_OPS) -> None:
         self._count = count
         self._batches: list[list[NoteInput]] = []
 
@@ -199,12 +205,6 @@ class UpsertSeqWorkload(_UpsertWorkload):
         return self._count
 
 
-# How many notes each delete iteration removes — as one ``delete_notes`` call
-# (``delete-batch``) or as that many single-id calls (``delete-seq``). Matches the
-# action's batch cap and ``upsert``'s count.
-_DELETE_COUNT = 100
-
-
 def _delete_note(j: int) -> NoteInput:
     rng = random.Random(0xDE1E7E ^ j)
     return NoteInput(
@@ -225,7 +225,7 @@ class _DeleteWorkload:
 
     mutates = True
 
-    def __init__(self, *, count: int = _DELETE_COUNT) -> None:
+    def __init__(self, *, count: int = DEFAULT_OPS) -> None:
         self._count = count
         self._ids: list[int] = []
 
@@ -270,12 +270,6 @@ class DeleteSeqWorkload(_DeleteWorkload):
         return len(ids)
 
 
-# How many notes are edited under the server before each reconcile. The reconcile
-# cost is dominated by the changed set (re-embed) on top of a full-collection
-# fingerprint scan; 100 is a representative sync/edit burst.
-_RECONCILE_DRIFT = 100
-
-
 def _reconcile_note(iteration: int, j: int) -> dict:
     # A fresh note in its own deck/tag, deterministic per (iteration, j), so each
     # iteration drifts a disjoint set the reconcile sees as new.
@@ -293,32 +287,34 @@ class ReconcileWorkload:
     """Out-of-band drift recovery — the reconcile path, NOT an in-band write.
 
     Each iteration first (UNTIMED, in ``prepare``) edits the collection from under
-    the server: it writes ``drift`` fresh notes STRAIGHT through the collection
+    the server: it writes ``count`` fresh notes STRAIGHT through the collection
     actor (``wrapper.upsert_notes`` bypasses the kernel index path), so ``col.mod``
     moves while the index watermark stays stale — exactly the drift a GUI edit, a
-    sync, or a restore leaves behind. The TIMED ``run_one`` then runs
-    ``reindex_if_needed`` (the *response* phase: detect drift, diff fingerprints,
-    enqueue the re-embed of the changed set), and the ``settle`` phase drains it to
-    quiescence — so the harness reports both detect-and-enqueue and drain-to-done.
+    sync, or a restore leaves behind. The reconcile cost is dominated by that
+    changed set (its re-embed) on top of a full-collection fingerprint scan. The
+    TIMED ``run_one`` then runs ``reindex_if_needed`` (the *response* phase: detect
+    drift, diff fingerprints, enqueue the re-embed of the changed set), and the
+    ``settle`` phase drains it to quiescence — so the harness reports both
+    detect-and-enqueue and drain-to-done.
 
     Writing through the same actor makes the new ``col.mod`` live to the reconcile,
     so no reopen is needed; reopen is a collection-reacquire cost, not a reconcile
-    cost. Each iteration ADDS ``drift`` notes, so the collection grows across the
+    cost. Each iteration ADDS ``count`` notes, so the collection grows across the
     run (the recorded ``corpus_size`` is the *starting* size); identical
     deterministic growth on both sides keeps comparisons valid."""
 
     name = "reconcile"
     mutates = True
 
-    def __init__(self, *, drift: int = _RECONCILE_DRIFT) -> None:
-        self._drift = drift
+    def __init__(self, *, count: int = DEFAULT_OPS) -> None:
+        self._count = count
         self._batches: list[list[dict]] = []
 
     async def setup(self, booted: Booted, iterations: int) -> None:
         # Precompute the drift notes per iteration (untimed) — the prepare write is
         # untimed too, but this keeps the random text generation out of the loop.
         self._batches = [
-            [_reconcile_note(i, j) for j in range(self._drift)] for i in range(iterations)
+            [_reconcile_note(i, j) for j in range(self._count)] for i in range(iterations)
         ]
 
     async def prepare(self, booted: Booted, iteration: int) -> None:
@@ -329,13 +325,13 @@ class ReconcileWorkload:
         # Detect drift + enqueue the re-embed of the changed set (the settle phase
         # drains it).
         await booted.harness.kernel.reindex_if_needed()
-        return self._drift
+        return self._count
 
     async def settle(self, booted: Booted, iteration: int) -> None:
         await booted.harness.kernel.settle()
 
 
-#: name → workload class (instantiated with defaults by the runner).
+#: name → workload class.
 WORKLOADS = {
     w.name: w
     for w in (
@@ -349,3 +345,11 @@ WORKLOADS = {
         ReconcileWorkload,
     )
 }
+
+
+def build_workload(name: str, *, ops: int = DEFAULT_OPS) -> Workload:
+    """Instantiate workload ``name`` with ``ops`` operations per iteration — the N
+    the runner scales via ``--ops``. Every workload takes the same ``count``
+    keyword; ``rebuild`` is the exception that ignores it (one O(collection) pass,
+    no per-op N)."""
+    return WORKLOADS[name](count=ops)

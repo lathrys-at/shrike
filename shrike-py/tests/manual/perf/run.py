@@ -62,7 +62,7 @@ from tests.manual.perf.result import (  # noqa: E402
     WorkloadResult,
     render_table,
 )
-from tests.manual.perf.workloads import WORKLOADS  # noqa: E402
+from tests.manual.perf.workloads import DEFAULT_OPS, WORKLOADS, build_workload  # noqa: E402
 
 _RUNS_DIR = DEFAULT_CACHE_ROOT.parent / "runs"
 
@@ -92,35 +92,34 @@ def _flush_log_buffer(buf: io.StringIO, path: Path) -> None:
 _PROGRESS_WIDTH = 24
 
 
-def _progress_printer(label: str) -> Callable[[int, int], None]:
+def _progress_printer(label: str, warmup: int, repeats: int) -> Callable[[int, int, bool], None]:
     """A pytest-style in-place progress line for one workload's iterations, so a
     long run shows forward motion instead of an apparent hang. Goes to stdout
     (harness UI), separate from the captured log buffer; the per-tick write sits
-    between timed iterations, never inside a measurement."""
+    between timed iterations, never inside a measurement.
 
-    def tick(done: int, total: int) -> None:
+    Warmup is not counted: while ``warming`` the line reads ``warming up...``; once
+    the timed repeats begin it becomes a ``done/repeats`` bar (so the bar measures
+    only the iterations that land in the result). The warmup notice is shown up
+    front too — before the first (possibly slow) warmup iteration finishes."""
+
+    def render_warming() -> None:
+        sys.stdout.write(f"\r  {label:<16} warming up...")
+        sys.stdout.flush()
+
+    if warmup > 0:
+        render_warming()
+
+    def tick(done: int, total: int, warming: bool) -> None:
+        if warming:
+            render_warming()
+            return
         filled = int(_PROGRESS_WIDTH * done / total) if total else _PROGRESS_WIDTH
         bar = "#" * filled + "-" * (_PROGRESS_WIDTH - filled)
         sys.stdout.write(f"\r  {label:<16} [{bar}] {done:>3}/{total}")
         sys.stdout.flush()
 
     return tick
-
-
-def _workload_summary(result: WorkloadResult) -> str:
-    """A one-line per-workload summary that overwrites its progress bar — response
-    p50/p90, plus settle/total p50 for a settling workload."""
-    d = result.distribution
-    extra = ""
-    if "total" in result.phases:
-        extra = (
-            f"  settle p50={result.phases['settle'].p50_ms:8.2f}ms"
-            f"  total p50={result.phases['total'].p50_ms:8.2f}ms"
-        )
-    return (
-        f"\r  {result.workload:<16} response p50={d.p50_ms:8.2f}ms p90={d.p90_ms:8.2f}ms"
-        f"{extra}  ({result.items} items)"
-    )
 
 
 def _isolated_working_copy(corpus_anki2: Path, corpus_media: Path, run_dir: Path) -> Path:
@@ -148,6 +147,7 @@ async def _run_workloads(
     names: list[str],
     repeats: int,
     warmup: int,
+    ops: int,
     with_media: bool,
 ) -> list[WorkloadResult]:
     results: list[WorkloadResult] = []
@@ -155,7 +155,8 @@ async def _run_workloads(
     if registry:
         # Read-only workloads first so the single shared boot stays representative.
         workloads = sorted(
-            (WORKLOADS[n]() for n in registry), key=lambda w: getattr(w, "mutates", False)
+            (build_workload(n, ops=ops) for n in registry),
+            key=lambda w: getattr(w, "mutates", False),
         )
         # An isolated working copy so a mutating workload never pollutes the cached
         # corpus (ingest makes its own copies; skipped when only ingest is requested).
@@ -165,9 +166,13 @@ async def _run_workloads(
         try:
             for w in workloads:
                 res = await measure(
-                    w, booted, repeats=repeats, warmup=warmup, on_tick=_progress_printer(w.name)
+                    w,
+                    booted,
+                    repeats=repeats,
+                    warmup=warmup,
+                    on_tick=_progress_printer(w.name, warmup, repeats),
                 )
-                print(_workload_summary(res))
+                print()  # close the completed bar's line; the full table prints at the end
                 results.append(res)
         finally:
             # Close before ingest opens its own kernels — the driven runtime holds
@@ -181,15 +186,46 @@ async def _run_workloads(
             repeats=repeats,
             warmup=warmup,
             with_media=with_media,
-            on_tick=_progress_printer(INGEST),
+            on_tick=_progress_printer(INGEST, warmup, repeats),
         )
-        print(_workload_summary(res))
+        print()  # close the completed bar's line; the full table prints at the end
         results.append(res)
     return results
 
 
+def _resolve_profile_path(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Path:
+    """The profile YAML this run boots from. ``--profile {stub,real}`` selects a
+    built-in; ``--profile-path PATH`` overrides it with any custom profile, so a
+    non-stub run isn't pinned to the two built-ins. Exactly one is required."""
+    if args.profile_path is not None:
+        if args.profile is not None:
+            parser.error("pass --profile OR --profile-path, not both")
+        path = Path(args.profile_path).expanduser()
+        if not path.is_file():
+            parser.error(f"--profile-path {path} does not exist")
+        return path.resolve()
+    if args.profile is None:
+        parser.error("one of --profile {stub,real} or --profile-path PATH is required")
+    return Path(__file__).resolve().parent / "profiles" / f"perf-{args.profile}.yml"
+
+
+def _uses_synthetic(profile_path: Path) -> bool:
+    """True when the profile's embedders are the synthetic (no-model) backend — so
+    its ``settle``/``total`` figures reflect kernel/IO orchestration drain only, not
+    real embedding/index cost. The runner warns on those phases under this profile."""
+    import yaml
+
+    data = yaml.safe_load(profile_path.read_text()) or {}
+    return any(
+        isinstance(e, dict) and e.get("runtime") == "synthetic" for e in data.get("embedders") or []
+    )
+
+
 def _profile_under_pyspy(
-    args: argparse.Namespace, names: list[str], parser: argparse.ArgumentParser
+    args: argparse.Namespace,
+    profile_path: Path,
+    names: list[str],
+    parser: argparse.ArgumentParser,
 ) -> int:
     """Re-exec the run under ``py-spy record --native`` to capture a flamegraph
     spanning the Python harness AND the Rust kernel. ONE workload per run keeps the
@@ -207,18 +243,20 @@ def _profile_under_pyspy(
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     run_dir = (
         _RUNS_DIR
-        / f"perf-{args.profile}-{args.variant.replace('+', '_')}-{args.size}-{workload}-{stamp}"
+        / f"{profile_path.stem}-{args.variant.replace('+', '_')}-{args.size}-{workload}-{stamp}"
     )
     run_dir.mkdir(parents=True, exist_ok=True)
     cmd = pyspy_command(
         Path(__file__).resolve(),
         run_dir,
         profile=args.profile,
+        profile_path=args.profile_path,
         size=args.size,
         variant=args.variant,
         workload=workload,
         repeats=args.repeats,
         warmup=args.warmup,
+        ops=args.ops,
         baseline=args.baseline,
     )
     flame = flame_path(run_dir, workload)
@@ -236,7 +274,20 @@ def _profile_under_pyspy(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", choices=("stub", "real"), required=True, help="Embedder mode.")
+    parser.add_argument(
+        "--profile",
+        choices=("stub", "real"),
+        default=None,
+        help="Built-in embedder profile (perf-{stub,real}.yml). Required unless "
+        "--profile-path is given.",
+    )
+    parser.add_argument(
+        "--profile-path",
+        type=Path,
+        default=None,
+        help="A custom profile YAML to boot from instead of a built-in --profile — "
+        "any embedder set, same path-free schema as perf-{stub,real}.yml.",
+    )
     parser.add_argument("--size", type=int, default=STANDARD_SIZES[0], help="Corpus note count.")
     parser.add_argument("--variant", choices=VARIANTS, default="text", help="Corpus modality.")
     parser.add_argument(
@@ -248,6 +299,14 @@ def main() -> int:
     )
     parser.add_argument("--repeats", type=int, default=20, help="Timed iterations per workload.")
     parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations discarded.")
+    parser.add_argument(
+        "--ops",
+        type=int,
+        default=DEFAULT_OPS,
+        help="N: operations per workload iteration (search queries, upsert/delete "
+        f"notes, reconcile drift); complements --repeats (N ops x M repeats). "
+        f"Default {DEFAULT_OPS}. 'rebuild' ignores it (one O(collection) pass).",
+    )
     parser.add_argument(
         "--baseline", type=Path, default=None, help="A stored result to diff this run against."
     )
@@ -272,22 +331,36 @@ def main() -> int:
     if unknown:
         parser.error(f"unknown workload(s) {unknown}; choices: {sorted(known)}")
 
+    profile_path = _resolve_profile_path(args, parser)
+
     # The profiling run re-execs the inner run under py-spy (which carries no
     # --instrument); the inner run lands here without re-entering this branch.
     if args.instrument and not os.environ.get(RUN_DIR_ENV):
-        return _profile_under_pyspy(args, names, parser)
+        return _profile_under_pyspy(args, profile_path, names, parser)
 
     import shrike_native
 
+    synthetic = _uses_synthetic(profile_path)
     if "debug-assertions" in shrike_native.build_features():
         print(
             "WARNING: benchmarking an UNOPTIMIZED (debug) shrike-core — the numbers are "
             "not representative. Rebuild with `scripts/build-native.sh --release"
-            + (" --synthetic" if args.profile == "stub" else "")
+            + (" --synthetic" if synthetic else "")
             + "` for real results."
         )
 
-    profile_path = Path(__file__).resolve().parent / "profiles" / f"perf-{args.profile}.yml"
+    # The synthetic embedder has negligible cost, so the settle/total phases (the
+    # index/derived drain a write enqueues) measure orchestration only, not the real
+    # embed. Warn when a settling workload is selected under it.
+    if synthetic and any(hasattr(WORKLOADS[n], "settle") for n in names if n in WORKLOADS):
+        print(
+            "NOTE: the synthetic embedder makes the 'settle' (and 'total') phases "
+            "unrepresentative — they measure the kernel/IO/orchestration drain, not "
+            "real embedding/index cost. Use --profile real (or a real-engine "
+            "--profile-path) for representative settle/total figures; 'response' is "
+            "unaffected."
+        )
+
     # Under --instrument the outer run picks the dir and passes it down, so the
     # flamegraph and this run's result.json land together. Resolved before the log
     # buffer (and the corpus build) so run.log always has a home, even on a later
@@ -298,7 +371,7 @@ def main() -> int:
     else:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
         run_dir = (
-            _RUNS_DIR / f"perf-{args.profile}-{args.variant.replace('+', '_')}-{args.size}-{stamp}"
+            _RUNS_DIR / f"{profile_path.stem}-{args.variant.replace('+', '_')}-{args.size}-{stamp}"
         )
 
     # Capture logging into an in-memory buffer (off the terminal, so the per-call
@@ -326,6 +399,7 @@ def main() -> int:
                     names,
                     args.repeats,
                     args.warmup,
+                    args.ops,
                     with_media=(args.variant == "text+image"),
                 )
             )
@@ -334,11 +408,12 @@ def main() -> int:
 
         run = RunResult(
             conditions=Conditions.capture(
-                profile=f"perf-{args.profile}",
+                profile=profile_path.stem,
                 corpus_size=args.size,
                 corpus_variant=args.variant,
                 repeats=args.repeats,
                 warmup=args.warmup,
+                ops=args.ops,
             ),
             results=results,
             timestamp=datetime.now(UTC).isoformat(),

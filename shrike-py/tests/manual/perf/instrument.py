@@ -30,12 +30,14 @@ def pyspy_command(
     run_py: Path,
     run_dir: Path,
     *,
-    profile: str,
+    profile: str | None = None,
+    profile_path: Path | None = None,
     size: int,
     variant: str,
     workload: str,
     repeats: int,
     warmup: int,
+    ops: int,
     baseline: Path | None,
 ) -> list[str]:
     """The ``py-spy record --native -- python run.py ...`` argv that profiles ONE
@@ -44,12 +46,14 @@ def pyspy_command(
     The inner run carries a single ``--workloads`` (one workload per run keeps the
     attribution clean) and NO ``--instrument`` (so it doesn't re-exec). It is driven
     by ``sys.executable`` so the venv's interpreter — and thus the staged native
-    extension — is the one profiled."""
-    inner = [
-        sys.executable,
-        str(run_py),
-        "--profile",
-        profile,
+    extension — is the one profiled. The profile selection is reproduced as it was
+    given: ``--profile-path`` when a custom profile was used, else ``--profile``."""
+    inner = [sys.executable, str(run_py)]
+    if profile_path is not None:
+        inner += ["--profile-path", str(profile_path)]
+    else:
+        inner += ["--profile", str(profile)]
+    inner += [
         "--size",
         str(size),
         "--variant",
@@ -60,6 +64,8 @@ def pyspy_command(
         str(repeats),
         "--warmup",
         str(warmup),
+        "--ops",
+        str(ops),
     ]
     if baseline is not None:
         inner += ["--baseline", str(baseline)]

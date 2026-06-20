@@ -54,6 +54,7 @@ class Conditions:
     corpus_variant: str
     repeats: int
     warmup: int
+    ops: int
 
     @classmethod
     def capture(
@@ -64,6 +65,7 @@ class Conditions:
         corpus_variant: str,
         repeats: int,
         warmup: int,
+        ops: int,
     ) -> Conditions:
         """Snapshot the live environment. Imports the native extension lazily so
         this module stays importable (and unit-testable) without a built ``.so``."""
@@ -86,12 +88,16 @@ class Conditions:
             corpus_variant=corpus_variant,
             repeats=repeats,
             warmup=warmup,
+            ops=ops,
         )
 
     #: The fields that must match for two runs to be comparable — the machine,
     #: the build, and what was measured. ``commit``/``dirty`` are advisory (a
     #: diff across commits is the whole point); ``repeats``/``warmup`` are
-    #: provenance. ``native_version`` guards a stale-vs-fresh extension.
+    #: provenance (sample count, not per-iteration work). ``ops`` IS invariant: a
+    #: different N changes the work each iteration does, so the per-iteration
+    #: latency isn't comparable across it. ``native_version`` guards a
+    #: stale-vs-fresh extension.
     INVARIANT = (
         "machine",
         "system",
@@ -101,6 +107,7 @@ class Conditions:
         "profile",
         "corpus_size",
         "corpus_variant",
+        "ops",
     )
 
     def differs_from(self, other: Conditions) -> list[str]:
@@ -186,7 +193,10 @@ def render_table(run: RunResult) -> str:
     """A compact human-readable table of the run (the dogfooding artifact body),
     one row per workload *phase* with the latency percentiles. A settling workload
     spans three rows (response/settle/total); the workload name and item count
-    print once, on its first row."""
+    print once, on its first row. The trailing ``p50 (amortized) ms`` is the
+    per-op cost — the phase's p50 divided by ``items`` (the per-iteration op count)
+    — so a batch row's amortized cost reads against a sequential row's directly.
+    ``rebuild`` (items=1) amortizes to its own p50."""
     lines = [
         f"# perf run — {run.conditions.profile} @ "
         f"{run.conditions.corpus_size} notes ({run.conditions.corpus_variant})",
@@ -194,17 +204,22 @@ def render_table(run: RunResult) -> str:
         f"py{run.conditions.python} native={run.conditions.native_version} "
         f"build={'opt' if run.conditions.optimized else 'DEBUG'} "
         f"commit={run.conditions.commit[:12]}{'+dirty' if run.conditions.dirty else ''}",
-        f"# repeats={run.conditions.repeats} warmup={run.conditions.warmup} @ {run.timestamp}",
+        f"# repeats={run.conditions.repeats} warmup={run.conditions.warmup} "
+        f"ops={run.conditions.ops} @ {run.timestamp}",
         "",
         f"{'workload':<18}{'phase':<10}{'items':>8}"
-        f"{'p50 ms':>12}{'p90 ms':>12}{'p99 ms':>12}{'max ms':>12}",
+        f"{'p50 ms':>12}{'p90 ms':>12}{'p99 ms':>12}{'max ms':>12}"
+        f"{'p50 (amortized) ms':>20}",
     ]
     for r in run.results:
         for idx, (phase, d) in enumerate(r.ordered_phases()):
             name = r.workload if idx == 0 else ""
             items = str(r.items) if idx == 0 else ""
+            # Per-op cost: the phase p50 spread over the iteration's ops. Guarded
+            # against a zero-item workload (none today, but the divide must not throw).
+            amortized = f"{d.p50_ms / r.items:>20.3f}" if r.items else f"{'-':>20}"
             lines.append(
                 f"{name:<18}{phase:<10}{items:>8}{d.p50_ms:>12.3f}{d.p90_ms:>12.3f}"
-                f"{d.p99_ms:>12.3f}{d.max_ms:>12.3f}"
+                f"{d.p99_ms:>12.3f}{d.max_ms:>12.3f}{amortized}"
             )
     return "\n".join(lines)
