@@ -1,0 +1,10 @@
+{
+  "name": "dwyl/english-words words_alpha.txt",
+  "license": "Unlicense (public domain)",
+  "repo": "https://github.com/dwyl/english-words",
+  "commit": "8179fe68775df3f553ef19520db065228e65d1d3",
+  "url": "https://raw.githubusercontent.com/dwyl/english-words/8179fe68775df3f553ef19520db065228e65d1d3/words_alpha.txt",
+  "sha256": "3ed0c94610d8bcf7c11bbb49c56aa49c7234d32b66824df91f554169e572da48",
+  "bytes": 4234910,
+  "lines": 370105
+}

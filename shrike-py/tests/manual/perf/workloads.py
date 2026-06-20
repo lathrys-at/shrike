@@ -45,13 +45,14 @@ from __future__ import annotations
 import random
 
 from shrike.schemas import NoteInput
-from tests.manual.perf.corpus import VOCAB
+from tests.manual.perf.corpus import vocab
 from tests.manual.perf.driver import Booted, Workload
 
 
 def _query(rng: random.Random) -> str:
-    """A short synthetic query: 1-4 vocabulary terms."""
-    return " ".join(rng.choice(VOCAB) for _ in range(rng.randint(1, 4)))
+    """A short synthetic query: 1-4 vocabulary terms, drawn from the same
+    vocabulary the corpus is generated from (so queries hit real note text)."""
+    return " ".join(rng.choice(vocab()) for _ in range(rng.randint(1, 4)))
 
 
 #: N — the operations each data-plane workload performs per timed iteration: the
@@ -143,7 +144,7 @@ def _upsert_note(iteration: int, j: int) -> NoteInput:
     # A fresh deck/tag so upserted notes never collide with the corpus; the text
     # is deterministic per (iteration, j) and the front is globally unique.
     rng = random.Random((iteration << 20) ^ j)
-    body = " ".join(rng.choice(VOCAB) for _ in range(12))
+    body = " ".join(rng.choice(vocab()) for _ in range(12))
     return NoteInput(
         deck="Perf::Upsert",
         note_type="Basic",
@@ -211,7 +212,7 @@ def _delete_note(j: int) -> NoteInput:
         deck="Perf::Delete",
         note_type="Basic",
         tags=["perf-delete"],
-        fields={"Front": f"delete {j}", "Back": " ".join(rng.choice(VOCAB) for _ in range(8))},
+        fields={"Front": f"delete {j}", "Back": " ".join(rng.choice(vocab()) for _ in range(8))},
     )
 
 
@@ -274,7 +275,7 @@ def _reconcile_note(iteration: int, j: int) -> dict:
     # A fresh note in its own deck/tag, deterministic per (iteration, j), so each
     # iteration drifts a disjoint set the reconcile sees as new.
     rng = random.Random((iteration << 24) ^ (j ^ 0x5EC0))
-    body = " ".join(rng.choice(VOCAB) for _ in range(12))
+    body = " ".join(rng.choice(vocab()) for _ in range(12))
     return {
         "deck": "Perf::Reconcile",
         "note_type": "Basic",

@@ -16,7 +16,9 @@ py_library(
         "instrument.py",
         "result.py",
         "stats.py",
+        "wordlist.py",  # stdlib-only (fetch/parse/fingerprint); no native/harness
     ],
+    data = ["wordlist_source.json"],  # the pinned wordlist source (read by ensure_wordlist)
     imports = ["../../.."],  # repo root on sys.path so `tests.manual.perf.*` resolves
     visibility = ["//shrike-py/tests:__subpackages__"],
 )
@@ -63,6 +65,7 @@ pytest_test(
         "test_instrument.py",
         "test_result.py",
         "test_stats.py",
+        "test_wordlist.py",
     ],
     deps = [":perf_pure"],
 )

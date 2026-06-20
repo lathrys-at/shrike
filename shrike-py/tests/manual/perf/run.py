@@ -41,6 +41,7 @@ for _p in (_PKG_ROOT, _PKG_ROOT / "src"):
         sys.path.insert(0, str(_p))
 
 from shrike.platform.log import FILE_DATE_FORMAT, FILE_FORMAT  # noqa: E402
+from tests.manual.perf import wordlist  # noqa: E402
 from tests.manual.perf.compare import (  # noqa: E402
     compare,
     render_comparison,
@@ -458,6 +459,12 @@ def main() -> int:
     # to run.log in the finally below.
     log_buffer = _install_log_buffer()
     try:
+        # Build the corpus from the large real wordlist (downloaded once, cached)
+        # so the synthetic text has a realistic trigram distribution. A perf run
+        # demands the full vocabulary — a download/verify failure is loud here,
+        # never a silent fall back to the tiny embedded list.
+        print("Ensuring perf wordlist (download once into .cache, cached) ...")
+        wordlist.ensure_wordlist()
         spec = CorpusSpec(notes=args.size, variant=args.variant)
         print(f"Ensuring corpus: {args.size} notes ({args.variant}) ...")
         corpus = ensure_corpus(spec)

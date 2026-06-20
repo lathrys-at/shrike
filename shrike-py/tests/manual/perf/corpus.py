@@ -31,17 +31,21 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# Allow running from a bare checkout without an editable install.
+# Allow running from a bare checkout without an editable install. _ROOT
+# (shrike-py) carries the `tests.manual.perf.*` package; _SRC carries `shrike.*`.
 _ROOT = Path(__file__).resolve().parents[3]
 _SRC = _ROOT / "src"
-if _SRC.is_dir() and str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
+for _p in (_ROOT, _SRC):
+    if _p.is_dir() and str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from shrike.harness.collection import CollectionWrapper  # noqa: E402
+from tests.manual.perf import wordlist  # noqa: E402
 
 # Bump when the generation logic changes in a way that alters the produced bytes;
 # it folds into the cache key so a stale corpus is rebuilt rather than reused.
-GENERATOR_VERSION = 3
+# (The active vocabulary's fingerprint also folds into the key — see CorpusSpec.key.)
+GENERATOR_VERSION = 4
 
 VARIANTS = ("text", "text+image")
 
@@ -54,10 +58,13 @@ STANDARD_SIZES = (500, 5_000, 50_000)
 # The default cache root (repo-root .cache, gitignored — never ~/.cache).
 DEFAULT_CACHE_ROOT = _ROOT.parent / ".cache" / "perf" / "corpora"
 
-# A small fixed vocabulary (shared with the workloads): deterministic, varied text
-# with no external data and no licensing surface. Domain-flavoured so fields read
-# like real study notes.
-VOCAB = [
+# The OFFLINE FALLBACK vocabulary. The real corpus draws from a large public-domain
+# wordlist (`wordlist.ensure_wordlist` / `vocab()`); this small domain-flavoured set
+# is used only when that cache is absent (offline, or a manual test that hasn't
+# fetched it), so generation still works — with reduced trigram realism. It folds
+# through `vocab()` into the cache-key fingerprint, so a fallback-built corpus never
+# aliases a full-built one.
+_FALLBACK_VOCAB = [
     "mitochondria",
     "enzyme",
     "synthesis",
@@ -143,6 +150,27 @@ VOCAB = [
     "quark",
 ]
 
+_VOCAB: list[str] | None = None
+
+
+def vocab() -> list[str]:
+    """The active vocabulary, shared by generation and the search workload: the
+    large cached wordlist when present, else :data:`_FALLBACK_VOCAB`. Memoized so
+    a single process sees one stable list (determinism). Never downloads — a perf
+    run calls :func:`wordlist.ensure_wordlist` first."""
+    global _VOCAB
+    if _VOCAB is None:
+        _VOCAB = wordlist.load_wordlist(_FALLBACK_VOCAB)
+    return _VOCAB
+
+
+def _word_count(rng: random.Random) -> int:
+    """A field/sentence word count: a normal draw centred at 15, clamped to
+    [3, 30] — middle-weighted and longer than a flat short range, so the text
+    reads like real study notes and carries enough trigrams to be representative."""
+    return min(30, max(3, round(rng.gauss(15, 5))))
+
+
 # A few HTML wrappers sprinkled into back fields so the stripper does real work
 # (the strip-skip fast path is byte-identity only when there is no `<`).
 _HTML_WRAPS = ("<b>{}</b>", "<i>{}</i>", "<u>{}</u>", "{}<br>", "<span>{}</span>")
@@ -165,8 +193,12 @@ class CorpusSpec:
 
     @property
     def key(self) -> str:
-        """A short content hash of the spec — the cache directory discriminator."""
-        raw = f"v{GENERATOR_VERSION}:{self.notes}:{self.variant}:{self.seed}"
+        """A short content hash of the spec — the cache directory discriminator.
+        Includes the active vocabulary's fingerprint, so a corpus built from the
+        small fallback never aliases (or is reused as) one built from the full
+        wordlist, and a wordlist change invalidates cached corpora."""
+        fp = wordlist.fingerprint(vocab())
+        raw = f"v{GENERATOR_VERSION}:{self.notes}:{self.variant}:{self.seed}:{fp}"
         return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
     @property
@@ -190,12 +222,12 @@ def _note_rng(spec: CorpusSpec, index: int) -> random.Random:
 
 
 def _sentence(rng: random.Random, n_words: int) -> str:
-    words = [rng.choice(VOCAB) for _ in range(n_words)]
+    words = [rng.choice(vocab()) for _ in range(n_words)]
     return words[0].capitalize() + " " + " ".join(words[1:]) + "."
 
 
 def _back_text(rng: random.Random) -> str:
-    parts = [_sentence(rng, rng.randint(6, 18)) for _ in range(rng.randint(1, 4))]
+    parts = [_sentence(rng, _word_count(rng)) for _ in range(rng.randint(1, 4))]
     # Wrap a fraction of sentences in HTML so the field exercises the stripper.
     out = []
     for p in parts:
@@ -204,7 +236,7 @@ def _back_text(rng: random.Random) -> str:
 
 
 def _tags(rng: random.Random) -> list[str]:
-    return rng.sample(VOCAB, k=rng.randint(0, 3))
+    return rng.sample(vocab(), k=rng.randint(0, 3))
 
 
 def _make_image(rng: random.Random, size: int = 96) -> bytes:
@@ -212,8 +244,8 @@ def _make_image(rng: random.Random, size: int = 96) -> bytes:
     background, an image is EITHER a handful of random shapes OR a single rendered
     word — real cards carry both diagrams and text, so mixing the two keeps the
     image set from being uniformly abstract and exercises the text-on-image path
-    (image embedding now, OCR/recognition later). The word is drawn from VOCAB, the
-    SAME vocabulary the search workload queries with, in a colour that contrasts
+    (image embedding now, OCR/recognition later). The word is drawn from the same
+    vocabulary the search workload queries with (``vocab()``), in a colour that contrasts
     the background so it stays legible — so under a real CLIP backend a text query
     for the word lands near this image in the shared space. Deterministic per the
     note's seeded ``rng``."""
@@ -227,7 +259,7 @@ def _make_image(rng: random.Random, size: int = 96) -> bytes:
     draw = ImageDraw.Draw(img)
     if rng.random() < 0.4:
         # A single search-query term, high-contrast on the background.
-        word = rng.choice(VOCAB)
+        word = rng.choice(vocab())
         ink = (0, 0, 0) if sum(bg) > 384 else (255, 255, 255)
         font = ImageFont.load_default(size=rng.randint(14, 24))
         draw.text((rng.randint(2, size // 3), rng.randint(2, size // 2)), word, fill=ink, font=font)
@@ -258,12 +290,12 @@ def _generate_notes(spec: CorpusSpec, media_dir: Path) -> list[dict]:
         # Every fifth note is a cloze; the rest are Basic — two notetypes so the
         # write path resolves more than one field layout.
         if i % 5 == 4:
-            word = rng.choice(VOCAB)
-            text = f"{_sentence(rng, rng.randint(6, 14))} The key term is {{{{c1::{word}}}}}."
+            word = rng.choice(vocab())
+            text = f"{_sentence(rng, _word_count(rng))} The key term is {{{{c1::{word}}}}}."
             fields = {"Text": text, "Back Extra": _back_text(rng)}
             note_type, image_field = "Cloze", "Back Extra"
         else:
-            fields = {"Front": _sentence(rng, rng.randint(4, 10)), "Back": _back_text(rng)}
+            fields = {"Front": _sentence(rng, _word_count(rng)), "Back": _back_text(rng)}
             note_type, image_field = "Basic", "Back"
         # Only ~1 note in 10 carries an image — real collections aren't all-media.
         if spec.variant == "text+image" and i % 10 == 0:
@@ -345,6 +377,9 @@ def main() -> int:
         help="Build directory (default: the cached .cache/perf/corpora/<key>/).",
     )
     args = parser.parse_args()
+    # Fetch the large wordlist (once, cached) so a direct build uses the full
+    # vocabulary rather than the small fallback.
+    wordlist.ensure_wordlist()
     spec = CorpusSpec(notes=args.notes, variant=args.variant, seed=args.seed)
     built = build_corpus(spec, args.out) if args.out else ensure_corpus(spec)
     print(
