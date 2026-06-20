@@ -82,12 +82,14 @@ ONNX_FP32_MODEL_FILES = {
     "tokenizer.json": "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
 }
 
-# The small CLIP (image<->text) for the clip backend: an int8 dual-encoder
-# (separate text + vision graphs) + the CLIP tokenizer + image-preprocessing config. Graphs are
-# stored flat (the backend's _resolve_files finds them at the dir root via the `variant` suffix).
-# ~147 MB. jina-clip-v2 is the production-quality option; this is the CI/test fixture.
-CLIP_MODEL_DIR_NAME = "clip-vit-base-patch32-onnx"
-_CLIP_BASE = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main"
+# The small CLIP (image<->text) for the clip backend: MobileCLIP-S0, an int8
+# dual-encoder (separate text + vision graphs) + the CLIP tokenizer + image-preprocessing
+# config, in the same flat Xenova/transformers.js layout the backend's _resolve_files finds
+# at the dir root via the `variant` suffix. A far smaller real dual-encoder than the prior
+# clip-vit-base-patch32 (~151M params) while keeping the same 512-dim shared space.
+# jina-clip-v2 is the production-quality option; this is the CI/test fixture.
+CLIP_MODEL_DIR_NAME = "mobileclip-s0-onnx"
+_CLIP_BASE = "https://huggingface.co/Xenova/mobileclip_s0/resolve/main"
 CLIP_MODEL_FILES = {
     "text_model_quantized.onnx": f"{_CLIP_BASE}/onnx/text_model_quantized.onnx",
     "vision_model_quantized.onnx": f"{_CLIP_BASE}/onnx/vision_model_quantized.onnx",
