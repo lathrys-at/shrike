@@ -239,8 +239,8 @@ impl DerivedEngine {
 
     /// A read-only view over `idx`'s vocabulary: `(term, doc, cnt)` per trigram,
     /// where `doc` is the document frequency. The fuzzy path reads it to prune the
-    /// common (high-DF) trigrams that bloat the match set. It resolves `idx` by
-    /// name, so it survives the rebuild's drop-and-rename of `idx` (verified).
+    /// common (high-DF) trigrams that bloat the match set. fts5vocab resolves `idx`
+    /// by name at query time, so it survives the rebuild's drop-and-rename of `idx`.
     const IDX_VOCAB_DDL: &'static str =
         "CREATE VIRTUAL TABLE IF NOT EXISTS idx_vocab USING fts5vocab('idx', 'row')";
 
@@ -2160,7 +2160,7 @@ pub const FUZZY_MIN_SHARED: usize = 2;
 /// Cap on the trigrams a fuzzy `OR` generates candidates from: the rarest (most
 /// discriminative) N of the query's trigrams. Bounds the match set `ORDER BY rank`
 /// (bm25) scans — the search hotspot — without dropping typo recall (a typo'd word
-/// has only a handful of trigrams, all kept). A perf/recall dial, eval-calibrated.
+/// has only a handful of trigrams, all kept). A perf/recall dial.
 pub const FUZZY_MAX_TRIGRAMS: usize = 6;
 
 pub use shrike_store::LexicalRow;
