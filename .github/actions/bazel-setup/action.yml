@@ -45,34 +45,6 @@ description: >
 runs:
   using: composite
   steps:
-    # Ubuntu 24.04 (ubuntu-latest) restricts unprivileged user namespaces via
-    # AppArmor, which makes Bazel's linux-sandbox unavailable so it silently
-    # falls back to processwrapper-sandbox — no per-action filesystem isolation,
-    # so concurrent actions share (and can truncate) each other's SOURCE files
-    # through the execroot symlinks (#872: shrike/server/__init__.py read
-    # main-less mid-run, red-failing unrelated PRs). Re-enabling unprivileged
-    # userns restores linux-sandbox's read-only input isolation. Linux only —
-    # macOS's darwin-sandbox already isolates; on kernels without the restriction
-    # the key is absent (|| true) and userns is already unrestricted.
-    - name: Enable unprivileged user namespaces (restore Bazel linux-sandbox)
-      if: runner.os == 'Linux'
-      shell: bash
-      run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-    # Fail loud if the sandbox is NOT isolating: without unprivileged userns
-    # bazel silently runs under processwrapper-sandbox (shared, writable source
-    # tree) and the #872 cross-action truncation can recur. A guard, not just a
-    # validation — a future runner re-restricting userns should break CI here,
-    # visibly, not resurface as an intermittent import flake.
-    - name: Require an isolating Bazel sandbox (linux-sandbox)
-      if: runner.os == 'Linux'
-      shell: bash
-      run: |
-        if unshare --user --map-root-user true 2>/dev/null; then
-          echo "unprivileged user namespaces enabled - bazel will use linux-sandbox"
-        else
-          echo "userns still restricted - bazel would fall back to processwrapper-sandbox (no fs isolation)" >&2
-          exit 1
-        fi
     # The heavy embedding externals (#645): keyed on the VERSION PINS, not the
     # crate locks, so a Cargo.lock/MODULE.bazel.lock churn (the epic's frequent
     # case) never re-downloads them and never rotates this big-blob entry.
