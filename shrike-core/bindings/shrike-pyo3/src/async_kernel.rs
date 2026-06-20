@@ -980,6 +980,63 @@ impl AsyncKernel {
         })
     }
 
+    /// The full fused search — awaitable, kernel-internal. The host hands the
+    /// query/anchor `sources` (label, text, is_query) and the request scalars; the
+    /// kernel embeds the query on its own runtime (no query vectors cross the FFI),
+    /// builds cross-space, computes the over-fetch clamp, runs the assembly under
+    /// the freshness bracket, and returns the `SearchNotesWire` JSON (groups +
+    /// stale). `limit == 0` means "all" (the kernel applies the over-fetch bound).
+    /// The cross-space fusion variant rides the env seam (production default
+    /// floor-admit), exactly like the legacy `action_search_notes`.
+    #[pyo3(signature = (sources, limit, threshold, deck=None, tags=None, exclude=None, image_floor=None, weights=None, semantic=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn search_fused<'py>(
+        &self,
+        py: Python<'py>,
+        sources: Vec<(String, String, bool)>,
+        limit: usize,
+        threshold: f64,
+        deck: Option<String>,
+        tags: Option<Vec<String>>,
+        exclude: Option<Vec<i64>>,
+        image_floor: Option<f64>,
+        weights: Option<std::collections::BTreeMap<String, f64>>,
+        semantic: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (mode, tau, budget) = crate::kernel_actions::cross_space_fusion_from_env();
+        let sources: Vec<shrike_kernel::actions::SearchSource> = sources
+            .into_iter()
+            .map(
+                |(label, text, is_query)| shrike_kernel::actions::SearchSource {
+                    label,
+                    text,
+                    is_query,
+                },
+            )
+            .collect();
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let (groups, stale) = kernel
+                .search_fused(
+                    sources,
+                    limit,
+                    threshold,
+                    deck,
+                    tags.unwrap_or_default(),
+                    exclude.unwrap_or_default(),
+                    image_floor,
+                    weights.unwrap_or_default(),
+                    semantic,
+                    mode,
+                    tau,
+                    budget,
+                )
+                .await?;
+            serde_json::to_string(&crate::kernel_actions::SearchNotesWire { groups, stale })
+                .map_err(|e| shrike_error::NativeError::internal(e.to_string()))
+        })
+    }
+
     fn col_mod<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
         kernel_op(py, async move { kernel.col_mod().await })

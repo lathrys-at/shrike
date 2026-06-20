@@ -2803,7 +2803,7 @@ impl Kernel {
                 .sum();
             let fetch_k = if limit > 0 {
                 limit
-            } else if semantic_ok && index_size > 0 {
+            } else if semantic_ok {
                 index_size.max(1)
             } else {
                 1_000_000_000

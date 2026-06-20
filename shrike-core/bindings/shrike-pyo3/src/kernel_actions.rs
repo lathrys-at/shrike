@@ -212,9 +212,9 @@ pub(crate) fn action_search_notes(
 /// The `action_search_notes` wire payload: the fused groups plus the read-time
 /// freshness verdict the host threads onto `SearchResponse.stale`.
 #[derive(serde::Serialize)]
-struct SearchNotesWire {
-    groups: Vec<shrike_schemas::SearchResultGroup>,
-    stale: bool,
+pub(crate) struct SearchNotesWire {
+    pub(crate) groups: Vec<shrike_schemas::SearchResultGroup>,
+    pub(crate) stale: bool,
 }
 
 /// Resolve the cross-space fusion variant + τ + budget from the environment
@@ -227,7 +227,8 @@ struct SearchNotesWire {
 /// for the earlier production gate, `relative` for the earlier leak). An
 /// unrecognized value falls back to the production default (floor-admit) so a
 /// typo can never silently weaken the path. The MCP tool schema is unchanged.
-fn cross_space_fusion_from_env() -> (shrike_kernel::actions::CrossSpaceFusionMode, f64, f64) {
+pub(crate) fn cross_space_fusion_from_env(
+) -> (shrike_kernel::actions::CrossSpaceFusionMode, f64, f64) {
     use shrike_kernel::actions::CrossSpaceFusionMode as M;
     let mode = match std::env::var("SHRIKE_CROSS_SPACE_FUSION_MODE")
         .ok()

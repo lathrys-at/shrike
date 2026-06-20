@@ -452,6 +452,18 @@ class AsyncKernel:
     def search(
         self, query: str, top_k: int
     ) -> Future[list[tuple[int, float, list[tuple[str, int]]]]]: ...
+    def search_fused(
+        self,
+        sources: list[tuple[str, str, bool]],
+        limit: int,
+        threshold: float,
+        deck: str | None = ...,
+        tags: list[str] | None = ...,
+        exclude: list[int] | None = ...,
+        image_floor: float | None = ...,
+        weights: dict[str, float] | None = ...,
+        semantic: bool = ...,
+    ) -> Future[str]: ...
     def reindex_notes(self, note_ids: list[int]) -> Future[None]: ...
     def rebuild_index(self) -> Future[int]: ...
     def reindex_if_needed(self) -> Future[bool]: ...
