@@ -222,38 +222,32 @@ http_file(
     urls = ["https://huggingface.co/Xenova/all-distilroberta-v1/resolve/main/tokenizer.json"],
 )
 
-# The small CLIP (image<->text) fixture for the in-process ClipBackend: MobileCLIP-S0
-# (Xenova transformers.js export), same split text_model/vision_model quantized-graph
-# layout ClipBackend resolves, but a far smaller real dual-encoder than the prior
-# clip-vit-base-patch32 (~151M params). 512-dim shared space. (MobileCLIP's
-# preprocessor_config omits image_mean/image_std; ClipBackend defaults those to the
-# OpenAI CLIP constants, matching the transformers.js processor.)
 http_file(
     name = "model_clip_text_onnx",
     downloaded_file_path = "text_model_quantized.onnx",
-    sha256 = "b8557b10e5c23a0126c6d2e6eba48d240484979007917d128953b31618a04211",
-    urls = ["https://huggingface.co/Xenova/mobileclip_s0/resolve/main/onnx/text_model_quantized.onnx"],
+    sha256 = "73baab855d406190da9faa498cfedf65f15cf309f4cc7385b7b032e6d08e5c3a",
+    urls = ["https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model_quantized.onnx"],
 )
 
 http_file(
     name = "model_clip_vision_onnx",
     downloaded_file_path = "vision_model_quantized.onnx",
-    sha256 = "fcbd153d1aa1314fb72ea39b20c37e0572e7e7b05359b51f3efee5d682658472",
-    urls = ["https://huggingface.co/Xenova/mobileclip_s0/resolve/main/onnx/vision_model_quantized.onnx"],
+    sha256 = "583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299",
+    urls = ["https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx"],
 )
 
 http_file(
     name = "model_clip_tokenizer",
     downloaded_file_path = "tokenizer.json",
-    sha256 = "72ed5c96db5729294468543e4bc75fce14ca63f58e37300290189ba1c1e52b85",
-    urls = ["https://huggingface.co/Xenova/mobileclip_s0/resolve/main/tokenizer.json"],
+    sha256 = "f7f3b7af117d467b58374797691a6438d3e6b9e9cef800dfd5dced7f697a90cd",
+    urls = ["https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/tokenizer.json"],
 )
 
 http_file(
     name = "model_clip_preprocessor",
     downloaded_file_path = "preprocessor_config.json",
-    sha256 = "b031f09fbd69e22a605b6cc7433993249ee893b7fc1b79321f669cd015493dd4",
-    urls = ["https://huggingface.co/Xenova/mobileclip_s0/resolve/main/preprocessor_config.json"],
+    sha256 = "6f638fb9401a6d6296feff533ee7efe657b787c49f954f82f5906b36ef2a1b1f",
+    urls = ["https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/preprocessor_config.json"],
 )
 
 # The GGUF for the llama-server backend (test_embedding/test_semantic/test_backends).

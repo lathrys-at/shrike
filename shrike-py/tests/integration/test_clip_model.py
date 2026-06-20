@@ -1,7 +1,7 @@
 """The CLIP backend against a real small CLIP export (image<->text shared space).
 
 Mocked mechanics live in ``tests/unit/test_embedding_clip.py``; here we run ``ClipBackend``
-against the actual ``Xenova/mobileclip_s0`` ONNX graphs so the preprocessing, I/O, and
+against the actual ``Xenova/clip-vit-base-patch32`` ONNX graphs so the preprocessing, I/O, and
 the shared-space property are exercised for real. The semantic assertion uses solid-colour
 images (deterministic, no network beyond the cached model): a colour image lands nearer its own
 colour word than unrelated concepts, proving a text query retrieves by image content.
@@ -44,12 +44,12 @@ def be(clip_model: Path) -> Iterator[ClipBackend]:
     backend.stop()
 
 
-# The native preprocess runs a CatmullRom resize UNCONDITIONALLY to the model's
-# configured crop size (read from preprocessor_config.json — model-dependent), and
-# that resize — not decode or inference — dominates per-image cost. Solid-colour
-# vectors are bit-identical across source sizes, so the contracts are unaffected by
-# the input dimensions; the one deliberately odd-shaped image below (300x200) stays
-# as the resize+crop path canary.
+# 224x224 == the CLIP preprocess crop size: the native preprocess runs a
+# CatmullRom resize UNCONDITIONALLY, and that resize — not decode or inference —
+# dominates per-image cost (53ms from 256², 37ms from 96², 16.7ms at crop size).
+# Solid-colour vectors are bit-identical across source sizes, so the contracts are
+# unaffected; the one deliberately non-224 image below (300x200) stays as the
+# resize+crop path canary.
 def _png_bytes(color: tuple[int, int, int], size: tuple[int, int] = (224, 224)) -> bytes:
     from PIL import Image
 
@@ -338,13 +338,3 @@ class TestClipNativeSeam:
         finally:
             for name, orig in originals.items():
                 setattr(be, name, orig)
-
-
-def test_zzz_diag_dump_preprocessor_config(clip_model: Path) -> None:
-    """TEMP diagnostic (#931): surface MobileCLIP-S0's actual preprocessor_config in
-    the CI log so the real image normalization (do_normalize / image_mean / image_std)
-    is known. Removed once the correct preprocessing is pinned."""
-    import json
-
-    pp = json.loads((clip_model / "preprocessor_config.json").read_text())
-    raise AssertionError("DIAG_PREPROCESSOR_CONFIG=" + json.dumps(pp))

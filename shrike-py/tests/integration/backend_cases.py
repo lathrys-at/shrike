@@ -155,7 +155,7 @@ def cases() -> list[BackendCase]:
         # same reason). Image-path semantics are asserted as retrieval equivalence
         # in test_clip_model.py.
         BackendCase(
-            id="clip-mobileclip-s0",
+            id="clip-vit-b32",
             ndim=512,
             fingerprint_prefixes=("clip-rs:",),
             make=_make_clip,
