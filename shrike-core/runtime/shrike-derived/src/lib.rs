@@ -220,6 +220,7 @@ impl DerivedEngine {
     /// integrity failure) — the next drift detection rebuilds from scratch.
     fn reset_tables(conn: &Connection) -> NativeResult<()> {
         for sql in [
+            "DROP TABLE IF EXISTS idx_vocab",
             "DROP TABLE IF EXISTS idx",
             "DROP TABLE IF EXISTS rowmap",
             "DROP TABLE IF EXISTS segments",
@@ -236,8 +237,16 @@ impl DerivedEngine {
     const IDX_DDL: &'static str =
         "CREATE VIRTUAL TABLE IF NOT EXISTS idx USING fts5(txt, tokenize='trigram')";
 
+    /// A read-only view over `idx`'s vocabulary: `(term, doc, cnt)` per trigram,
+    /// where `doc` is the document frequency. The fuzzy path reads it to prune the
+    /// common (high-DF) trigrams that bloat the match set. It resolves `idx` by
+    /// name, so it survives the rebuild's drop-and-rename of `idx` (verified).
+    const IDX_VOCAB_DDL: &'static str =
+        "CREATE VIRTUAL TABLE IF NOT EXISTS idx_vocab USING fts5vocab('idx', 'row')";
+
     fn create_tables(conn: &Connection) -> NativeResult<()> {
         conn.execute(Self::IDX_DDL, []).map_err(db_err)?;
+        conn.execute(Self::IDX_VOCAB_DDL, []).map_err(db_err)?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS rowmap(\
              rowid INTEGER PRIMARY KEY, note_id INTEGER NOT NULL, \
@@ -1260,6 +1269,41 @@ impl DerivedEngine {
         }
         Ok(out)
     }
+
+    /// Document frequency (number of indexed rows containing the term) for each of
+    /// `terms`, from the `idx_vocab` view — the fuzzy path reads it to prune common
+    /// trigrams. A term absent from the result is absent from the index (DF 0). The
+    /// `term IN (…)` lookup is a pushed-down seek (not a vocab scan); chunked under
+    /// the inline-parameter cap. One lock for the whole set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vocabulary lookup fails.
+    pub fn trigram_dfs(
+        &self,
+        terms: &[&str],
+    ) -> NativeResult<std::collections::HashMap<String, i64>> {
+        let mut out: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        if terms.is_empty() {
+            return Ok(out);
+        }
+        let conn = self.lock();
+        for chunk in terms.chunks(Self::INLINE_ID_MAX) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let sql = format!("SELECT term, doc FROM idx_vocab WHERE term IN ({marks})");
+            let run = || -> rusqlite::Result<std::collections::HashMap<String, i64>> {
+                let mut stmt = conn.prepare_cached(&sql)?;
+                let mut q = stmt.query(rusqlite::params_from_iter(chunk.iter()))?;
+                let mut m = std::collections::HashMap::new();
+                while let Some(r) = q.next()? {
+                    m.insert(r.get::<_, String>(0)?, r.get::<_, i64>(1)?);
+                }
+                Ok(m)
+            };
+            out.extend(with_busy_retry(run)?);
+        }
+        Ok(out)
+    }
 }
 
 /// The store contract: every method forwards to the inherent impl, so
@@ -2113,6 +2157,11 @@ mod tests {
 pub const MIN_TRIGRAM: usize = 3;
 /// A fuzzy candidate must share at least this many query trigrams (noise floor).
 pub const FUZZY_MIN_SHARED: usize = 2;
+/// Cap on the trigrams a fuzzy `OR` generates candidates from: the rarest (most
+/// discriminative) N of the query's trigrams. Bounds the match set `ORDER BY rank`
+/// (bm25) scans — the search hotspot — without dropping typo recall (a typo'd word
+/// has only a handful of trigrams, all kept). A perf/recall dial, eval-calibrated.
+pub const FUZZY_MAX_TRIGRAMS: usize = 6;
 
 pub use shrike_store::LexicalRow;
 
@@ -2135,26 +2184,51 @@ pub fn fts_quote(term: &str) -> String {
 }
 
 impl DerivedEngine {
-    /// The fuzzy MATCH inputs for one query: its trigram set and the FTS5 OR
-    /// expression over those trigrams. `None` when the query has fewer than
-    /// [`FUZZY_MIN_SHARED`] trigram windows (too short to rank). Shared by the
-    /// singular and batched fuzzy paths so they build the same expression.
-    fn fuzzy_expr(query: &str) -> Option<(std::collections::BTreeSet<String>, String)> {
-        // NFC-normalize so the query trigrams match the NFC-normalized index (and
-        // the NFC-normalized text fuzzy_filter re-trigrams). Shared by both fuzzy
-        // paths, so this is the one place fuzzy queries are normalized.
+    /// One query's trigram set, `None` when it has fewer than [`FUZZY_MIN_SHARED`]
+    /// trigram windows (too short to rank). NFC-normalized so the trigrams match
+    /// the NFC-normalized index (and the text `fuzzy_filter` re-trigrams). This is
+    /// the full set used for the overlap filter; [`Self::prune_to_rare`] derives
+    /// the (smaller) candidate-generation expression from it.
+    fn fuzzy_grams(query: &str) -> Option<std::collections::BTreeSet<String>> {
         let normalized = nfc(query);
         let grams = trigrams(normalized.trim());
         if grams.len() < FUZZY_MIN_SHARED {
             return None;
         }
-        let gram_set: std::collections::BTreeSet<String> = grams.into_iter().collect();
-        let expr = gram_set
+        Some(grams.into_iter().collect())
+    }
+
+    /// The fuzzy candidate-generation `OR`, built from only the **rarest**
+    /// (lowest document-frequency) trigrams of `grams`, capped at
+    /// [`FUZZY_MAX_TRIGRAMS`]. The common trigrams are what bloat the match set and
+    /// make `ORDER BY rank` (bm25) the search hotspot, and they discriminate least;
+    /// the rare ones are what actually find a typo'd word. `df` is per-trigram
+    /// document frequency from `idx_vocab` (0 = absent → sorts rarest, matches
+    /// nothing, harmless). The full `grams` set still drives the overlap filter, so
+    /// dropping common trigrams here only loses common-trigram-only noise. The
+    /// "common"/"rare" judgement is the collection's own statistics — no language
+    /// assumption.
+    fn prune_to_rare(
+        grams: &std::collections::BTreeSet<String>,
+        df: &std::collections::HashMap<String, i64>,
+    ) -> String {
+        let mut by_df: Vec<&String> = grams.iter().collect();
+        // Rarest PRESENT trigram first; DF 0 (absent from the index — generates no
+        // candidates) sorts last so it never crowds out a rare-but-present trigram.
+        // Term as a deterministic tie-break.
+        by_df.sort_by(|a, b| {
+            let rank = |g: &String| {
+                let d = df.get(g).copied().unwrap_or(0);
+                (d == 0, d)
+            };
+            rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
+        });
+        by_df.truncate(FUZZY_MAX_TRIGRAMS);
+        by_df
             .iter()
             .map(|g| fts_quote(g))
             .collect::<Vec<_>>()
-            .join(" OR ");
-        Some((gram_set, expr))
+            .join(" OR ")
     }
 
     /// The fuzzy post-filter shared by the singular and batched paths: from FTS5's
@@ -2231,9 +2305,14 @@ impl DerivedEngine {
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
     ) -> NativeResult<Vec<LexicalRow>> {
-        let Some((gram_set, expr)) = Self::fuzzy_expr(query) else {
+        let Some(gram_set) = Self::fuzzy_grams(query) else {
             return Ok(Vec::new());
         };
+        // Generate candidates from only the rarest trigrams (cheap bm25); the full
+        // gram set still drives the overlap filter.
+        let terms: Vec<&str> = gram_set.iter().map(String::as_str).collect();
+        let df = self.trigram_dfs(&terms)?;
+        let expr = Self::prune_to_rare(&gram_set, &df);
         let rows = self.match_rows(&expr, top_k * 4, true, scope, exclude_sources)?;
         Ok(Self::fuzzy_filter(rows, &gram_set, top_k))
     }
@@ -2309,20 +2388,23 @@ impl DerivedEngine {
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
     ) -> NativeResult<Vec<Vec<LexicalRow>>> {
-        // Keep each servable query's trigram set for the post-filter; the
+        // Keep each servable query's full trigram set for the post-filter; the
         // unservable ones reattach as empty results.
-        let mut exprs: Vec<String> = Vec::new();
-        let mut gram_sets: Vec<Option<std::collections::BTreeSet<String>>> =
-            Vec::with_capacity(queries.len());
-        for q in queries {
-            match Self::fuzzy_expr(q) {
-                Some((gram_set, expr)) => {
-                    exprs.push(expr);
-                    gram_sets.push(Some(gram_set));
-                }
-                None => gram_sets.push(None),
-            }
-        }
+        let gram_sets: Vec<Option<std::collections::BTreeSet<String>>> =
+            queries.iter().map(|q| Self::fuzzy_grams(q)).collect();
+        // One batched DF lookup over every distinct trigram, then prune each served
+        // query's candidate `OR` to its rarest trigrams (cheap bm25 over a small set).
+        let distinct: std::collections::BTreeSet<&str> = gram_sets
+            .iter()
+            .flatten()
+            .flat_map(|g| g.iter().map(String::as_str))
+            .collect();
+        let df = self.trigram_dfs(&distinct.into_iter().collect::<Vec<_>>())?;
+        let exprs: Vec<String> = gram_sets
+            .iter()
+            .flatten()
+            .map(|g| Self::prune_to_rare(g, &df))
+            .collect();
         let mut batched = self
             .match_rows_batch(&exprs, top_k * 4, true, scope, exclude_sources)?
             .into_iter();
@@ -2627,6 +2709,64 @@ mod lexical_tests {
             "NFC query finds NFD-indexed substring (index normalized on insert)"
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn trigram_dfs_reports_document_frequency() {
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-derived-df-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
+        build_snapshot_live(
+            &e,
+            &[
+                (1, "field".into(), "Front".into(), "abc xyz".into()),
+                (2, "field".into(), "Front".into(), "abc def".into()),
+            ],
+            1,
+        )
+        .unwrap();
+        let df = e.trigram_dfs(&["abc", "xyz", "qqq"]).unwrap();
+        assert_eq!(df.get("abc"), Some(&2), "'abc' is in both docs");
+        assert_eq!(df.get("xyz"), Some(&1), "'xyz' is in one doc");
+        assert_eq!(df.get("qqq"), None, "absent trigram has no row (DF 0)");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn prune_to_rare_keeps_rarest_present_and_drops_common_and_absent() {
+        use std::collections::{BTreeSet, HashMap};
+        let grams: BTreeSet<String> = ["aaa", "bbb", "ccc", "ddd", "eee", "fff", "ggg", "zzz"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let df: HashMap<String, i64> = [
+            ("aaa", 1000),
+            ("bbb", 500),
+            ("ccc", 3),
+            ("ddd", 1),
+            ("eee", 2),
+            ("fff", 800),
+            ("ggg", 50),
+            ("zzz", 0), // absent from the index
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), *v))
+        .collect();
+        let expr = DerivedEngine::prune_to_rare(&grams, &df);
+        // Keeps the FUZZY_MAX_TRIGRAMS (6) rarest PRESENT: ddd,eee,ccc,ggg,bbb,fff.
+        for kept in ["ddd", "eee", "ccc", "ggg", "bbb", "fff"] {
+            assert!(expr.contains(kept), "kept the rare-present trigram {kept}");
+        }
+        assert!(!expr.contains("aaa"), "dropped the commonest (DF 1000)");
+        assert!(!expr.contains("zzz"), "dropped the absent (DF 0) trigram");
+        assert_eq!(expr.matches(" OR ").count(), FUZZY_MAX_TRIGRAMS - 1);
     }
 }
 
