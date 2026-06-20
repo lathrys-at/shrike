@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+import itertools
 import json
 import random
 import sys
@@ -45,7 +46,7 @@ from tests.manual.perf import wordlist  # noqa: E402
 # Bump when the generation logic changes in a way that alters the produced bytes;
 # it folds into the cache key so a stale corpus is rebuilt rather than reused.
 # (The active vocabulary's fingerprint also folds into the key — see CorpusSpec.key.)
-GENERATOR_VERSION = 4
+GENERATOR_VERSION = 5
 
 VARIANTS = ("text", "text+image")
 
@@ -164,6 +165,41 @@ def vocab() -> list[str]:
     return _VOCAB
 
 
+# Words are drawn with a Zipfian frequency, not uniformly: real text repeats a
+# small head of terms heavily with a long rare tail, so a uniform draw over a
+# huge wordlist (≈no repetition) is as unrepresentative of FTS5 behaviour as the
+# old tiny vocabulary (≈total overlap) was. The wordlist carries no frequency
+# data, so a fixed seeded shuffle assigns the frequency ranking — the head is an
+# arbitrary but representative cross-section of real words (so its trigrams are
+# real-English-shaped), and only the SHAPE of the distribution is synthetic.
+_ZIPF_EXPONENT = 1.07  # ~natural-language word-frequency exponent
+_ZIPF_SHUFFLE_SEED = 0x21F
+_ZIPF_STATE: tuple[list[str], list[float]] | None = None
+
+
+def _zipf_state() -> tuple[list[str], list[float]]:
+    """The frequency-ranked vocabulary and its cumulative Zipf weights, computed
+    once. Ranking is a deterministic shuffle (the wordlist is alphabetical, which
+    would otherwise make the 'a…' words the frequent ones)."""
+    global _ZIPF_STATE
+    if _ZIPF_STATE is None:
+        ranked = list(vocab())
+        random.Random(_ZIPF_SHUFFLE_SEED).shuffle(ranked)
+        cum = list(
+            itertools.accumulate(1.0 / (r**_ZIPF_EXPONENT) for r in range(1, len(ranked) + 1))
+        )
+        _ZIPF_STATE = (ranked, cum)
+    return _ZIPF_STATE
+
+
+def choose(rng: random.Random, k: int) -> list[str]:
+    """``k`` words drawn Zipfian (with replacement) from :func:`vocab`. Shared by
+    corpus generation and the query/upsert workloads so both see the same
+    head-heavy term distribution."""
+    ranked, cum = _zipf_state()
+    return rng.choices(ranked, cum_weights=cum, k=k)
+
+
 def _word_count(rng: random.Random) -> int:
     """A field/sentence word count: a normal draw centred at 15, clamped to
     [3, 30] — middle-weighted and longer than a flat short range, so the text
@@ -222,7 +258,7 @@ def _note_rng(spec: CorpusSpec, index: int) -> random.Random:
 
 
 def _sentence(rng: random.Random, n_words: int) -> str:
-    words = [rng.choice(vocab()) for _ in range(n_words)]
+    words = choose(rng, n_words)
     return words[0].capitalize() + " " + " ".join(words[1:]) + "."
 
 
@@ -259,7 +295,7 @@ def _make_image(rng: random.Random, size: int = 96) -> bytes:
     draw = ImageDraw.Draw(img)
     if rng.random() < 0.4:
         # A single search-query term, high-contrast on the background.
-        word = rng.choice(vocab())
+        word = choose(rng, 1)[0]
         ink = (0, 0, 0) if sum(bg) > 384 else (255, 255, 255)
         font = ImageFont.load_default(size=rng.randint(14, 24))
         draw.text((rng.randint(2, size // 3), rng.randint(2, size // 2)), word, fill=ink, font=font)
@@ -290,7 +326,7 @@ def _generate_notes(spec: CorpusSpec, media_dir: Path) -> list[dict]:
         # Every fifth note is a cloze; the rest are Basic — two notetypes so the
         # write path resolves more than one field layout.
         if i % 5 == 4:
-            word = rng.choice(vocab())
+            word = choose(rng, 1)[0]
             text = f"{_sentence(rng, _word_count(rng))} The key term is {{{{c1::{word}}}}}."
             fields = {"Text": text, "Back Extra": _back_text(rng)}
             note_type, image_field = "Cloze", "Back Extra"
