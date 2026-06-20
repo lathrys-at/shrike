@@ -26,19 +26,27 @@
     clippy::missing_safety_doc
 )]
 
+use std::borrow::Cow;
 use std::sync::Mutex;
 
 use rusqlite::Connection;
 use shrike_error::{ErrorKind, NativeError, NativeResult};
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{is_nfc, UnicodeNormalization};
 
 /// NFC-normalize text, so canonically-equivalent forms (a precomposed `é` versus
 /// an `e` followed by a combining accent) produce the same trigrams and match.
 /// Applied to BOTH indexed text and queries — the single canonical form that makes
 /// the FTS index and the query agree (and keeps the Rust-side trigram overlap
-/// consistent with what FTS5 indexed). Idempotent: normalizing NFC text is a no-op.
-pub fn nfc(text: &str) -> String {
-    text.nfc().collect()
+/// consistent with what FTS5 indexed).
+///
+/// Already-NFC text (the common case — Anki normalizes fields on write) is borrowed
+/// without allocating, so the per-row index hot path pays nothing for identity work.
+pub fn nfc(text: &str) -> Cow<'_, str> {
+    if is_nfc(text) {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(text.nfc().collect())
+    }
 }
 
 /// Mirrors `shrike.derived.SNIPPET_TOKENS` (the facade doesn't pass it — it's
@@ -432,7 +440,7 @@ impl DerivedEngine {
             // connection — sound only under the engine's single mutexed
             // connection (the module-docs invariant; verified at open). The text
             // is NFC-normalized so the index agrees with NFC-normalized queries.
-            ins_idx.execute([nfc(text)]).map_err(db_err)?;
+            ins_idx.execute([nfc(text).as_ref()]).map_err(db_err)?;
             let rowid = conn.last_insert_rowid();
             ins_map
                 .execute(rusqlite::params![rowid, note_id, source, reference])
@@ -733,7 +741,7 @@ impl DerivedEngine {
             }
             // NFC-normalize (also re-normalizes recognition rows carried from a
             // pre-normalization index on rebuild — idempotent for already-NFC text).
-            ins_idx.execute([nfc(text)]).map_err(db_err)?;
+            ins_idx.execute([nfc(text).as_ref()]).map_err(db_err)?;
             let rowid = tx.last_insert_rowid();
             ins_map
                 .execute(rusqlite::params![rowid, note_id, source, reference])
