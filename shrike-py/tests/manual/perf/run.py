@@ -24,6 +24,7 @@ import argparse
 import io
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -59,7 +60,15 @@ from tests.manual.perf.driver import (  # noqa: E402
     measure_ingest,
     run_async,
 )
-from tests.manual.perf.instrument import RUN_DIR_ENV, flame_path, pyspy_command  # noqa: E402
+from tests.manual.perf.instrument import (  # noqa: E402
+    DEFAULT_INSTRUMENT,
+    INSTRUMENTERS,
+    RUN_DIR_ENV,
+    artifact_path,
+    instrument_binary,
+    instrument_command,
+    pyspy_native_supported,
+)
 from tests.manual.perf.result import (  # noqa: E402
     Conditions,
     RunResult,
@@ -227,23 +236,40 @@ def _uses_synthetic(profile_path: Path) -> bool:
     )
 
 
-def _profile_under_pyspy(
+#: How to install each instrumenter, surfaced when its binary is missing from PATH.
+_INSTALL_HINT = {
+    "py-spy": "pip install py-spy",
+    "samply": "cargo install samply",
+    "xctrace": "install Xcode (provides `xcrun xctrace`)",
+}
+
+
+def _profile_under_instrumenter(
     args: argparse.Namespace,
     profile_path: Path,
     names: list[str],
     parser: argparse.ArgumentParser,
 ) -> int:
-    """Re-exec the run under ``py-spy record --native`` to capture a flamegraph
-    spanning the Python harness AND the Rust kernel. ONE workload per run keeps the
-    attribution clean; the inner run shares this run's output dir (via env) so the
-    flamegraph and result.json land together."""
+    """Re-exec the run under the selected profiler (``--instrument``) to capture a
+    flamegraph/trace. ONE workload per run keeps the attribution clean; the inner
+    run shares this run's output dir (via env) so the profile artifact and
+    result.json land together.
+
+    py-spy ``--native`` is the cross-boundary view (Python + Rust in one
+    flamegraph); samply/xctrace give deeper Rust detail but opaque Python frames.
+    See :mod:`tests.manual.perf.instrument`."""
+    tool = args.instrument
     if len(names) != 1:
         parser.error("--instrument profiles ONE workload per run; pass a single --workloads")
     if args.out is not None:
-        parser.error("--out is ignored under --instrument; result.json lands beside the flamegraph")
-    if shutil.which("py-spy") is None:
+        parser.error("--out is ignored under --instrument; result.json lands beside the artifact")
+    if tool == "xctrace" and sys.platform != "darwin":
+        parser.error("--instrument=xctrace is macOS-only (Apple Instruments); use py-spy or samply")
+    binary = instrument_binary(tool)
+    if shutil.which(binary) is None:
         parser.error(
-            "--instrument needs py-spy on PATH (`pip install py-spy`); see docs/dev/testing.md"
+            f"--instrument={tool} needs `{binary}` on PATH "
+            f"({_INSTALL_HINT[tool]}); see docs/dev/testing.md"
         )
     workload = names[0]
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
@@ -252,9 +278,19 @@ def _profile_under_pyspy(
         / f"{profile_path.stem}-{args.variant.replace('+', '_')}-{args.size}-{workload}-{stamp}"
     )
     run_dir.mkdir(parents=True, exist_ok=True)
-    cmd = pyspy_command(
+    if tool == "py-spy" and not pyspy_native_supported(sys.platform):
+        print(
+            "NOTE: py-spy has no native unwinding on this platform — the flamegraph is "
+            "Python-only (the Rust kernel shows as opaque native frames). For Rust detail "
+            "use --instrument=samply or =xctrace; for the merged Python+Rust view, run "
+            "py-spy --native on Linux."
+        )
+    cmd = instrument_command(
+        tool,
         Path(__file__).resolve(),
         run_dir,
+        platform=sys.platform,
+        extra_args=args.instrument_arg,
         profile=args.profile,
         profile_path=args.profile_path,
         size=args.size,
@@ -265,16 +301,24 @@ def _profile_under_pyspy(
         ops=args.ops,
         baseline=args.baseline,
     )
-    flame = flame_path(run_dir, workload)
-    print(f"Instrumenting '{workload}' under py-spy --native -> {flame}")
-    print(f"  $ {' '.join(cmd)}")
+    artifact = artifact_path(run_dir, workload, tool)
+    print(f"Instrumenting '{workload}' under {tool} -> {artifact}")
+    print(f"  $ {shlex.join(cmd)}")
     rc = subprocess.call(cmd, env={**os.environ, RUN_DIR_ENV: str(run_dir)})
     if rc == 0:
-        print(f"\nwrote {flame}")
-    else:
-        # Attaching usually needs root, especially on macOS; preserve PATH/venv.
+        print(f"\nwrote {artifact}")
+        if tool == "samply":
+            print(f"  view it: samply load {artifact}")
+        elif tool == "xctrace":
+            print(f"  open it: open {artifact}")
+    elif tool == "py-spy":
+        # py-spy attaches via the OS process-inspection API, which usually needs
+        # root (especially on macOS); preserve PATH/venv so it finds the interpreter.
         print(f"\npy-spy exited {rc}. Attaching often needs root — retry under sudo:")
-        print(f"  sudo --preserve-env=PATH,VIRTUAL_ENV {' '.join(cmd)}")
+        print(f"  sudo --preserve-env=PATH,VIRTUAL_ENV {shlex.join(cmd)}")
+    else:
+        # samply/xctrace launch the target themselves and need no elevation.
+        print(f"\n{tool} exited {rc}. Re-run with an extra --instrument-arg to diagnose.")
     return rc
 
 
@@ -332,10 +376,23 @@ def main() -> int:
     )
     parser.add_argument(
         "--instrument",
-        action="store_true",
-        help="Profile ONE workload under py-spy --native: a flamegraph (Python + Rust) "
-        "next to the result. Needs py-spy + a `--frame-pointers` build; often needs sudo. "
-        "See docs/dev/testing.md.",
+        nargs="?",
+        const=DEFAULT_INSTRUMENT,
+        default=None,
+        choices=INSTRUMENTERS,
+        help="Profile ONE workload under a sampling profiler, writing its artifact next "
+        "to the result. Bare --instrument uses py-spy (Python+Rust flamegraph on Linux; "
+        "Python-only on macOS). --instrument=samply / =xctrace give deeper Rust detail "
+        "with opaque Python frames (xctrace is macOS-only). Needs the tool on PATH + a "
+        "`--frame-pointers` build; py-spy attach often needs sudo. See docs/dev/testing.md.",
+    )
+    parser.add_argument(
+        "--instrument-arg",
+        action="append",
+        default=[],
+        metavar="ARG",
+        help="Extra arg passed verbatim to the --instrument tool (repeatable; one token "
+        "each, so a valued flag is two: --instrument-arg=--rate --instrument-arg=2000).",
     )
     args = parser.parse_args()
 
@@ -345,12 +402,16 @@ def main() -> int:
     if unknown:
         parser.error(f"unknown workload(s) {unknown}; choices: {sorted(known)}")
 
+    if args.instrument_arg and not args.instrument:
+        parser.error("--instrument-arg needs --instrument (no tool to pass it to)")
+
     profile_path = _resolve_profile_path(args, parser)
 
-    # The profiling run re-execs the inner run under py-spy (which carries no
-    # --instrument); the inner run lands here without re-entering this branch.
+    # The profiling run re-execs the inner run under the selected profiler (which
+    # carries no --instrument); the inner run lands here without re-entering this
+    # branch (the shared run dir in RUN_DIR_ENV marks it).
     if args.instrument and not os.environ.get(RUN_DIR_ENV):
-        return _profile_under_pyspy(args, profile_path, names, parser)
+        return _profile_under_instrumenter(args, profile_path, names, parser)
 
     import shrike_native
 

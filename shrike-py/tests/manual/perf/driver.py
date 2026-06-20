@@ -210,7 +210,7 @@ async def time_iterations(
     ``settle`` is given), and the last iteration's item count. The warmup samples
     are kept here and discarded by :func:`~tests.manual.perf.stats.summarize`, so
     the raw run is fully recorded. Under ``run.py --instrument`` the whole run
-    executes inside a py-spy sampler, so this loop is where the flamegraph's
+    executes inside a sampling profiler, so this loop is where the profile's
     samples land.
 
     ``prepare(i)``, if given, runs UNTIMED before each iteration's ``run_one`` —

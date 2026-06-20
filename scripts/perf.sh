@@ -14,9 +14,9 @@
 #     (--synthetic); a lean build refuses `runtime: synthetic` at resolution.
 #   - The REAL profile (end-to-end) needs the onnx/CLIP models; they are fetched
 #     into the shared model cache ($SHRIKE_TEST_MODEL_DIR / ~/.cache/shrike-dev).
-#   - PROFILING a workload (--instrument) additionally needs py-spy
-#     (`pip install py-spy`) and a `--frame-pointers` build; usually sudo too.
-#     See docs/dev/testing.md ("Profiling a run").
+#   - PROFILING a workload (--instrument[=py-spy|samply|xctrace]) additionally
+#     needs that tool on PATH and a `--frame-pointers` build; py-spy attach usually
+#     needs sudo. See docs/dev/testing.md ("Profiling a run").
 #
 # Off the per-PR critical path; never run in CI. Results land under
 # .cache/perf/runs/ (gitignored).

@@ -133,10 +133,11 @@ built-in `--profile`.
 ### Profiling a run
 
 To turn "this workflow is slow" into "this line is slow", add `--instrument` to
-profile a **single** workload under [py-spy](https://github.com/benfred/py-spy)
-`--native` — the one profiler that merges the Python harness and the Rust kernel
-into a single flamegraph (a hot frame reads `run.py → search_notes →
-kernel.search → usearch…` across the boundary):
+profile a **single** workload under a sampling profiler. The default is
+[py-spy](https://github.com/benfred/py-spy) `--native` — the one profiler that
+merges the Python harness and the Rust kernel into a single flamegraph (a hot
+frame reads `run.py → search_notes → kernel.search → usearch…` across the
+boundary):
 
 ```bash
 pip install py-spy                                  # a manual-lane dev tool
@@ -144,20 +145,42 @@ scripts/build-native.sh --release --synthetic --frame-pointers
 sudo scripts/perf.sh --profile stub --size 5000 --variant text --workloads search-batch --instrument
 ```
 
+`--instrument` takes an optional **tool**, with `--instrument-arg` to pass options
+through to it (repeatable; one token each):
+
+| `--instrument[=tool]` | Tool | What you get | Platform |
+|-----------------------|------|--------------|----------|
+| `--instrument` (or `=py-spy`) | py-spy | `flame-<workload>.svg` — **merged** Python + Rust flamegraph | Linux/Windows (native); macOS Python-only |
+| `--instrument=samply` | [samply](https://github.com/mstange/samply) | `profile-<workload>.json` — deep Rust detail, opaque Python frames | Linux, macOS-arm64 |
+| `--instrument=xctrace` | Apple Instruments | `profile-<workload>.trace` — deep Rust detail, opaque Python frames | macOS only |
+
+```bash
+# macOS: native Rust detail (Python frames are opaque), no sudo needed
+scripts/perf.sh --profile stub --size 5000 --workloads search-batch --instrument=samply
+scripts/perf.sh --profile stub --size 5000 --workloads search-batch --instrument=xctrace
+samply load .cache/perf/runs/<run>/profile-search-batch.json   # opens the Firefox-profiler UI
+open   .cache/perf/runs/<run>/profile-search-batch.trace        # opens Instruments.app
+
+# tune the tool: e.g. samply at 4 kHz
+scripts/perf.sh ... --instrument=samply --instrument-arg=--rate --instrument-arg=4000
+```
+
 - **One workload per instrumented run.** `--instrument` profiles a single
-  `--workloads` entry (it errors on a list) and writes `flame-<workload>.svg` next
-  to that run's `result.json` under `.cache/perf/runs/`.
+  `--workloads` entry (it errors on a list) and writes its artifact next to that
+  run's `result.json` under `.cache/perf/runs/`.
 - **Build with `--frame-pointers`.** An optimized build drops frame pointers, which
   degrades native unwinding; the flag forces them across the Rust crates. Keep it
   OUT of a clean-timing build — a reserved register would skew the distribution, so
   it's a separate profiling build.
-- **`sudo`.** Attaching to a process usually needs root (especially on macOS).
-  `--instrument` re-execs the run under py-spy; run the whole thing under `sudo`
-  (preserve `PATH`/`VIRTUAL_ENV` so it finds the venv interpreter).
-- **Rust-only detail:** [samply](https://github.com/mstange/samply) gives deeper
-  native frames (pleasant on macOS-arm64) but renders Python as opaque interpreter
-  frames — reach for it when the hotspot is known-Rust. The cross-boundary view is
-  py-spy's.
+- **The merged view is Linux's.** py-spy's `--native` unwinding is Linux/Windows
+  only; on macOS the flag is dropped and the flamegraph is Python-only (the kernel
+  shows as opaque native leaves). For the cross-boundary Python+Rust view on a Mac,
+  run py-spy `--native` inside a Linux container; for Rust hotspots locally, reach
+  for `--instrument=samply` / `=xctrace`.
+- **`sudo` is py-spy's.** py-spy attaches via the OS process-inspection API, which
+  usually needs root (especially on macOS); run the whole thing under `sudo`
+  (preserve `PATH`/`VIRTUAL_ENV` so it finds the venv interpreter). samply and
+  xctrace launch the target themselves and need no elevation.
 
 Numeric per-span stage timings (parse → write → derive → embed → index, from the
 kernel's `tracing` spans) are the observability work (#800); the flamegraph already

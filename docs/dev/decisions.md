@@ -697,27 +697,40 @@ Three deliberate choices:
   artifact, the diff) are unit-tested on the per-PR lane, since that logic is where a silent
   measurement bug hides.
 
-### Hotspot profiling uses py-spy `--native` for a cross-boundary flamegraph (#866)
+### Hotspot profiling: a pluggable `--instrument=<tool>` seam, py-spy `--native` the default
 
 Distributions say *which workflow* is slow; attribution needs *which line*. `run.py
---instrument` re-execs the run under **py-spy `--native`**, the only profiler that merges
-Python-level frames **and** native Rust frames into one flamegraph — so a hotspot is
-attributable whether it lives in the harness glue or the kernel (`run.py → search_notes →
-kernel.search → usearch…` in a single view). The cross-boundary view is the whole point: the
-kernel/harness split is exactly where "is this slow in Rust or Python?" gets asked, so the
-profiler has to see both sides. The alternatives each cover one:
+--instrument[=<tool>]` re-execs the run under a sampling profiler. The default is **py-spy
+`--native`**, the only profiler that merges Python-level frames **and** native Rust frames into
+one flamegraph — so a hotspot is attributable whether it lives in the harness glue or the kernel
+(`run.py → search_notes → kernel.search → usearch…` in a single view). The cross-boundary view
+is the whole point: the kernel/harness split is exactly where "is this slow in Rust or Python?"
+gets asked, so the profiler has to see both sides.
 
-- **samply** — excellent native detail (pleasant on macOS-arm64), but renders the Python side
-  as opaque CPython interpreter C frames, so it can't separate glue cost from kernel cost.
-  Kept as a documented complement for deep Rust-only work.
-- **austin / cProfile / viztracer** — Python-only; blind to the kernel.
-- **cargo-flamegraph / perf / dtrace** — native-only; blind to the Python frames.
+But py-spy's native unwinding is **Linux/Windows-only** — on macOS `--native` is rejected
+outright, not a permissions issue `sudo` can lift. Rather than dead-end the Mac dev there, the
+seam is a small registry (`instrument.py`) selected by `--instrument=<tool>`, with
+`--instrument-arg` passing options through to the chosen tool. py-spy stays the default and
+drops `--native` on macOS (Python-only flamegraph); the two native-detail tools are first-class
+fallbacks for Rust hotspots:
+
+- **samply** (`--instrument=samply`) — excellent native detail (pleasant on macOS-arm64), but
+  renders the Python side as opaque CPython interpreter C frames, so it can't separate glue cost
+  from kernel cost. Writes a Firefox-profiler JSON.
+- **xctrace** (`--instrument=xctrace`) — Apple Instruments' Time Profiler, macOS only; same
+  native-detail / opaque-Python tradeoff as samply. Writes a `.trace` bundle.
+- **austin / cProfile / viztracer** — Python-only; blind to the kernel. Not wired.
+- **cargo-flamegraph / perf / dtrace** — native-only; blind to the Python frames. Not wired.
+
+So the merged Python+Rust view remains py-spy's, and on a Mac it wants a Linux container; samply
+and xctrace cover local Rust-only attribution without one.
 
 Two consequences. An optimized build drops frame pointers, which degrades native unwinding, so
 the profiling build forces them across the Rust crates (`-Cforce-frame-pointers=yes`, opt-in
 via `build-native.sh --frame-pointers`) — never in a clean-timing build, where a reserved
-register would skew the distribution. And attaching to a process usually needs root, so this is
-a manual-lane tool, never CI.
+register would skew the distribution. And py-spy attaches via the OS process-inspection API,
+which usually needs root, so this is a manual-lane tool, never CI (samply/xctrace launch the
+target themselves and need no elevation).
 
 Numeric per-span durations — capturing the kernel's existing `tracing` spans through a real
 subscriber and a cross-FFI `traceparent` for a parse→write→derive→embed→index table — are
