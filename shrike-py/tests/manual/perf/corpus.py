@@ -46,7 +46,7 @@ from tests.manual.perf import wordlist  # noqa: E402
 # Bump when the generation logic changes in a way that alters the produced bytes;
 # it folds into the cache key so a stale corpus is rebuilt rather than reused.
 # (The active vocabulary's fingerprint also folds into the key — see CorpusSpec.key.)
-GENERATOR_VERSION = 5
+GENERATOR_VERSION = 6
 
 VARIANTS = ("text", "text+image")
 
@@ -165,46 +165,203 @@ def vocab() -> list[str]:
     return _VOCAB
 
 
-# Words are drawn with a Zipfian frequency, not uniformly: real text repeats a
-# small head of terms heavily with a long rare tail, so a uniform draw over a
-# huge wordlist (≈no repetition) is as unrepresentative of FTS5 behaviour as the
-# old tiny vocabulary (≈total overlap) was. The wordlist carries no frequency
-# data, so a fixed seeded shuffle assigns the frequency ranking — the head is an
-# arbitrary but representative cross-section of real words (so its trigrams are
-# real-English-shaped), and only the SHAPE of the distribution is synthetic.
+# Words are drawn Zipfian and PER TOPIC, not from one global distribution. A real
+# collection is a mixture of decks, each about its own subject with its own
+# vocabulary, and within a deck a small head of domain terms recurs heavily with a
+# long rare tail. A single global distribution (or a uniform draw over the whole
+# wordlist) is unrepresentative of FTS5 behaviour — it spreads every term across
+# the entire collection. So the corpus is partitioned into ~`notes // _DECK_SIZE`
+# topics (≈ one deck of _DECK_SIZE cards each), and each topic draws Zipfian from
+# its OWN sub-vocabulary sampled from the wordlist: a term then lives in ~one deck,
+# so a query for it matches ~one deck's worth of notes, not a thin global spread.
+# The wordlist carries no frequency data, so per-topic sampling + Zipf weighting
+# synthesizes only the SHAPE; the words (hence trigrams) stay real-English.
+_DECK_SIZE = 500  # cards per deck/topic — a realistic deck size sets the topic count
+_TOPIC_VOCAB_WORDS = 4000  # distinct terms a single deck's domain draws from
 _ZIPF_EXPONENT = 1.07  # ~natural-language word-frequency exponent
-_ZIPF_SHUFFLE_SEED = 0x21F
-_ZIPF_STATE: tuple[list[str], list[float]] | None = None
+_TOPIC_SEED = 0x70D1C
+_TOPIC_CACHE: dict[int, tuple[list[str], list[float]]] = {}
+
+# Fraction of words drawn from the shared common set rather than the deck's domain.
+# Real prose is ~half function words; flashcards are terser and content-denser, so
+# domain terms dominate here — but common words still carry the common English
+# trigrams that recur across every deck. An explicit share, rather than letting
+# Zipf head-position decide it (105 common words at the head swamped the domain at
+# ~66% of tokens), keeps domain the majority while preserving cross-deck overlap.
+_COMMON_SHARE = 0.4
+
+# Common English function words (≥3 chars, so the trigram tokenizer indexes them),
+# shared by EVERY deck. They are the most frequent words in any real text, and
+# their trigrams ("the", "and", "tha", "ing", "ion", "hat", …) are the common
+# English trigrams — so a fuzzy query carrying them matches broadly, while domain
+# terms stay deck-local. Roughly frequency-ordered (Zipf-weighted among themselves).
+_COMMON_WORDS = [
+    "the",
+    "and",
+    "for",
+    "are",
+    "but",
+    "not",
+    "you",
+    "all",
+    "any",
+    "can",
+    "has",
+    "had",
+    "her",
+    "was",
+    "one",
+    "our",
+    "out",
+    "day",
+    "him",
+    "his",
+    "how",
+    "man",
+    "new",
+    "now",
+    "old",
+    "see",
+    "two",
+    "who",
+    "did",
+    "its",
+    "let",
+    "put",
+    "say",
+    "she",
+    "too",
+    "use",
+    "way",
+    "that",
+    "this",
+    "with",
+    "have",
+    "from",
+    "they",
+    "what",
+    "when",
+    "your",
+    "will",
+    "said",
+    "each",
+    "which",
+    "their",
+    "would",
+    "there",
+    "about",
+    "other",
+    "were",
+    "been",
+    "than",
+    "them",
+    "then",
+    "some",
+    "into",
+    "only",
+    "over",
+    "also",
+    "back",
+    "after",
+    "first",
+    "well",
+    "year",
+    "work",
+    "such",
+    "make",
+    "even",
+    "most",
+    "give",
+    "very",
+    "just",
+    "much",
+    "like",
+    "through",
+    "between",
+    "before",
+    "because",
+    "those",
+    "these",
+    "where",
+    "while",
+    "being",
+    "under",
+    "never",
+    "again",
+    "still",
+    "every",
+    "great",
+    "might",
+    "against",
+    "during",
+    "without",
+    "another",
+    "however",
+    "people",
+    "should",
+    "could",
+    "around",
+]
+_COMMON_SET = frozenset(_COMMON_WORDS)
+# Cumulative Zipf weights over the common words themselves ("the" ≫ "around"),
+# computed once; the list above is roughly frequency-ordered.
+_COMMON_CUM = list(
+    itertools.accumulate(1.0 / (r**_ZIPF_EXPONENT) for r in range(1, len(_COMMON_WORDS) + 1))
+)
 
 
-def _zipf_state() -> tuple[list[str], list[float]]:
-    """The frequency-ranked vocabulary and its cumulative Zipf weights, computed
-    once. Ranking is a deterministic shuffle (the wordlist is alphabetical, which
-    would otherwise make the 'a…' words the frequent ones)."""
-    global _ZIPF_STATE
-    if _ZIPF_STATE is None:
-        ranked = list(vocab())
-        random.Random(_ZIPF_SHUFFLE_SEED).shuffle(ranked)
-        cum = list(
-            itertools.accumulate(1.0 / (r**_ZIPF_EXPONENT) for r in range(1, len(ranked) + 1))
+def n_topics(corpus_size: int) -> int:
+    """The number of distinct topic vocabularies a corpus of ``corpus_size`` notes
+    is built from — one per ~`_DECK_SIZE` notes (a realistic deck), at least one."""
+    return max(1, corpus_size // _DECK_SIZE)
+
+
+def _topic_domain(topic: int) -> tuple[list[str], list[float]]:
+    """A deck's domain sub-vocabulary (sampled from the wordlist, seeded by
+    ``topic``) and its cumulative Zipf weights, memoized. Common words are excluded
+    so the two distributions don't overlap; different topics get near-disjoint
+    samples (4k of ~359k), so decks barely share domain terms."""
+    state = _TOPIC_CACHE.get(topic)
+    if state is None:
+        words = vocab()
+        sample = random.Random(_TOPIC_SEED ^ topic).sample(
+            words, min(_TOPIC_VOCAB_WORDS, len(words))
         )
-        _ZIPF_STATE = (ranked, cum)
-    return _ZIPF_STATE
+        domain = [w for w in sample if w not in _COMMON_SET]
+        cum = list(
+            itertools.accumulate(1.0 / (r**_ZIPF_EXPONENT) for r in range(1, len(domain) + 1))
+        )
+        state = (domain, cum)
+        _TOPIC_CACHE[topic] = state
+    return state
 
 
-def choose(rng: random.Random, k: int) -> list[str]:
-    """``k`` words drawn Zipfian (with replacement) from :func:`vocab`. Shared by
-    corpus generation and the query/upsert workloads so both see the same
-    head-heavy term distribution."""
-    ranked, cum = _zipf_state()
-    return rng.choices(ranked, cum_weights=cum, k=k)
+def choose(rng: random.Random, k: int, topic: int = 0, *, ensure_domain: bool = False) -> list[str]:
+    """``k`` words for ``topic``: each is, with probability :data:`_COMMON_SHARE`, a
+    shared common word (Zipfian — its trigrams recur across every deck), else one
+    of the deck's domain terms (Zipfian, deck-local). So a query carrying a common
+    trigram matches broadly while a domain term matches ~one deck.
+
+    ``ensure_domain`` (generation only) guarantees at least one domain word, so no
+    note ends up all function words — every note carries searchable deck content.
+    Queries leave it off (a real query may be all-common)."""
+    domain, dom_cum = _topic_domain(topic)
+    out = [
+        rng.choices(_COMMON_WORDS, cum_weights=_COMMON_CUM, k=1)[0]
+        if rng.random() < _COMMON_SHARE
+        else rng.choices(domain, cum_weights=dom_cum, k=1)[0]
+        for _ in range(k)
+    ]
+    if ensure_domain and k > 0 and domain and all(w in _COMMON_SET for w in out):
+        out[rng.randrange(k)] = rng.choices(domain, cum_weights=dom_cum, k=1)[0]
+    return out
 
 
 def _word_count(rng: random.Random) -> int:
     """A field/sentence word count: a normal draw centred at 15, clamped to
-    [3, 30] — middle-weighted and longer than a flat short range, so the text
+    [5, 30] — middle-weighted and longer than a flat short range, so the text
     reads like real study notes and carries enough trigrams to be representative."""
-    return min(30, max(3, round(rng.gauss(15, 5))))
+    return min(30, max(5, round(rng.gauss(15, 5))))
 
 
 # A few HTML wrappers sprinkled into back fields so the stripper does real work
@@ -257,13 +414,13 @@ def _note_rng(spec: CorpusSpec, index: int) -> random.Random:
     return random.Random((spec.seed << 21) ^ (index * 0x9E3779B1) ^ GENERATOR_VERSION)
 
 
-def _sentence(rng: random.Random, n_words: int) -> str:
-    words = choose(rng, n_words)
+def _sentence(rng: random.Random, n_words: int, topic: int) -> str:
+    words = choose(rng, n_words, topic, ensure_domain=True)
     return words[0].capitalize() + " " + " ".join(words[1:]) + "."
 
 
-def _back_text(rng: random.Random) -> str:
-    parts = [_sentence(rng, _word_count(rng)) for _ in range(rng.randint(1, 4))]
+def _back_text(rng: random.Random, topic: int) -> str:
+    parts = [_sentence(rng, _word_count(rng), topic) for _ in range(rng.randint(1, 4))]
     # Wrap a fraction of sentences in HTML so the field exercises the stripper.
     out = []
     for p in parts:
@@ -275,7 +432,7 @@ def _tags(rng: random.Random) -> list[str]:
     return rng.sample(vocab(), k=rng.randint(0, 3))
 
 
-def _make_image(rng: random.Random, size: int = 96) -> bytes:
+def _make_image(rng: random.Random, topic: int, size: int = 96) -> bytes:
     """A small procedurally-generated PNG with per-note diversity. Over a random
     background, an image is EITHER a handful of random shapes OR a single rendered
     word — real cards carry both diagrams and text, so mixing the two keeps the
@@ -294,8 +451,8 @@ def _make_image(rng: random.Random, size: int = 96) -> bytes:
     img = Image.new("RGB", (size, size), bg)
     draw = ImageDraw.Draw(img)
     if rng.random() < 0.4:
-        # A single search-query term, high-contrast on the background.
-        word = choose(rng, 1)[0]
+        # A single search-query term (a domain word), high-contrast on the background.
+        word = choose(rng, 1, topic, ensure_domain=True)[0]
         ink = (0, 0, 0) if sum(bg) > 384 else (255, 255, 255)
         font = ImageFont.load_default(size=rng.randint(14, 24))
         draw.text((rng.randint(2, size // 3), rng.randint(2, size // 2)), word, fill=ink, font=font)
@@ -317,26 +474,32 @@ def _make_image(rng: random.Random, size: int = 96) -> bytes:
 def _generate_notes(spec: CorpusSpec, media_dir: Path) -> list[dict]:
     """Build the note dicts (and, for the image variant, write each note's image
     into ``media_dir`` and reference it in a field)."""
-    n_decks = min(50, max(1, spec.notes // 1000))
+    decks = n_topics(spec.notes)
     notes: list[dict] = []
     for i in range(spec.notes):
         rng = _note_rng(spec, i)
-        deck = f"Perf::Deck {i % n_decks:02d}"
+        # The note's deck IS its topic: each deck draws from its own sub-vocabulary
+        # (a domain), so terms cluster by deck like a real collection.
+        topic = i % decks
+        deck = f"Perf::Deck {topic:03d}"
         tags = _tags(rng)
         # Every fifth note is a cloze; the rest are Basic — two notetypes so the
         # write path resolves more than one field layout.
         if i % 5 == 4:
-            word = choose(rng, 1)[0]
-            text = f"{_sentence(rng, _word_count(rng))} The key term is {{{{c1::{word}}}}}."
-            fields = {"Text": text, "Back Extra": _back_text(rng)}
+            word = choose(rng, 1, topic, ensure_domain=True)[0]
+            text = f"{_sentence(rng, _word_count(rng), topic)} The key term is {{{{c1::{word}}}}}."
+            fields = {"Text": text, "Back Extra": _back_text(rng, topic)}
             note_type, image_field = "Cloze", "Back Extra"
         else:
-            fields = {"Front": _sentence(rng, _word_count(rng)), "Back": _back_text(rng)}
+            fields = {
+                "Front": _sentence(rng, _word_count(rng), topic),
+                "Back": _back_text(rng, topic),
+            }
             note_type, image_field = "Basic", "Back"
         # Only ~1 note in 10 carries an image — real collections aren't all-media.
         if spec.variant == "text+image" and i % 10 == 0:
             name = f"perf_{spec.seed}_{i}.png"
-            (media_dir / name).write_bytes(_make_image(rng))
+            (media_dir / name).write_bytes(_make_image(rng, topic))
             fields[image_field] += f'<img src="{name}">'
         notes.append({"deck": deck, "note_type": note_type, "tags": tags, "fields": fields})
     return notes

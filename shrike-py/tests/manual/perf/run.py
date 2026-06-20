@@ -172,7 +172,7 @@ async def _run_workloads(
     if registry:
         # Read-only workloads first so the single shared boot stays representative.
         workloads = sorted(
-            (build_workload(n, ops=ops) for n in registry),
+            (build_workload(n, ops=ops, corpus_size=corpus.spec.notes) for n in registry),
             key=lambda w: getattr(w, "mutates", False),
         )
         # An isolated working copy so a mutating workload never pollutes the cached

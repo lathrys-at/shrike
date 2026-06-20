@@ -45,15 +45,16 @@ from __future__ import annotations
 import random
 
 from shrike.schemas import NoteInput
-from tests.manual.perf.corpus import choose
+from tests.manual.perf.corpus import choose, n_topics
 from tests.manual.perf.driver import Booted, Workload
 
 
-def _query(rng: random.Random) -> str:
-    """A short synthetic query: 1-4 terms drawn Zipfian from the same vocabulary
-    the corpus is generated from (so queries hit real note text, with the same
-    head-heavy term distribution — common terms hit many notes, rare ones few)."""
-    return " ".join(choose(rng, rng.randint(1, 4)))
+def _query(rng: random.Random, topics: int) -> str:
+    """A short synthetic query: 1-4 terms drawn from one random deck's vocabulary,
+    so it hits that deck (common terms in the draw still match broadly across decks,
+    domain terms match ~that one) — the realistic mix a real search produces."""
+    topic = rng.randrange(topics)
+    return " ".join(choose(rng, rng.randint(1, 4), topic))
 
 
 #: N — the operations each data-plane workload performs per timed iteration: the
@@ -78,16 +79,19 @@ class _SearchWorkload:
 
     mutates = False
 
-    def __init__(self, *, count: int = DEFAULT_OPS, limit: int = 20) -> None:
+    def __init__(self, *, count: int = DEFAULT_OPS, limit: int = 20, corpus_size: int = 0) -> None:
         self._count = count
         self._limit = limit
+        self._topics = n_topics(corpus_size)
         self._batches: list[list[str]] = []
 
     async def setup(self, booted: Booted, iterations: int) -> None:
         # Precompute every iteration's queries (untimed) so the string formatting
         # never lands in the timed region.
         rng = random.Random(0x5EED)
-        self._batches = [[_query(rng) for _ in range(self._count)] for _ in range(iterations)]
+        self._batches = [
+            [_query(rng, self._topics) for _ in range(self._count)] for _ in range(iterations)
+        ]
 
     async def _search(self, booted: Booted, queries: list[str]) -> None:
         await booted.call(
@@ -127,7 +131,7 @@ class RebuildWorkload:
     name = "rebuild"
     mutates = False
 
-    def __init__(self, *, count: int = DEFAULT_OPS) -> None:
+    def __init__(self, *, count: int = DEFAULT_OPS, corpus_size: int = 0) -> None:
         # A rebuild is one O(collection) pass; the per-op N (``--ops``) doesn't
         # apply. The uniform ``count`` keyword lets the runner build every workload
         # identically — here it's accepted and discarded.
@@ -168,7 +172,7 @@ class _UpsertWorkload:
 
     mutates = True
 
-    def __init__(self, *, count: int = DEFAULT_OPS) -> None:
+    def __init__(self, *, count: int = DEFAULT_OPS, corpus_size: int = 0) -> None:
         self._count = count
         self._batches: list[list[NoteInput]] = []
 
@@ -227,7 +231,7 @@ class _DeleteWorkload:
 
     mutates = True
 
-    def __init__(self, *, count: int = DEFAULT_OPS) -> None:
+    def __init__(self, *, count: int = DEFAULT_OPS, corpus_size: int = 0) -> None:
         self._count = count
         self._ids: list[int] = []
 
@@ -308,7 +312,7 @@ class ReconcileWorkload:
     name = "reconcile"
     mutates = True
 
-    def __init__(self, *, count: int = DEFAULT_OPS) -> None:
+    def __init__(self, *, count: int = DEFAULT_OPS, corpus_size: int = 0) -> None:
         self._count = count
         self._batches: list[list[dict]] = []
 
@@ -349,9 +353,9 @@ WORKLOADS = {
 }
 
 
-def build_workload(name: str, *, ops: int = DEFAULT_OPS) -> Workload:
+def build_workload(name: str, *, ops: int = DEFAULT_OPS, corpus_size: int = 0) -> Workload:
     """Instantiate workload ``name`` with ``ops`` operations per iteration — the N
-    the runner scales via ``--ops``. Every workload takes the same ``count``
-    keyword; ``rebuild`` is the exception that ignores it (one O(collection) pass,
-    no per-op N)."""
-    return WORKLOADS[name](count=ops)
+    the runner scales via ``--ops``. ``corpus_size`` lets the search workload size
+    its query topics to the corpus (one deck per ~500 notes); the other workloads
+    accept and ignore it (uniform construction, like ``count`` for ``rebuild``)."""
+    return WORKLOADS[name](count=ops, corpus_size=corpus_size)
