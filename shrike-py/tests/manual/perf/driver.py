@@ -13,7 +13,9 @@ attach-a-profiler-to-a-run seam, #866); today it is the clean-timing path only.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import shutil
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -221,6 +223,77 @@ async def measure(
         workload=workload.name,
         distribution=summarize(samples, warmup=warmup),
         items=items,
+    )
+
+
+#: The cold-ingest scenario name. Not in the ``WORKLOADS`` registry — it owns its
+#: boot lifecycle (see :func:`measure_ingest`), so the runner dispatches it apart.
+INGEST = "ingest"
+
+
+async def measure_ingest(
+    profile_path: Path,
+    corpus: Any,
+    scratch: Path,
+    *,
+    repeats: int,
+    warmup: int,
+    with_media: bool = True,
+) -> WorkloadResult:
+    """The cold-ingest scenario: import a synthetic package into a FRESH empty
+    collection, end-to-end (parse -> write -> derive -> embed -> index, all driven
+    by ``import_package`` itself — no follow-up settle).
+
+    It can't run as a ``Workload`` against a shared boot: each sample needs its own
+    empty collection, and the driven runtime holds ONE kernel at a time. So it owns
+    its boot/close lifecycle here — export the corpus to a package once, then per
+    iteration boot a fresh empty harness, import, and close before the next opens.
+    Only the ``import_package`` call is timed; the per-iteration cold boot/close sit
+    outside the timer (opening an empty collection is setup, not ingest).
+
+    ``corpus`` is a built corpus (needs ``.anki2_path``)."""
+    scratch.mkdir(parents=True, exist_ok=True)
+    pkg = scratch / "corpus.apkg"
+
+    # Export the corpus to a package — one kernel: boot over the corpus, export, close.
+    # Boot over an ISOLATED copy, never the cached corpus: opening a collection can
+    # write back to the .anki2, which would corrupt the cached corpus for later runs.
+    src_dir = scratch / "export-src"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    src_anki2 = src_dir / "collection.anki2"
+    shutil.copy2(corpus.anki2_path, src_anki2)
+    if Path(corpus.media_dir).is_dir():
+        # Read-only reuse: export only reads media, so a symlink is enough.
+        link = src_dir / "collection.media"
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(corpus.media_dir)
+    exporter = await boot_from_profile(profile_path, src_anki2, scratch / "export-cache")
+    try:
+        await exporter.harness.kernel.export_package(
+            str(pkg), "apkg", "whole", with_media=with_media
+        )
+    finally:
+        await exporter.close()
+
+    samples: list[float] = []
+    items = 0
+    for i in range(warmup + repeats):
+        iter_dir = scratch / f"iter-{i}"
+        booted = await boot_from_profile(
+            profile_path, iter_dir / "collection.anki2", iter_dir / "cache"
+        )
+        try:
+            start = time.perf_counter()
+            summary_json, _ = await booted.harness.kernel.import_package(
+                str(pkg), "if_newer", "if_newer", False, False
+            )
+            samples.append((time.perf_counter() - start) * 1000.0)
+            items = json.loads(summary_json)["found_notes"]
+        finally:
+            await booted.close()
+    return WorkloadResult(
+        workload=INGEST, distribution=summarize(samples, warmup=warmup), items=items
     )
 
 
