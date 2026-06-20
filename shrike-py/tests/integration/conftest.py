@@ -141,11 +141,11 @@ _BAZEL_MODELS: dict[str, list[str]] = {
     "model_roberta_tokenizer/file/tokenizer.json": [
         f"{DISTILROBERTA_MODEL_DIR_NAME}/tokenizer.json"
     ],
-    "model_clip_text_onnx/file/text_model_quantized.onnx": [
-        f"{CLIP_MODEL_DIR_NAME}/text_model_quantized.onnx",
+    "model_clip_text_onnx/file/text_model_q4.onnx": [
+        f"{CLIP_MODEL_DIR_NAME}/text_model_q4.onnx",
     ],
-    "model_clip_vision_onnx/file/vision_model_quantized.onnx": [
-        f"{CLIP_MODEL_DIR_NAME}/vision_model_quantized.onnx",
+    "model_clip_vision_onnx/file/vision_model_q4.onnx": [
+        f"{CLIP_MODEL_DIR_NAME}/vision_model_q4.onnx",
     ],
     "model_clip_tokenizer/file/tokenizer.json": [f"{CLIP_MODEL_DIR_NAME}/tokenizer.json"],
     "model_clip_preprocessor/file/preprocessor_config.json": [

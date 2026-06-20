@@ -1,7 +1,7 @@
 """The CLIP backend against a real small CLIP export (image<->text shared space).
 
 Mocked mechanics live in ``tests/unit/test_embedding_clip.py``; here we run ``ClipBackend``
-against the actual ``Xenova/clip-vit-base-patch32`` ONNX graphs so the preprocessing, I/O, and
+against the actual ``Xenova/clip-vit-base-patch32`` (q4) ONNX graphs so the preprocessing, I/O, and
 the shared-space property are exercised for real. The semantic assertion uses solid-colour
 images (deterministic, no network beyond the cached model): a colour image lands nearer its own
 colour word than unrelated concepts, proving a text query retrieves by image content.
@@ -84,8 +84,8 @@ class TestClipModel:
         # The encoders actually run (distinct inputs → distinct vectors).
         assert not np.allclose(tvecs[0], tvecs[1])
 
-    def test_int8_clip_is_serial(self, be: ClipBackend) -> None:
-        # The quantized graphs are batch-variant (dynamic int8), so the probe forces serial.
+    def test_quantized_clip_is_serial(self, be: ClipBackend) -> None:
+        # The quantized graphs are batch-variant (dynamic quantization), so the probe forces serial.
         assert be._safe_batch == 1
         assert be.health()["batch"] == "serial"
 
