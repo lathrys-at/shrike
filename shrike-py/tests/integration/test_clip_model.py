@@ -338,3 +338,13 @@ class TestClipNativeSeam:
         finally:
             for name, orig in originals.items():
                 setattr(be, name, orig)
+
+
+def test_zzz_diag_dump_preprocessor_config(clip_model: Path) -> None:
+    """TEMP diagnostic (#931): surface MobileCLIP-S0's actual preprocessor_config in
+    the CI log so the real image normalization (do_normalize / image_mean / image_std)
+    is known. Removed once the correct preprocessing is pinned."""
+    import json
+
+    pp = json.loads((clip_model / "preprocessor_config.json").read_text())
+    raise AssertionError("DIAG_PREPROCESSOR_CONFIG=" + json.dumps(pp))
