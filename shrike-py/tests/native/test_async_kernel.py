@@ -336,12 +336,12 @@ class TestAsyncKernel:
 
 
 class TestCrossSpaceWiring:
-    """The PRODUCTION search path (`action_search_notes` + the host
-    `cross_space=` param) threads injected secondary-space results into the
-    fusion + runs the relative gate — proving the host plumbing at the binding
-    level, WITHOUT depending on the secondary-space WRITE fan-out. The
-    cross_space JSON here is exactly the shape `build_cross_space_json`
-    produces."""
+    """The binding-level fused-search path (`action_search_notes` + an injected
+    `cross_space=` param) threads secondary-space results into the fusion + runs
+    the relative gate — proving the cross-space plumbing in ISOLATION from the
+    secondary-space WRITE fan-out (which `kernel.search_fused` couples to, since
+    it builds cross-space in-core). The cross_space JSON here is exactly the
+    shape `build_cross_space_json` produces."""
 
     class _Planted:
         """Plants EXACT vectors per text keyword so cosines are controlled: the

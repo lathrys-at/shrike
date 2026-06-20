@@ -4,13 +4,15 @@ These run against a REAL AsyncKernel (the unit harness in conftest.py): writes
 route through the kernel's maintained ops, the index is the kernel's own engine,
 and assertions read observable state instead of facade mocks.
 
-The vector-planting scheme: the backend attached to the KERNEL embeds every
-note as [0, 1] — orthogonal to the [1, 0] every query embeds to (the view's
-backend) — so seeded notes sit at cosine 0 (below every threshold) and are
-semantically invisible until a test *plants* a scripted vector for them
-directly in the shared engine. A note's planted vector dominates its kernel
-vector (max-sim-per-note dedup), so the search clusters keep their scripted
-distances while the genuine kernel-mode path runs end to end.
+The vector-planting scheme: ONE embedder (attached to the kernel) embeds every
+text — note AND query — to a one-hot unit vector at the text's own axis, so two
+distinct strings are orthogonal (cosine 0). A seeded note is therefore
+semantically invisible to any differently-worded query (cosine 0, below the 0.5
+default threshold) until a test *plants* a scripted vector for it directly in the
+shared engine. ``_plant(query, [(id, dist)])`` overrides a note's vector with one
+at cosine ``1 - dist`` against ``query``'s embedding, so the search clusters keep
+their scripted distances while the genuine kernel-mode path — which now embeds the
+query in-core (``kernel.search_fused``) — runs end to end.
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ import json
 import math
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from mcp.server.fastmcp import FastMCP
@@ -36,27 +37,46 @@ BASIC_NOTE = {
 }
 
 
+# One embedder for notes AND queries: each distinct string maps to its own axis,
+# so two distinct strings embed to orthogonal one-hot unit vectors (cosine 0).
+# The axis map resets per test (the autouse fixture below), so the dimension
+# comfortably covers any single test's distinct strings.
+_EMBED_DIM = 256
+_axes: dict[str, int] = {}
+
+
+def _axis(text: str) -> int:
+    """A stable, collision-free axis index for ``text`` within one test."""
+    return _axes.setdefault(text, len(_axes))
+
+
+def _onehot(text: str) -> list[float]:
+    v = [0.0] * _EMBED_DIM
+    v[_axis(text) % _EMBED_DIM] = 1.0
+    return v
+
+
+@pytest.fixture(autouse=True)
+def _reset_axes():
+    _axes.clear()
+    yield
+    _axes.clear()
+
+
 class _NoteBackend:
-    """The kernel-slot backend: every note embeds to [0, 1] (cosine 0 against
-    the [1, 0] query — semantically invisible until a test plants a vector)."""
+    """The kernel's embedder: a string embeds to a one-hot unit vector at its
+    own axis, so two distinct strings are orthogonal (cosine 0) — a seeded note
+    is semantically invisible to any other-text query until a test plants a
+    scripted vector for it."""
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        return [[0.0, 1.0] for _ in texts]
+        return [_onehot(t) for t in texts]
 
     def model_fingerprint(self) -> str:
-        return "unit:notes:v1"
+        return "unit:onehot:v1"
 
     def embedding_dim(self) -> int:
-        return 2
-
-
-class _AlignedBackend(_NoteBackend):
-    """Notes embed to [1, 0] — identical to the query vector — so freshly
-    upserted notes are each other's nearest neighbours (the batch-exclusion
-    test's setup)."""
-
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        return [[1.0, 0.0] for _ in texts]
+        return _EMBED_DIM
 
 
 class _StatsView(KernelIndexView):
@@ -93,33 +113,45 @@ class _StubIndex:
         return [[] for _ in texts]
 
 
-def _unit_vec(sim: float) -> list[float]:
-    """A 2-dim unit vector at cosine ``sim`` against the [1, 0] query."""
-    s = max(min(sim, 1.0), -1.0)
-    return [s, math.sqrt(max(0.0, 1.0 - s * s))]
-
-
-def _plant(kharness: KernelHarness, items: list[tuple[int, float]], modality: str = "text") -> None:
-    """Plant vectors so the kernel's engine ranks ``items`` at exactly those distances."""
+def _plant(
+    kharness: KernelHarness,
+    query: str,
+    items: list[tuple[int, float]],
+    modality: str = "text",
+) -> None:
+    """Override each note's vector so the kernel ranks it at exactly cosine
+    ``1 - dist`` against ``query``'s embedding (a one-hot at ``query``'s axis).
+    The planted vector replaces the note's own kernel vector for ``modality``."""
+    qaxis = _axis(query)
+    alt = (qaxis + 1) % _EMBED_DIM
     keys = [nid for nid, _ in items]
-    vecs = [_unit_vec(1.0 - d) for _, d in items]
+    vecs: list[list[float]] = []
+    for _, dist in items:
+        c = max(min(1.0 - dist, 1.0), -1.0)
+        v = [0.0] * _EMBED_DIM
+        v[qaxis] = c
+        v[alt] = math.sqrt(max(0.0, 1.0 - c * c))
+        vecs.append(v)
     kharness.engine.add(modality, keys, vecs)
 
 
-@pytest.fixture()
-def qbackend():
-    """The view's query embedder: every query string embeds to [1, 0]."""
-    backend = MagicMock()
-    backend.embed_texts.side_effect = lambda texts: [[1.0, 0.0] for _ in texts]
-    return backend
+def _embed_text(kharness: KernelHarness, nid: int) -> str:
+    """The exact text the kernel embeds for an id anchor — so an id-anchored
+    search plants its neighbours against the same axis the anchor lands on."""
+
+    async def _go() -> str:
+        return (await kharness.wrapper.note_texts_for_embedding([nid]))[0]
+
+    return kharness.run(_go())
 
 
 @pytest.fixture()
-def sem_view(kharness, qbackend):
-    """A real kernel index (note backend attached, materialized) behind a
-    KernelIndexView whose query embedder is the scripted [1, 0] backend."""
+def sem_view(kharness):
+    """A real kernel index (one-hot embedder attached, materialized) behind a
+    KernelIndexView. The kernel embeds queries in-core now; the view's runtime
+    only needs a non-None backend so availability reads ``ready``."""
     kharness.attach_embedder(_NoteBackend())
-    return _StatsView(kharness.kernel, SimpleNamespace(backend=qbackend))
+    return _StatsView(kharness.kernel, SimpleNamespace(backend=object()))
 
 
 @pytest.fixture()
@@ -254,7 +286,7 @@ class TestSearchNotesFreshness:
 
 class TestSearchNotesResults:
     def test_text_query(self, kharness, mcp_sem, kbasic_note):
-        _plant(kharness, [(kbasic_note, 0.1)])
+        _plant(kharness, "math question", [(kbasic_note, 0.1)])
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["math question"]})
         assert len(result["results"]) == 1
         assert result["results"][0]["source"] == "math question"
@@ -265,14 +297,14 @@ class TestSearchNotesResults:
 
     def test_id_query(self, kharness, mcp_sem, kbasic_note):
         other = kharness.seed_note("Q", back="A")
-        _plant(kharness, [(other, 0.2)])
+        _plant(kharness, _embed_text(kharness, kbasic_note), [(other, 0.2)])
         result = kharness.call_tool(mcp_sem, "search_notes", {"ids": [kbasic_note]})
         assert len(result["results"]) == 1
         assert result["results"][0]["source"] == f"note #{kbasic_note}"
 
     def test_exclude_ids(self, kharness, mcp_sem, kbasic_note):
         other = kharness.seed_note("Q", back="A")
-        _plant(kharness, [(kbasic_note, 0.05), (other, 0.2)])
+        _plant(kharness, "test", [(kbasic_note, 0.05), (other, 0.2)])
         result = kharness.call_tool(
             mcp_sem, "search_notes", {"queries": ["test"], "exclude_ids": [kbasic_note]}
         )
@@ -280,7 +312,7 @@ class TestSearchNotesResults:
         assert all(m["id"] != kbasic_note for m in matches)
 
     def test_deck_filter(self, kharness, mcp_sem, kbasic_note):
-        _plant(kharness, [(kbasic_note, 0.1)])
+        _plant(kharness, "test", [(kbasic_note, 0.1)])
         result = kharness.call_tool(
             mcp_sem, "search_notes", {"queries": ["test"], "deck": "Nonexistent"}
         )
@@ -301,7 +333,7 @@ class TestUnifiedSearch:
 
     def test_both_score_and_substring(self, kharness, mcp_sem):
         nid = kharness.seed_note("Electron transport chain")
-        _plant(kharness, [(nid, 0.1)])  # score 0.9
+        _plant(kharness, "transport", [(nid, 0.1)])  # score 0.9
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["transport"]})
         m = result["results"][0]["matches"][0]
         assert m["score"] == 0.9
@@ -310,7 +342,7 @@ class TestUnifiedSearch:
     def test_threshold_does_not_drop_exact(self, kharness, mcp_sem):
         nid = kharness.seed_note("unique phrase here")
         # Semantic score 0.01 is below threshold → not attached; exact still includes it.
-        _plant(kharness, [(nid, 0.99)])
+        _plant(kharness, "unique phrase", [(nid, 0.99)])
         result = kharness.call_tool(
             mcp_sem, "search_notes", {"queries": ["unique phrase"], "threshold": 0.5}
         )
@@ -323,7 +355,7 @@ class TestUnifiedSearch:
         exact_nid = kharness.seed_note("alpha beta gamma")
         sem_only = kharness.seed_note("unrelated content")
         # semantic ranks the unrelated note with a high score; exact match has none
-        _plant(kharness, [(sem_only, 0.05)])  # 0.95
+        _plant(kharness, "beta gamma", [(sem_only, 0.05)])  # 0.95
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["beta gamma"]})
         ids = [x["id"] for x in result["results"][0]["matches"]]
         assert ids[0] == exact_nid  # literal hit ranks first despite no score
@@ -336,7 +368,7 @@ class TestUnifiedSearch:
         # pre-filter can't literally match it, but the field text does contain it.
         literal = kharness.seed_note("alpha *beta* gamma")
         sem_only = kharness.seed_note("unrelated content")
-        _plant(kharness, [(sem_only, 0.05), (literal, 0.20)])
+        _plant(kharness, "*beta* gamma", [(sem_only, 0.05), (literal, 0.20)])
         result = kharness.call_tool(
             mcp_sem, "search_notes", {"queries": ["*beta* gamma"], "threshold": 0.5}
         )
@@ -345,14 +377,14 @@ class TestUnifiedSearch:
         assert m[0]["substring"] is not None
 
     def test_tags_filter(self, kharness, mcp_sem, kbasic_note):
-        _plant(kharness, [(kbasic_note, 0.1)])
+        _plant(kharness, "test", [(kbasic_note, 0.1)])
         result = kharness.call_tool(
             mcp_sem, "search_notes", {"queries": ["test"], "tags": ["nonexistent-tag"]}
         )
         assert result["results"][0]["matches"] == []
 
     def test_result_includes_content(self, kharness, mcp_sem, kbasic_note):
-        _plant(kharness, [(kbasic_note, 0.1)])
+        _plant(kharness, "test", [(kbasic_note, 0.1)])
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["test"]})
         match = result["results"][0]["matches"][0]
         assert "content" in match
@@ -400,13 +432,13 @@ class TestUnifiedSearch:
         out-of-deck hit and still surface the in-deck one.
         """
         other = kharness.seed_note("O", deck="Other", back="A")
-        _plant(kharness, [(other, 0.05), (kbasic_note, 0.20)])
+        _plant(kharness, "qry", [(other, 0.05), (kbasic_note, 0.20)])
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["qry"], "deck": "Test"})
         matches = result["results"][0]["matches"]
         assert [m["id"] for m in matches] == [kbasic_note]
 
     def test_score_rounded_to_3_decimals(self, kharness, mcp_sem, kbasic_note):
-        _plant(kharness, [(kbasic_note, 0.12345)])
+        _plant(kharness, "test", [(kbasic_note, 0.12345)])
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["test"]})
         score = result["results"][0]["matches"][0]["score"]
         assert score == round(1.0 - 0.12345, 3)
@@ -417,7 +449,9 @@ class TestUnifiedSearch:
         # across the CLIP gap; flooring image hits is the activation gate's job). The surfaced
         # score is the (gap-depressed but real) image cosine.
         nid = kharness.seed_note("diagram of the krebs cycle")
-        _plant(kharness, [(nid, 0.7)], modality="image")  # 0.30 sim — below threshold, kept
+        _plant(
+            kharness, "mitochondria", [(nid, 0.7)], modality="image"
+        )  # 0.30 sim — below threshold, kept
         result = kharness.call_tool(
             mcp_sem, "search_notes", {"queries": ["mitochondria"], "threshold": 0.5}
         )
@@ -428,15 +462,15 @@ class TestUnifiedSearch:
     def test_text_modality_stays_thresholded(self, kharness, mcp_sem):
         # The text ranking keeps its threshold: a weak text-only hit with no literal match drops.
         nid = kharness.seed_note("unrelated content here")
-        _plant(kharness, [(nid, 0.9)])  # 0.10 sim — below threshold
+        _plant(kharness, "xyz", [(nid, 0.9)])  # 0.10 sim — below threshold
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["xyz"], "threshold": 0.5})
         assert result["results"][0]["matches"] == []
 
     def test_score_is_max_over_matched_modalities(self, kharness, mcp_sem):
         # A note matching in both text and image gets the *max* similarity as its surfaced score.
         nid = kharness.seed_note("alpha")
-        _plant(kharness, [(nid, 0.1)])  # 0.90 text
-        _plant(kharness, [(nid, 0.7)], modality="image")  # 0.30 image
+        _plant(kharness, "alpha query", [(nid, 0.1)])  # 0.90 text
+        _plant(kharness, "alpha query", [(nid, 0.7)], modality="image")  # 0.30 image
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["alpha query"]})
         m = result["results"][0]["matches"][0]
         assert m["score"] == 0.9  # max(0.90 text, 0.30 image)
@@ -446,7 +480,7 @@ class TestUnifiedSearch:
         # image sim of 0.30 clears it → the (image-only) note surfaces, scored by the image sim.
         nid = kharness.seed_note("krebs cycle diagram")
         sem_view.stats_override = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
-        _plant(kharness, [(nid, 0.70)], modality="image")  # sim 0.30 > 0.25
+        _plant(kharness, "mitochondria", [(nid, 0.70)], modality="image")  # sim 0.30 > 0.25
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["mitochondria"]})
         m = result["results"][0]["matches"]
         assert [x["id"] for x in m] == [nid]
@@ -457,7 +491,7 @@ class TestUnifiedSearch:
         # image-only match does not surface (no spurious image card for an off-topic query).
         nid = kharness.seed_note("krebs cycle diagram")
         sem_view.stats_override = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
-        _plant(kharness, [(nid, 0.80)], modality="image")  # sim 0.20 <= 0.25
+        _plant(kharness, "mitochondria", [(nid, 0.80)], modality="image")  # sim 0.20 <= 0.25
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["mitochondria"]})
         assert result["results"][0]["matches"] == []
 
@@ -466,8 +500,8 @@ class TestUnifiedSearch:
         # it surfaces with the text score, and the gated image sim is not folded into `score`.
         nid = kharness.seed_note("alpha")
         sem_view.stats_override = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
-        _plant(kharness, [(nid, 0.20)])  # sim 0.80 (above threshold)
-        _plant(kharness, [(nid, 0.80)], modality="image")  # sim 0.20 (gated out)
+        _plant(kharness, "alpha query", [(nid, 0.20)])  # sim 0.80 (above threshold)
+        _plant(kharness, "alpha query", [(nid, 0.80)], modality="image")  # sim 0.20 (gated out)
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["alpha query"]})
         m = result["results"][0]["matches"][0]
         assert m["id"] == nid
@@ -480,7 +514,7 @@ class TestUnifiedSearch:
         anchor = kharness.seed_note("anchor card")
         weak = kharness.seed_note("weakly related card")
         sem_view.stats_override = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
-        _plant(kharness, [(anchor, 0.65), (weak, 0.80)], modality="image")
+        _plant(kharness, "qry", [(anchor, 0.65), (weak, 0.80)], modality="image")
         result = kharness.call_tool(
             mcp_sem, "search_notes", {"queries": ["qry"], "exclude_ids": [anchor]}
         )
@@ -492,7 +526,7 @@ class TestUnifiedSearch:
         anchor = kharness.seed_note("anchor card")
         strong = kharness.seed_note("strongly matching card")
         sem_view.stats_override = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
-        _plant(kharness, [(anchor, 0.55), (strong, 0.66)], modality="image")
+        _plant(kharness, "qry", [(anchor, 0.55), (strong, 0.66)], modality="image")
         result = kharness.call_tool(
             mcp_sem, "search_notes", {"queries": ["qry"], "exclude_ids": [anchor]}
         )
@@ -509,8 +543,10 @@ class TestUnifiedSearch:
         # hang on a runaway over-fetch.
         sem_view.stats_override = {"image": {"n": 40, "mean": 0.20, "std": 0.05}}
         nids = [kharness.seed_note(f"shared subject card {i}") for i in range(6)]
-        _plant(kharness, [(n, 0.05) for n in nids])  # strong text sim (~0.95)
-        _plant(kharness, [(n, 0.30) for n in nids], modality="image")  # image sim 0.70 > floor
+        _plant(kharness, "shared subject", [(n, 0.05) for n in nids])  # strong text sim (~0.95)
+        _plant(
+            kharness, "shared subject", [(n, 0.30) for n in nids], modality="image"
+        )  # image sim 0.70 > floor
         result = kharness.call_tool(
             mcp_sem, "search_notes", {"queries": ["shared subject"], "limit": 0}
         )
@@ -528,7 +564,7 @@ class TestProvenance:
 
     def test_text_only(self, kharness, mcp_sem):
         nid = kharness.seed_note("mitochondria powerhouse")
-        _plant(kharness, [(nid, 0.2)])
+        _plant(kharness, "cellular energy", [(nid, 0.2)])
         m = self._matches(kharness, mcp_sem, "cellular energy")[0]
         assert [(p["signal"], p["rank"]) for p in m["provenance"]] == [("text", 1)]
         assert m["score"] == 0.8  # back-compat field stays, consistent with the text signal
@@ -536,7 +572,9 @@ class TestProvenance:
     def test_image_modality_facet(self, kharness, mcp_sem):
         # The semantic signal name *is* the matched-modality facet — `image` ⇒ "matched on image".
         nid = kharness.seed_note("krebs cycle diagram card")
-        _plant(kharness, [(nid, 0.7)], modality="image")  # uncalibrated → gate off → surfaces
+        _plant(
+            kharness, "mitochondria", [(nid, 0.7)], modality="image"
+        )  # uncalibrated → gate off → surfaces
         m = self._matches(kharness, mcp_sem, "mitochondria")[0]
         assert [p["signal"] for p in m["provenance"]] == ["image"]
         assert m["score"] == 0.3
@@ -550,7 +588,7 @@ class TestProvenance:
 
     def test_text_and_exact(self, kharness, mcp_sem):
         nid = kharness.seed_note("Electron transport chain")
-        _plant(kharness, [(nid, 0.1)])
+        _plant(kharness, "transport", [(nid, 0.1)])
         m = self._matches(kharness, mcp_sem, "transport")[0]
         # Both fire at rank 1 → ordered by signal name (exact < text); back-compat fields agree.
         assert {p["signal"]: p["rank"] for p in m["provenance"]} == {"text": 1, "exact": 1}
@@ -562,8 +600,8 @@ class TestProvenance:
         b = kharness.seed_note("beta card")
         nid = kharness.seed_note("gamma card")
         # nid trails a, b in text (rank 3) but leads the image ranking (rank 1).
-        _plant(kharness, [(a, 0.10), (b, 0.15), (nid, 0.20)])
-        _plant(kharness, [(nid, 0.65)], modality="image")
+        _plant(kharness, "qry", [(a, 0.10), (b, 0.15), (nid, 0.20)])
+        _plant(kharness, "qry", [(nid, 0.65)], modality="image")
         matches = self._matches(kharness, mcp_sem, "qry")
         assert all(m["provenance"] for m in matches)  # every returned match carries provenance
         prov = {m["id"]: [(p["signal"], p["rank"]) for p in m["provenance"]] for m in matches}
@@ -571,44 +609,17 @@ class TestProvenance:
         assert prov[a] == [("text", 1)]
 
 
-def _build_derived(kharness, derived) -> None:
-    """Build the host derived store from the collection's notes (what the boot path does)."""
-    rows, mod = kharness.run(
-        kharness.wrapper.run(
-            lambda c: (
-                c.derived_field_rows(c.find_notes("deck:*")),
-                c.col_mod(),
-            )
-        )
-    )
-    derived._build(rows, mod)
-
-
 class TestDerivedSearch:
-    """search_notes wired to the derived store: substring-via-store + the fuzzy signal."""
+    """search_notes over the kernel's OWN derived store: substring-via-store +
+    the fuzzy signal. The kernel maintains the store on every upsert, so
+    ``seed_note`` populates it — no host derived store is passed (search reads
+    the kernel's)."""
 
-    @pytest.fixture()
-    def derived(self, tmp_path):
-        from shrike.harness.derived import DerivedTextStore
-
-        s = DerivedTextStore(path=tmp_path / "shrike.db")
-        yield s
-        s.close()
-
-    @pytest.fixture()
-    def mcp_derived(self, kharness, sem_view, derived):
-        mcp = FastMCP("test")
-        register_tools(
-            mcp, kharness.wrapper, index=sem_view, derived=derived, kernel=kharness.kernel
-        )
-        return mcp
-
-    def test_substring_via_store_matches_find_notes(self, kharness, mcp_derived, derived):
+    def test_substring_via_store_matches_find_notes(self, kharness, mcp_sem):
         # An exact substring hit comes through the store (candidate) + substring_info (authority),
         # identical to the find_notes path: matched field + the `exact` provenance.
         nid = kharness.seed_note("Electron transport chain")
-        _build_derived(kharness, derived)
-        res = kharness.call_tool(mcp_derived, "search_notes", {"queries": ["transport"]})
+        res = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["transport"]})
         m = res["results"][0]["matches"]
         assert [x["id"] for x in m] == [nid]
         assert m[0]["substring"]["matched_fields"] == ["Front"]
@@ -618,12 +629,11 @@ class TestDerivedSearch:
         assert [p["signal"] for p in m[0]["provenance"]] == ["exact"]
         assert m[0].get("fuzzy") is None
 
-    def test_fuzzy_only_hit_surfaces_with_provenance(self, kharness, mcp_derived, derived):
+    def test_fuzzy_only_hit_surfaces_with_provenance(self, kharness, mcp_sem):
         # A typo query the note doesn't literally contain surfaces via the `fuzzy` signal alone:
         # no score, no substring, provenance == [fuzzy], carrying the source/ref/snippet window.
         nid = kharness.seed_note("Mitochondria are the powerhouse")
-        _build_derived(kharness, derived)
-        res = kharness.call_tool(mcp_derived, "search_notes", {"queries": ["mitochndria"]})
+        res = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["mitochndria"]})
         m = res["results"][0]["matches"]
         assert [x["id"] for x in m] == [nid]
         hit = m[0]
@@ -634,56 +644,41 @@ class TestDerivedSearch:
         assert hit["fuzzy"]["ref"] == "Front"
         assert "Mitochondria" in hit["fuzzy"]["snippet"]
 
-    def test_literal_tiers_above_fuzzy(self, kharness, mcp_derived, derived):
+    def test_literal_tiers_above_fuzzy(self, kharness, mcp_sem):
         # The exact-match override still wins: a literal hit floats above a fuzzy-only near-miss.
         literal = kharness.seed_note("Mitochondria diagram")
         fuzzy_only = kharness.seed_note("mitochndrial membrane")  # typo → no literal hit
-        _build_derived(kharness, derived)
-        res = kharness.call_tool(mcp_derived, "search_notes", {"queries": ["mitochondria"]})
+        res = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["mitochondria"]})
         m = res["results"][0]["matches"]
         assert [x["id"] for x in m][0] == literal  # literal floats to the top
         prov = {x["id"]: [p["signal"] for p in x["provenance"]] for x in m}
         assert "exact" in prov[literal]
         assert prov[fuzzy_only] == ["fuzzy"]  # the near-miss is fuzzy-only
 
-    def test_no_fuzzy_signal_when_store_unavailable(self, kharness, mcp_sem):
-        # Fallback safety: with no derived store, a typo query emits no fuzzy match —
-        # substring still works via find_notes.
-        kharness.seed_note("Mitochondria are the powerhouse")
-        res = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["mitochndria"]})
-        assert res["results"][0]["matches"] == []
-
-    def test_exact_hit_carries_no_fuzzy(self, kharness, mcp_derived, derived):
+    def test_exact_hit_carries_no_fuzzy(self, kharness, mcp_sem):
         # A clean exact (literal) match must not also be badged `fuzzy`, even though it
         # shares every trigram — `fuzzy` is reserved for the distinguishing near-miss signal.
         nid = kharness.seed_note("powerhouse of the cell")
-        _build_derived(kharness, derived)
-        res = kharness.call_tool(mcp_derived, "search_notes", {"queries": ["powerhouse"]})
+        res = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["powerhouse"]})
         m = res["results"][0]["matches"]
         hit = next(x for x in m if x["id"] == nid)
         assert "fuzzy" not in [p["signal"] for p in hit["provenance"]]
         assert hit.get("fuzzy") is None
 
-    def test_result_capped_at_limit(self, kharness, mcp_derived, derived):
+    def test_result_capped_at_limit(self, kharness, mcp_sem):
         # The fused union (text/image/exact/fuzzy, each up to limit) is capped to limit,
         # so a broad fuzzy signal can't inflate a query's result count past the documented cap.
         for i in range(8):
             kharness.seed_note(f"mitochondrion variant {i}")  # all fuzzy-match the typo
-        _build_derived(kharness, derived)
-        res = kharness.call_tool(
-            mcp_derived, "search_notes", {"queries": ["mitochndrion"], "limit": 3}
-        )
+        res = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["mitochndrion"], "limit": 3})
         assert len(res["results"][0]["matches"]) == 3
 
-    def test_limit_zero_returns_all(self, kharness, mcp_derived, derived):
+    def test_limit_zero_returns_all(self, kharness, mcp_sem):
         # limit=0 means "return all": the same broad fuzzy match that the
         # cap-to-3 test truncates must come back in full when the cap is lifted.
         for i in range(8):
             kharness.seed_note(f"mitochondrion variant {i}")
-        _build_derived(kharness, derived)
-        res = kharness.call_tool(
-            mcp_derived, "search_notes", {"queries": ["mitochndrion"], "limit": 0}
-        )
+        res = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["mitochndrion"], "limit": 0})
         assert len(res["results"][0]["matches"]) == 8
 
 
@@ -765,7 +760,7 @@ class TestTwoTierSearch:
 
     def test_live_tier_skips_semantic_and_reports_partial(self, kharness, mcp_sem):
         planted = kharness.seed_note("sem only", back="A")
-        _plant(kharness, [(planted, 0.05)])
+        _plant(kharness, "qry", [(planted, 0.05)])
         result = kharness.call_tool(
             mcp_sem, "search_notes", {"queries": ["qry"], "tier": "live", "version": 7}
         )
@@ -777,7 +772,7 @@ class TestTwoTierSearch:
 
     def test_full_tier_reports_full_and_finds_semantic(self, kharness, mcp_sem):
         planted = kharness.seed_note("sem hit", back="A")
-        _plant(kharness, [(planted, 0.05)])
+        _plant(kharness, "qry", [(planted, 0.05)])
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["qry"]})
         assert result["completeness"] == "full"
         assert result["version"] is None
@@ -785,7 +780,7 @@ class TestTwoTierSearch:
 
     def test_min_query_gate_skips_semantic_but_is_final(self, kharness, mcp_sem):
         planted = kharness.seed_note("ab gate", back="A")
-        _plant(kharness, [(planted, 0.05)])
+        _plant(kharness, "ab", [(planted, 0.05)])
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["ab"]})
         # Final for this query (a client must not poll for more) + advisory.
         assert result["completeness"] == "full"
@@ -796,7 +791,7 @@ class TestTwoTierSearch:
     def test_id_anchors_are_never_gated(self, kharness, mcp_sem):
         a = kharness.seed_note("anchor", back="A")
         b = kharness.seed_note("neighbor", back="A")
-        _plant(kharness, [(a, 0.30), (b, 0.10)])
+        _plant(kharness, _embed_text(kharness, a), [(b, 0.10)])
         result = kharness.call_tool(mcp_sem, "search_notes", {"ids": [a]})
         assert result["completeness"] == "full"
         assert b in [m["id"] for m in result["results"][0]["matches"]]
@@ -841,7 +836,7 @@ class TestDedupStats:
         # sample per query group, the same scores the dropped neighbor self-
         # search produced.
         existing = kharness.seed_note("anchor card")
-        _plant(kharness, [(existing, 0.1)])  # best match 0.9
+        _plant(kharness, "zz new card zz", [(existing, 0.1)])  # best match 0.9
         kharness.call_tool(mcp_dedup_stats, "search_notes", {"queries": ["zz new card zz"]})
         snap = stats.snapshot()
         assert snap["samples"] == 1

@@ -306,42 +306,6 @@ class TestSharedRouterLifecycle:
         asyncio.run(flow())
 
 
-class TestEmbedQueryCache:
-    def test_repeat_queries_reuse_the_vector(self, tmp_path) -> None:
-        from types import SimpleNamespace
-
-        from shrike.harness.harness import KernelIndexView
-
-        class _Counting:
-            def __init__(self) -> None:
-                self.calls = 0
-
-            def embed_texts(self, texts: list[str]) -> list[list[float]]:
-                self.calls += 1
-                return [[1.0, 0.0] for _ in texts]
-
-        async def flow():
-            kernel = await shrike_native.async_kernel_open(
-                str(tmp_path / "c.anki2"), str(tmp_path / "cache")
-            )
-            backend = _Counting()
-            runtime = SimpleNamespace(backend=backend)
-            view = KernelIndexView(kernel, runtime)  # type: ignore[arg-type]
-
-            first = view.embed_queries(["krebs cycle"])
-            again = view.embed_queries(["krebs cycle"])
-            assert first == again
-            assert backend.calls == 1, "the repeat came from the cache"
-
-            # A new backend identity (model swap) never reuses entries.
-            runtime.backend = _Counting()
-            view.embed_queries(["krebs cycle"])
-            assert runtime.backend.calls == 1
-            await kernel.close()
-
-        asyncio.run(flow())
-
-
 class _StubOcr:
     """RecognizerBackend wire contract over a canned mapping."""
 

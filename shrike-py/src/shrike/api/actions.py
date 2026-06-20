@@ -18,7 +18,6 @@ iterates the same registry.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -103,9 +102,9 @@ MIN_SEMANTIC_QUERY_CHARS = 3
 
 
 class _SearchNotesNative(BaseModel):
-    """The `action_search_notes` native payload: the fused groups plus the
-    read-time freshness verdict the kernel computed inside the read. Internal to
-    this module — the host maps it onto the public `SearchResponse`."""
+    """The native fused-search payload (`kernel.search_fused`): the fused groups
+    plus the read-time freshness verdict the kernel computed inside the read.
+    Internal to this module — the host maps it onto the public `SearchResponse`."""
 
     groups: list[SearchResultGroup] = []
     stale: bool = False
@@ -974,80 +973,29 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 version=version,
             )
 
-        # Query vectors (host-side embedding); the assembly itself runs in
-        # shrike_kernel::actions.
-        vectors: list[list[float]] = []
-        if semantic_ok:
-            assert index is not None
-            # Off the event loop: embed_queries blocks on backend inference /
-            # HTTP; inline it froze every concurrent request.
-            embedded = await asyncio.to_thread(index.embed_queries, [t for (_, t, _) in sources])
-            if embedded is None:
-                semantic_ok = False
-            else:
-                vectors = embedded
-
-        # Cross-space inputs: the PRIMARY space stays host-embedded above (the
-        # query LRU). Each SECONDARY text-capable space embeds the query with
-        # its own model + searches its own engine on the KERNEL runtime (where
-        # embed is legal — action_search_notes runs on the collection-actor
-        # thread and can't await embed), returning the per-space SpaceSemantic
-        # rows the kernel fuses with the gate. EMPTY ("[]") when there are no
-        # secondary spaces — the N=1 case stays byte-identical.
-        # limit==0 means "return all". The native search applies the cap
-        # lazily (`.take()`), so a large sentinel reads as "all" for the lexical
-        # signals. The semantic path is the exception: the per-modality engine
-        # over-fetches `k * SEARCH_OVERFETCH` and hands that to USearch's
-        # `search(k)`, which *allocates* a result buffer of that size — a raw
-        # `_UNBOUNDED_LIMIT` would ask USearch for billions of slots and hang. An
-        # index holds at most `index.size` vectors, so that is the true "all"
-        # bound for the semantic over-fetch; the lexical-only path (no usable
-        # index) keeps the cheap FTS5 `LIMIT` sentinel.
-        if limit > 0:
-            fetch_k = limit
-        elif semantic_ok and index is not None:
-            fetch_k = max(index.size, 1)
-        else:
-            fetch_k = _UNBOUNDED_LIMIT
-
-        cross_space_json: str | None = None
-        if semantic_ok and kernel is not None:
-            source_texts = [t for (_, t, _) in sources]
-            cross_space_json = await kernel.build_cross_space_json(source_texts, fetch_k)
-
-        # Orchestrator state: the image activation floor and the index size for
-        # the over-fetch clamp.
+        # The image activation floor stays host-computed from the view's
+        # calibrated stats (the gate tests' `stats_override` rides here).
         image_floor = (
             activation_floor(index.activation_stats.get("image"), ACTIVATION_MARGIN)
             if index is not None
             else None
         )
-        # The kernel's Arc-shared native engine handle (KernelIndexView.engine).
-        index_handle = index.engine if (semantic_ok and index is not None) else None
-        derived_handle = (
-            derived._engine._rust
-            if derived is not None and derived.available and derived._engine is not None
-            else None
-        )
 
-        raw = await wrapper.run(
-            lambda c: shrike_native.action_search_notes(
-                c,
-                index_handle,
-                derived_handle,
-                sources,
-                vectors,
-                fetch_k,
-                threshold,
-                deck=deck,
-                tags=tags or None,
-                exclude=sorted(exclude_set),
-                kernel=kernel,
-                image_floor=image_floor,
-                semantic=semantic_ok,
-                index_size=index.size if index is not None else 0,
-                cross_space=cross_space_json,
-            )
+        # Kernel-internal fused search (#928): the kernel embeds every source
+        # text on its own runtime — query vectors never cross the FFI — then
+        # builds cross-space, computes the over-fetch clamp from its own index
+        # size, runs the assembly under the freshness bracket, and returns the
+        # same {groups, stale} wire. `kernel` is guaranteed present (build_actions
+        # rejects a None context kernel). `limit == 0` means "return all".
+        raw = await kernel.search_fused(
+            sources,
+            limit,
+            threshold,
+            deck=deck,
+            tags=tags or None,
+            exclude=sorted(exclude_set),
+            image_floor=image_floor,
+            semantic=semantic_ok,
         )
         # The native read returns the fused groups plus the read-time `stale`
         # verdict: computed inside the collection-actor job that ran the read, by
