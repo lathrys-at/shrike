@@ -2186,9 +2186,8 @@ pub fn fts_quote(term: &str) -> String {
 impl DerivedEngine {
     /// One query's trigram set, `None` when it has fewer than [`FUZZY_MIN_SHARED`]
     /// trigram windows (too short to rank). NFC-normalized so the trigrams match
-    /// the NFC-normalized index (and the text `fuzzy_filter` re-trigrams). This is
-    /// the full set used for the overlap filter; [`Self::prune_to_rare`] derives
-    /// the (smaller) candidate-generation expression from it.
+    /// the NFC-normalized index. [`Self::prune_to_rare_terms`] derives the (smaller)
+    /// rare-trigram set the overlap ranker actually queries and counts.
     fn fuzzy_grams(query: &str) -> Option<std::collections::BTreeSet<String>> {
         let normalized = nfc(query);
         let grams = trigrams(normalized.trim());
@@ -2198,23 +2197,21 @@ impl DerivedEngine {
         Some(grams.into_iter().collect())
     }
 
-    /// The fuzzy candidate-generation `OR`, built from only the **rarest**
-    /// (lowest document-frequency) trigrams of `grams`, capped at
-    /// [`FUZZY_MAX_TRIGRAMS`]. The common trigrams are what bloat the match set and
-    /// make `ORDER BY rank` (bm25) the search hotspot, and they discriminate least;
-    /// the rare ones are what actually find a typo'd word. `df` is per-trigram
-    /// document frequency from `idx_vocab` (0 = absent → sorts rarest, matches
-    /// nothing, harmless). The full `grams` set still drives the overlap filter, so
-    /// dropping common trigrams here only loses common-trigram-only noise. The
-    /// "common"/"rare" judgement is the collection's own statistics — no language
-    /// assumption.
-    fn prune_to_rare(
+    /// The fuzzy candidate trigrams: only the **rarest** (lowest document-frequency)
+    /// of `grams`, capped at [`FUZZY_MAX_TRIGRAMS`]. The common trigrams bloat the
+    /// match set and discriminate least; the rare ones are what actually find a
+    /// typo'd word. `df` is per-trigram document frequency from `idx_vocab` (0 =
+    /// absent → sorts rarest, matches nothing, harmless). The "common"/"rare"
+    /// judgement is the collection's own statistics — no language assumption. The
+    /// overlap ranker counts how many of THESE a candidate segment shares, so the
+    /// floor is over the rare set, not the full query gram set.
+    fn prune_to_rare_terms(
         grams: &std::collections::BTreeSet<String>,
         df: &std::collections::HashMap<String, i64>,
-    ) -> String {
+    ) -> Vec<String> {
         let mut by_df: Vec<&String> = grams.iter().collect();
-        // Rarest PRESENT trigram first; DF 0 (absent from the index — generates no
-        // candidates) sorts last so it never crowds out a rare-but-present trigram.
+        // Rarest PRESENT trigram first; DF 0 (absent from the index — matches
+        // nothing) sorts last so it never crowds out a rare-but-present trigram.
         // Term as a deterministic tie-break.
         by_df.sort_by(|a, b| {
             let rank = |g: &String| {
@@ -2224,40 +2221,62 @@ impl DerivedEngine {
             rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
         });
         by_df.truncate(FUZZY_MAX_TRIGRAMS);
-        by_df
-            .iter()
-            .map(|g| fts_quote(g))
-            .collect::<Vec<_>>()
-            .join(" OR ")
+        by_df.into_iter().cloned().collect()
     }
 
-    /// The fuzzy post-filter shared by the singular and batched paths: from FTS5's
-    /// OR-matched rows (best-first, with text), keep one (best) row per note that
-    /// shares at least [`FUZZY_MIN_SHARED`] trigrams with the query, capped at
-    /// `top_k`. The min-overlap floor drops single-common-trigram noise that an
-    /// FTS5 OR (matching ≥1 trigram) would otherwise surface.
-    fn fuzzy_filter(
-        rows: Vec<MatchRow>,
-        gram_set: &std::collections::BTreeSet<String>,
-        top_k: i64,
-    ) -> Vec<LexicalRow> {
-        let mut seen = std::collections::HashSet::new();
-        let mut out: Vec<LexicalRow> = Vec::new();
-        for (note_id, source, r, txt, snippet) in rows {
-            let txt_grams: std::collections::BTreeSet<String> =
-                trigrams(txt.as_deref().unwrap_or("")).into_iter().collect();
-            if gram_set.intersection(&txt_grams).count() < FUZZY_MIN_SHARED {
-                continue;
-            }
-            if !seen.insert(note_id) {
-                continue; // dedup to one (best) row per note — rows arrive best-first
-            }
-            out.push((note_id, source, r, snippet));
-            if out.len() as i64 >= top_k {
-                break;
+    /// Rank one query's fuzzy candidates by trigram OVERLAP, from the per-term
+    /// posting sets gathered by [`Self::term_segments_batch`]. A segment's overlap
+    /// is how many of the query's pruned (rare) trigrams matched it; a note's
+    /// overlap is its best segment's. Keep notes sharing at least
+    /// [`FUZZY_MIN_SHARED`] pruned trigrams, one (best-overlap, lowest-rowid)
+    /// segment per note, ordered overlap-desc then note-id-asc, capped at `top_k`.
+    /// Returns `(note_id, source, ref, rowid)`; the rowid drives the deferred
+    /// snippet read. Recall-safe: the cut is by overlap, never by rowid — every
+    /// matched segment is ranked, unlike a bm25 `LIMIT` over the OR.
+    fn merge_overlap(
+        pruned_terms: &[String],
+        term_rowids: &std::collections::HashMap<String, Vec<i64>>,
+        seg_meta: &std::collections::HashMap<i64, (i64, String, String)>,
+        top_k: usize,
+    ) -> Vec<(i64, String, String, i64)> {
+        let mut overlap: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+        for term in pruned_terms {
+            if let Some(rowids) = term_rowids.get(term) {
+                for &rid in rowids {
+                    *overlap.entry(rid).or_insert(0) += 1;
+                }
             }
         }
-        out
+        // Best segment per note: highest overlap, lowest rowid as the deterministic
+        // tie-break (so the chosen snippet segment is stable run to run).
+        let mut best: std::collections::HashMap<i64, (usize, i64)> =
+            std::collections::HashMap::new();
+        for (&rid, &count) in &overlap {
+            if count < FUZZY_MIN_SHARED {
+                continue;
+            }
+            let nid = seg_meta[&rid].0;
+            let better = match best.get(&nid) {
+                None => true,
+                Some(&(bc, br)) => count > bc || (count == bc && rid < br),
+            };
+            if better {
+                best.insert(nid, (count, rid));
+            }
+        }
+        let mut ranked: Vec<(i64, usize, i64)> = best
+            .into_iter()
+            .map(|(nid, (c, rid))| (nid, c, rid))
+            .collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        ranked.truncate(top_k);
+        ranked
+            .into_iter()
+            .map(|(nid, _, rid)| {
+                let (_, source, r) = &seg_meta[&rid];
+                (nid, source.clone(), r.clone(), rid)
+            })
+            .collect()
     }
 
     /// Notes whose derived text literally contains `query` (case-insensitive),
@@ -2290,10 +2309,12 @@ impl DerivedEngine {
         ))
     }
 
-    /// Notes sharing trigrams with `query` (typo/partial tolerant), best-first
-    /// by FTS5 bm25, deduped to one (best) row per note, requiring at least
-    /// [`FUZZY_MIN_SHARED`] shared trigrams (drops one-trigram noise). Empty
-    /// when the query is too short to rank.
+    /// Notes sharing trigrams with `query` (typo/partial tolerant), ranked by how
+    /// many of the query's rarest trigrams they share, deduped to one (best) row
+    /// per note, requiring at least [`FUZZY_MIN_SHARED`] shared rare trigrams
+    /// (drops single-trigram noise). Empty when the query is too short to rank.
+    /// Delegates to [`Self::search_fuzzy_batch`] so the singular and batched paths
+    /// share one ranking implementation.
     ///
     /// # Errors
     ///
@@ -2305,16 +2326,11 @@ impl DerivedEngine {
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
     ) -> NativeResult<Vec<LexicalRow>> {
-        let Some(gram_set) = Self::fuzzy_grams(query) else {
-            return Ok(Vec::new());
-        };
-        // Generate candidates from only the rarest trigrams (cheap bm25); the full
-        // gram set still drives the overlap filter.
-        let terms: Vec<&str> = gram_set.iter().map(String::as_str).collect();
-        let df = self.trigram_dfs(&terms)?;
-        let expr = Self::prune_to_rare(&gram_set, &df);
-        let rows = self.match_rows(&expr, top_k * 4, true, scope, exclude_sources)?;
-        Ok(Self::fuzzy_filter(rows, &gram_set, top_k))
+        Ok(self
+            .search_fuzzy_batch(&[query], top_k, scope, exclude_sources)?
+            .into_iter()
+            .next()
+            .unwrap_or_default())
     }
 
     /// [`Self::search_substring`] over a batch of queries — one result per query
@@ -2378,6 +2394,15 @@ impl DerivedEngine {
     /// `queries` order — the fuzzy counterpart to [`Self::search_substring_batch`].
     /// A query too short to rank yields an empty result without reaching FTS5.
     ///
+    /// Ranks by trigram OVERLAP without bm25: each query's rarest trigrams are read
+    /// as individual posting lists ([`Self::term_segments_batch`], one MATCH per
+    /// DISTINCT trigram — a trigram's posting is identical for every query in the
+    /// batch, since scope/exclude are batch-wide), then merged per query into
+    /// per-note overlap ([`Self::merge_overlap`]). bm25's `ORDER BY rank` over the
+    /// pruned `OR` was the search hotspot; six raw posting reads skip it and the
+    /// overlap cut is recall-safe (by overlap, never rowid). Snippets are read once
+    /// for the surviving top-k ([`Self::fuzzy_snippets_batch`]), not for every match.
+    ///
     /// # Errors
     ///
     /// Returns an error if the batched MATCH query fails.
@@ -2388,38 +2413,270 @@ impl DerivedEngine {
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
     ) -> NativeResult<Vec<Vec<LexicalRow>>> {
-        // Keep each servable query's full trigram set for the post-filter; the
-        // unservable ones reattach as empty results.
         let gram_sets: Vec<Option<std::collections::BTreeSet<String>>> =
             queries.iter().map(|q| Self::fuzzy_grams(q)).collect();
         // One batched DF lookup over every distinct trigram, then prune each served
-        // query's candidate `OR` to its rarest trigrams (cheap bm25 over a small set).
+        // query to its rarest (most discriminative) trigrams.
         let distinct: std::collections::BTreeSet<&str> = gram_sets
             .iter()
             .flatten()
             .flat_map(|g| g.iter().map(String::as_str))
             .collect();
         let df = self.trigram_dfs(&distinct.into_iter().collect::<Vec<_>>())?;
-        let exprs: Vec<String> = gram_sets
+        let pruned: Vec<Option<Vec<String>>> = gram_sets
+            .iter()
+            .map(|g| g.as_ref().map(|gs| Self::prune_to_rare_terms(gs, &df)))
+            .collect();
+        // Read each DISTINCT pruned trigram's posting once (shared across queries).
+        let distinct_terms: std::collections::BTreeSet<&str> = pruned
             .iter()
             .flatten()
-            .map(|g| Self::prune_to_rare(g, &df))
+            .flatten()
+            .map(String::as_str)
             .collect();
-        let mut batched = self
-            .match_rows_batch(&exprs, top_k * 4, true, scope, exclude_sources)?
-            .into_iter();
-        let out = gram_sets
+        if distinct_terms.is_empty() {
+            return Ok(queries.iter().map(|_| Vec::new()).collect());
+        }
+        let (term_rowids, seg_meta) = self.term_segments_batch(
+            &distinct_terms.into_iter().collect::<Vec<_>>(),
+            scope,
+            exclude_sources,
+        )?;
+        // Merge per query into ranked survivors (note_id, source, ref, rowid).
+        let survivors: Vec<Vec<(i64, String, String, i64)>> = pruned
+            .iter()
+            .map(|p| {
+                p.as_ref().map_or_else(Vec::new, |terms| {
+                    Self::merge_overlap(terms, &term_rowids, &seg_meta, top_k as usize)
+                })
+            })
+            .collect();
+        // Build snippets for the surviving rowids only, from text read by a plain
+        // rowid lookup (no MATCH re-scan) and windowed in Rust around the query's
+        // own rare trigrams.
+        let snippet_jobs: Vec<(&[String], Vec<i64>)> = pruned
+            .iter()
+            .zip(&survivors)
+            .map(|(p, surv)| {
+                let terms: &[String] = match p {
+                    Some(t) if !surv.is_empty() => t.as_slice(),
+                    _ => &[],
+                };
+                (terms, surv.iter().map(|(_, _, _, rid)| *rid).collect())
+            })
+            .collect();
+        let snippets = self.fuzzy_snippets_batch(&snippet_jobs)?;
+        let out = survivors
             .into_iter()
-            .map(|maybe| match maybe {
-                // A served query draws its batched rows (in order) for the
-                // post-filter; `map_or_else` keeps this panic-free.
-                Some(gram_set) => batched
-                    .next()
-                    .map_or_else(Vec::new, |rows| Self::fuzzy_filter(rows, &gram_set, top_k)),
-                None => Vec::new(),
+            .zip(snippets)
+            .map(|(surv, snip)| {
+                surv.into_iter()
+                    .map(|(nid, source, r, rid)| (nid, source, r, snip.get(&rid).cloned()))
+                    .collect()
             })
             .collect();
         Ok(out)
+    }
+
+    /// For each of `terms` (already FTS5-safe trigrams), the indexed segments whose
+    /// text contains it: `term_rowids[term]` is the matching idx rowids, and
+    /// `seg_meta[rowid]` their `(note_id, source, ref)` provenance (owned once,
+    /// shared across queries). One MATCH per term — no rank, no text, no limit, just
+    /// the posting — sharing ONE connection lock and ONE staged scope across the
+    /// set, like [`Self::match_rows_batch`]. No `LIMIT`: the overlap ranker needs
+    /// every match to stay recall-safe; a rowid `LIMIT` here would silently drop
+    /// high-rowid (recently-added) high-overlap notes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if scope staging or any term's MATCH query fails.
+    #[allow(clippy::type_complexity)]
+    fn term_segments_batch(
+        &self,
+        terms: &[&str],
+        scope: Option<&[i64]>,
+        exclude_sources: &[&str],
+    ) -> NativeResult<(
+        std::collections::HashMap<String, Vec<i64>>,
+        std::collections::HashMap<i64, (i64, String, String)>,
+    )> {
+        let mut term_rowids: std::collections::HashMap<String, Vec<i64>> =
+            std::collections::HashMap::new();
+        let mut seg_meta: std::collections::HashMap<i64, (i64, String, String)> =
+            std::collections::HashMap::new();
+        if terms.is_empty() {
+            return Ok((term_rowids, seg_meta));
+        }
+        let span = tracing::debug_span!("derived.fuzzy_terms", n = terms.len());
+        let _enter = span.enter();
+        let conn = self.lock();
+        let scope_clause = match scope {
+            Some(ids) if !ids.is_empty() => {
+                Self::stage_id_set(&conn, "shrike_scope_ids", ids)?;
+                "AND m.note_id IN (SELECT id FROM temp.shrike_scope_ids) ".to_string()
+            }
+            Some(_) => "AND 0 ".to_string(), // an empty scope matches nothing
+            None => String::new(),
+        };
+        let exclude_clause = if exclude_sources.is_empty() {
+            String::new()
+        } else {
+            let placeholders = (0..exclude_sources.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("AND m.source NOT IN ({placeholders}) ")
+        };
+        let sql = format!(
+            "SELECT idx.rowid, m.note_id, m.source, m.ref \
+             FROM idx JOIN rowmap m ON m.rowid = idx.rowid \
+             WHERE idx MATCH ?1 {scope_clause}{exclude_clause}"
+        );
+        for term in terms {
+            let quoted = fts_quote(term);
+            let run =
+                || -> rusqlite::Result<Result<Vec<(i64, i64, String, String)>, NativeError>> {
+                    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&quoted];
+                    params.extend(exclude_sources.iter().map(|s| s as &dyn rusqlite::ToSql));
+                    let mut stmt = conn.prepare_cached(&sql)?;
+                    let mut q = stmt.query(rusqlite::params_from_iter(params))?;
+                    let mut rows: Vec<(i64, i64, String, String)> = Vec::new();
+                    loop {
+                        let row = match q.next() {
+                            Ok(Some(r)) => r,
+                            Ok(None) => break,
+                            Err(e) if is_busy(&e) => return Err(e),
+                            Err(e) => {
+                                return Ok(Err(NativeError::invalid_input(format!(
+                                    "fts5 match: {e}"
+                                ))))
+                            }
+                        };
+                        match (|| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))() {
+                            Ok(tuple) => rows.push(tuple),
+                            Err(e) if is_busy(&e) => return Err(e),
+                            Err(e) => {
+                                return Ok(Err(NativeError::invalid_input(format!(
+                                    "fts5 match: {e}"
+                                ))))
+                            }
+                        }
+                    }
+                    Ok(Ok(rows))
+                };
+            let rows = with_busy_retry(run)??;
+            let mut rids = Vec::with_capacity(rows.len());
+            for (rowid, note_id, source, r) in rows {
+                rids.push(rowid);
+                seg_meta.entry(rowid).or_insert((note_id, source, r));
+            }
+            term_rowids.insert((*term).to_string(), rids);
+        }
+        Ok((term_rowids, seg_meta))
+    }
+
+    /// One snippet per surviving rowid, per query. `jobs[i]` is `(pruned_terms,
+    /// rowids)` for query `i`: the rare trigrams it ranked on and its surviving idx
+    /// rowids. An empty job (unservable query, or no survivors) yields an empty map.
+    ///
+    /// Reads each survivor's text by a plain rowid lookup — NOT a `MATCH` — and
+    /// windows it in Rust ([`Self::window_snippet`]). The `snippet()` builtin needs
+    /// a `MATCH`, and re-running the OR over the index to snippet a handful of rows
+    /// re-pays the posting scan the overlap path exists to avoid; a rowid lookup
+    /// reads only the survivor pages. Snippets are off the hot path: reading text
+    /// for every candidate is what made bm25 expensive. Shares ONE connection lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a text lookup fails.
+    fn fuzzy_snippets_batch(
+        &self,
+        jobs: &[(&[String], Vec<i64>)],
+    ) -> NativeResult<Vec<std::collections::HashMap<i64, String>>> {
+        let mut out: Vec<std::collections::HashMap<i64, String>> = Vec::with_capacity(jobs.len());
+        if jobs.iter().all(|(_, rids)| rids.is_empty()) {
+            return Ok(jobs
+                .iter()
+                .map(|_| std::collections::HashMap::new())
+                .collect());
+        }
+        let conn = self.lock();
+        for (terms, rowids) in jobs {
+            if rowids.is_empty() || terms.is_empty() {
+                out.push(std::collections::HashMap::new());
+                continue;
+            }
+            // Survivor rowids inline as literals (i64 — no injection surface); the
+            // set is at most top_k. A plain rowid lookup, no MATCH.
+            let csv = rowids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("SELECT idx.rowid, idx.txt FROM idx WHERE idx.rowid IN ({csv})");
+            let run = || -> rusqlite::Result<Result<std::collections::HashMap<i64, String>, NativeError>> {
+                let mut stmt = conn.prepare_cached(&sql)?;
+                let mut q = stmt.query([])?;
+                let mut m = std::collections::HashMap::new();
+                loop {
+                    let row = match q.next() {
+                        Ok(Some(r)) => r,
+                        Ok(None) => break,
+                        Err(e) if is_busy(&e) => return Err(e),
+                        Err(e) => {
+                            return Ok(Err(NativeError::invalid_input(format!("fts5 text: {e}"))))
+                        }
+                    };
+                    match (|| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)))() {
+                        Ok((rid, Some(txt))) => {
+                            if let Some(s) = Self::window_snippet(&txt, terms) {
+                                m.insert(rid, s);
+                            }
+                        }
+                        Ok((_, None)) => {}
+                        Err(e) if is_busy(&e) => return Err(e),
+                        Err(e) => {
+                            return Ok(Err(NativeError::invalid_input(format!("fts5 text: {e}"))))
+                        }
+                    }
+                }
+                Ok(Ok(m))
+            };
+            out.push(with_busy_retry(run)??);
+        }
+        Ok(out)
+    }
+
+    /// A `…`-delimited window of `txt` around its earliest match of any `terms`
+    /// trigram — the fuzzy snippet, built without FTS5's `snippet()` (which needs a
+    /// MATCH). Searches `txt`'s own char-trigrams (lowercased per window) so the
+    /// match position indexes the ORIGINAL text and the slice preserves its case;
+    /// `SNIPPET_TOKENS` chars of context flank the match. `None` if nothing matched
+    /// (no snippet rather than a misleading head-of-text slice).
+    fn window_snippet(txt: &str, terms: &[String]) -> Option<String> {
+        let chars: Vec<char> = txt.chars().collect();
+        if chars.len() < MIN_TRIGRAM {
+            return None;
+        }
+        let ctx = SNIPPET_TOKENS as usize;
+        let hit = (0..=chars.len() - MIN_TRIGRAM).find(|&i| {
+            let tri: String = chars[i..i + MIN_TRIGRAM]
+                .iter()
+                .collect::<String>()
+                .to_lowercase();
+            terms.contains(&tri)
+        })?;
+        let start = hit.saturating_sub(ctx);
+        let end = (hit + MIN_TRIGRAM + ctx).min(chars.len());
+        let mut s = String::new();
+        if start > 0 {
+            s.push('…');
+        }
+        s.extend(&chars[start..end]);
+        if end < chars.len() {
+            s.push('…');
+        }
+        Some(s)
     }
 }
 
@@ -2482,6 +2739,51 @@ mod lexical_tests {
         let hits = e.search_fuzzy("mitochondira", 10, None, &[]).unwrap(); // transposition
         assert!(hits.iter().any(|(nid, ..)| *nid == 1));
         assert!(e.search_fuzzy("xy", 10, None, &[]).unwrap().is_empty()); // too short to rank
+    }
+
+    #[test]
+    fn fuzzy_ranks_by_overlap_not_rowid_recall_safe() {
+        // The overlap ranker's load-bearing property: the cut is by trigram
+        // overlap, NEVER by rowid. The strongest match here is the LAST-ingested
+        // note (highest rowid) — a rowid `LIMIT` (the old bm25 over-fetch) would
+        // drop it; overlap ranks it first. Distractors share two query trigrams
+        // (qwx, zvk); the target "qwxzvk" shares all four (qwx, wxz, xzv, zvk).
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-derived-overlap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
+        let mut rows: Vec<(i64, String, String, String)> = (1..=5)
+            .map(|n| {
+                (
+                    n,
+                    "field".into(),
+                    "Front".into(),
+                    format!("qwx zvk distractor {n}"),
+                )
+            })
+            .collect();
+        // Highest note id → last ingested → highest rowid.
+        rows.push((6, "field".into(), "Front".into(), "qwxzvk".into()));
+        build_snapshot_live(&e, &rows, 1).unwrap();
+
+        // top_k=1: the highest-rowid, highest-overlap note wins — not a low-rowid
+        // distractor. Proves the cut is overlap-ordered, not rowid-truncated.
+        let top1 = e.search_fuzzy("qwxzvk", 1, None, &[]).unwrap();
+        assert_eq!(top1.iter().map(|(nid, ..)| *nid).collect::<Vec<_>>(), [6]);
+        // Widen: the target still leads, distractors (overlap 2) follow by note id.
+        let top_all = e.search_fuzzy("qwxzvk", 10, None, &[]).unwrap();
+        assert_eq!(top_all[0].0, 6, "highest overlap ranks first");
+        assert_eq!(
+            top_all.len(),
+            6,
+            "all overlap>=2 notes surface, none rowid-dropped"
+        );
     }
 
     #[test]
@@ -2759,14 +3061,17 @@ mod lexical_tests {
         .iter()
         .map(|(k, v)| (k.to_string(), *v))
         .collect();
-        let expr = DerivedEngine::prune_to_rare(&grams, &df);
-        // Keeps the FUZZY_MAX_TRIGRAMS (6) rarest PRESENT: ddd,eee,ccc,ggg,bbb,fff.
-        for kept in ["ddd", "eee", "ccc", "ggg", "bbb", "fff"] {
-            assert!(expr.contains(kept), "kept the rare-present trigram {kept}");
-        }
-        assert!(!expr.contains("aaa"), "dropped the commonest (DF 1000)");
-        assert!(!expr.contains("zzz"), "dropped the absent (DF 0) trigram");
-        assert_eq!(expr.matches(" OR ").count(), FUZZY_MAX_TRIGRAMS - 1);
+        let terms = DerivedEngine::prune_to_rare_terms(&grams, &df);
+        // Keeps the FUZZY_MAX_TRIGRAMS (6) rarest PRESENT, rarest-first.
+        assert_eq!(terms, ["ddd", "eee", "ccc", "ggg", "bbb", "fff"]);
+        assert!(
+            !terms.iter().any(|t| t == "aaa"),
+            "dropped the commonest (DF 1000)"
+        );
+        assert!(
+            !terms.iter().any(|t| t == "zzz"),
+            "dropped the absent (DF 0) trigram"
+        );
     }
 }
 
