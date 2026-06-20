@@ -337,6 +337,31 @@ blocklist.
 
 ## Architecture
 
+### Code-bearing package `__init__.py` files need their own marker target
+
+Bazel's `legacy_create_init` (on by default — `--incompatible_default_to_explicit_init_py` is
+unset) synthesizes an EMPTY `__init__.py` into a target's runfiles for any package dir that
+holds a `.py` but no `__init__.py`. Harmless for the plain-marker subpackages, but
+`server/__init__.py` and `recognition/__init__.py` carry real code, so they live in their own
+targets (`:server`, `:recognition`), not the `:pkg` marker.
+
+The trap behind #872: `:export_store` (`server/export_store.py`) materializes the `server/`
+package dir but is dep-able WITHOUT `:server` (e.g. `//shrike-py/tests/unit:tools`). Bazel then
+synthesizes an EMPTY `server/__init__.py` for that target. Under `bazel test //...` on Linux —
+where runfiles are symlinks into one shared, writable execroot source — the bazel server's
+non-atomic empty-init write races concurrent reads of the real `server/__init__.py` by the
+`:server`-dependent targets, so they import an empty `shrike.server` (`main` absent) →
+intermittent `ImportError`/`AttributeError`. macOS never reproduced (APFS COW isolates each
+runfiles tree); per-action sandboxing (#894) couldn't fix it because the writer is the bazel
+server itself, not a sandboxed spawn.
+
+Fix: a `:server_pkg` marker carrying the real `server/__init__.py`, depended on by BOTH `:server`
+and `:export_store`, so every runfiles tree that materializes `server/` also carries the real
+init and `legacy_create_init` never synthesizes an empty one. The blanket
+`--incompatible_default_to_explicit_init_py=true` was rejected: it strips auto-init for the
+genuinely marker-only packages too, breaking `tests.*` imports. Any future code-bearing
+`__init__.py` pulled in by a target that does not dep its owner needs the same split.
+
 ### The engine-plugin architecture: a pure kernel
 
 The kernel composes engines it is *given* — never naming one. Contracts live in the leaf crate
