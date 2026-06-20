@@ -2787,6 +2787,63 @@ mod lexical_tests {
     }
 
     #[test]
+    fn fuzzy_overlap_is_over_rare_trigrams_not_a_common_phrase() {
+        // The deliberate floor shift this ranker makes: a candidate must share the
+        // query's RARE (discriminative) trigrams, not merely a common phrase. With
+        // "the theory of" inflated to a high document frequency, a query typo'd on
+        // the discriminative word surfaces the genuine near-match and DROPS a note
+        // that shares only the common phrase — a precision win for a fuzzy signal.
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-derived-discrim-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
+        // 30 notes carrying the common phrase → its trigrams get a high DF and are
+        // pruned out of every query's rare set.
+        let mut rows: Vec<(i64, String, String, String)> = (1..=30)
+            .map(|n| {
+                (
+                    n,
+                    "field".into(),
+                    "Front".into(),
+                    format!("the theory of subject number {n}"),
+                )
+            })
+            .collect();
+        rows.push((
+            100,
+            "field".into(),
+            "Front".into(),
+            "the theory of relativity".into(),
+        ));
+        rows.push((
+            101,
+            "field".into(),
+            "Front".into(),
+            "the theory of evolution".into(),
+        ));
+        build_snapshot_live(&e, &rows, 1).unwrap();
+
+        let hits = e
+            .search_fuzzy("the theory of relatvity", 10, None, &[])
+            .unwrap();
+        let ids: Vec<i64> = hits.iter().map(|(nid, ..)| *nid).collect();
+        assert!(
+            ids.contains(&100),
+            "the genuine typo near-match (relativity) surfaces via its rare trigrams"
+        );
+        assert!(
+            !ids.contains(&101),
+            "a common-phrase-only coincidence (evolution) is dropped — rare-set floor"
+        );
+    }
+
+    #[test]
     fn exclude_sources_hides_vector_only_rows_from_lexical_search() {
         // A VectorOnly recognition source (VLM describe) is STORED for
         // provenance + reconcile, but excluded from substring/fuzzy BEFORE
