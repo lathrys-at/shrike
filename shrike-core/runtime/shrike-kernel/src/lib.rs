@@ -2745,6 +2745,136 @@ impl Kernel {
         .await
     }
 
+    /// The full fused search the host surface exposes — the kernel-internal
+    /// counterpart to the old host-orchestrated `action_search_notes`. The query
+    /// embeds HERE (on the kernel runtime, where `await` is legal), so query
+    /// vectors never cross the FFI: the host hands query/anchor text in and reads
+    /// fused groups out. Internalizes the orchestrator state the host used to
+    /// inject — query embedding, semantic availability, the over-fetch clamp
+    /// (`fetch_k`/`index_size`), and cross-space embedding. `image_floor` stays a
+    /// caller scalar for now (cheap host-side metadata, not query data).
+    ///
+    /// Returns the fused groups plus the read-time `stale` verdict (the freshness
+    /// bracket spans the collection read; the embed precedes it).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if query embedding (when an embedder is attached), or any
+    /// index/derived/collection read in the fusion, fails.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn search_fused(
+        &self,
+        sources: Vec<actions::SearchSource>,
+        limit: usize,
+        threshold: f64,
+        deck: Option<String>,
+        tags: Vec<String>,
+        exclude: Vec<i64>,
+        image_floor: Option<f64>,
+        weights: BTreeMap<String, f64>,
+        semantic: bool,
+        cross_space_fusion_mode: actions::CrossSpaceFusionMode,
+        cross_space_tau: f64,
+        cross_space_budget: f64,
+    ) -> NativeResult<(Vec<shrike_schemas::SearchResultGroup>, bool)> {
+        let span = tracing::debug_span!("kernel.search_fused", limit, n = sources.len());
+        async move {
+            // Embed every source's text (query and anchor alike), in source order,
+            // so `vectors[i]` aligns with `sources[i]` — the alignment the assembly
+            // relies on. Semantic degrades to lexical-only when no embedder is
+            // attached or the request didn't ask for it.
+            let source_texts: Vec<String> = sources.iter().map(|s| s.text.clone()).collect();
+            let svc = self.embed_service();
+            let (vectors, semantic_ok) = match (&svc, semantic) {
+                (Some(svc), true) if !source_texts.is_empty() => {
+                    (svc.embedder.embed(source_texts.clone()).await?, true)
+                }
+                _ => (Vec::new(), false),
+            };
+            // The over-fetch clamp: `limit` caps it when set; otherwise an
+            // unbounded semantic read is bounded by the index size (USearch
+            // allocates a result buffer of `k`), while the lexical-only path keeps
+            // the cheap FTS5 `LIMIT` sentinel.
+            let index_size: usize = self
+                .index_set
+                .all_orchestrators()
+                .iter()
+                .map(|o| o.engine().size())
+                .sum();
+            let fetch_k = if limit > 0 {
+                limit
+            } else if semantic_ok && index_size > 0 {
+                index_size.max(1)
+            } else {
+                1_000_000_000
+            };
+            // Cross-space (secondary text spaces), embedded on the kernel runtime.
+            let cross_space = if semantic_ok {
+                self.build_cross_space(&source_texts, fetch_k).await?
+            } else {
+                Vec::new()
+            };
+            let args = actions::SearchArgs {
+                top_k: fetch_k,
+                threshold,
+                deck,
+                tags,
+                exclude,
+                image_floor,
+                weights,
+                semantic: semantic_ok,
+                index_size,
+                hidden_lexical_sources: Self::hidden_lexical_sources()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                cross_space,
+                disable_cross_space_gate: false,
+                cross_space_fusion_mode,
+                cross_space_tau,
+                cross_space_budget,
+            };
+            // Assembly on the collection actor (it touches `core`), bracketed by
+            // the freshness stamps. `settled` is read off the ingest gauge either
+            // side of the read; `col_mod` inside, where `core` lives.
+            let engine = self.index_set.primary().engine_arc();
+            let derived = Arc::clone(&self.derived);
+            let tag_keys = Arc::clone(&self.tag_keys);
+            let settled_start = self.is_settled();
+            let (groups, start_mod, end_mod) = self
+                .collection
+                .run(move |core| -> NativeResult<_> {
+                    let start_mod = core.col_mod()?;
+                    let groups = actions::search_notes(
+                        core,
+                        Some(&*engine),
+                        Some(&*derived),
+                        Some(&tag_keys),
+                        &sources,
+                        &vectors,
+                        &args,
+                    )?;
+                    let end_mod = core.col_mod()?;
+                    Ok((groups, start_mod, end_mod))
+                })
+                .await??;
+            let settled_end = self.is_settled();
+            let stale = actions::is_stale_read(
+                actions::FreshnessStamp {
+                    col_mod: start_mod,
+                    settled: settled_start,
+                },
+                actions::FreshnessStamp {
+                    col_mod: end_mod,
+                    settled: settled_end,
+                },
+            );
+            Ok((groups, stale))
+        }
+        .instrument(span)
+        .await
+    }
+
     /// Cooperative idle-release: close the collection, keeping the
     /// kernel reusable via [`reopen`]. WHEN to release is harness policy (an
     /// idle timer on its runtime); the kernel only provides the ops.
