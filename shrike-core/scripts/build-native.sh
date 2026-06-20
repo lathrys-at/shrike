@@ -20,6 +20,10 @@
 #                wheel and the per-PR `//...` lane build the lean extension, so a
 #                config naming `runtime: synthetic` is refused there. With this
 #                flag the staged extension is NOT byte-identical to the wheel's.
+#   --frame-pointers  force frame pointers across the Rust crates so py-spy
+#                --native can unwind on an optimized build (for `run.py
+#                --instrument` profiling). Use ONLY for a profiling build, not a
+#                clean-timing one — a reserved register skews the perf numbers.
 #
 # There is no system-SQLite linkage check here: the hermetic Bazel
 # build always bundles SQLite (FTS5 + trigram guaranteed, no system-linkage
@@ -64,10 +68,12 @@ fi
 BAZEL_FLAGS=()
 MODE="fastbuild"
 SYNTH=""
+FP=""
 for arg in "$@"; do
   case "$arg" in
     --release) BAZEL_FLAGS+=(-c opt); MODE="opt" ;;
     --synthetic) BAZEL_FLAGS+=(--define shrike_synthetic=on); SYNTH=" +synthetic" ;;
+    --frame-pointers) BAZEL_FLAGS+=(--config=frame-pointers); FP=" +frame-pointers" ;;
     *) echo "unknown arg: $arg" >&2; exit 1 ;;
   esac
 done
@@ -87,7 +93,7 @@ BUILT="$(./bazel cquery --output=files ${BAZEL_FLAGS[@]+"${BAZEL_FLAGS[@]}"} "$T
 # source-tree copy writable for the next rebuild and for tooling).
 cp -f "$BUILT" "$DEST"
 chmod u+w "$DEST"
-echo "built $DEST (bazel ${MODE}${SYNTH})"
+echo "built $DEST (bazel ${MODE}${SYNTH}${FP})"
 
 # Plain (non-editable) install: hatchling editables use an import hook that
 # mypy/stubtest cannot resolve, and the .so changes each rebuild anyway.

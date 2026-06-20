@@ -105,8 +105,38 @@ the `--synthetic` extension build.
   boot+drive are `manual` Bazel targets (the latter needs `--define
   shrike_synthetic=on`).
 
-A profiler-attach seam (flamegraphs / span timing) is the next child (#866);
-budgets + regression gating are #869.
+### Profiling a run
+
+To turn "this workflow is slow" into "this line is slow", add `--instrument` to
+profile a **single** workload under [py-spy](https://github.com/benfred/py-spy)
+`--native` — the one profiler that merges the Python harness and the Rust kernel
+into a single flamegraph (a hot frame reads `run.py → search_notes →
+kernel.search → usearch…` across the boundary):
+
+```bash
+pip install py-spy                                  # a manual-lane dev tool
+scripts/build-native.sh --release --synthetic --frame-pointers
+sudo scripts/perf.sh --profile stub --size 5000 --variant text --workloads search --instrument
+```
+
+- **One workload per instrumented run.** `--instrument` profiles a single
+  `--workloads` entry (it errors on a list) and writes `flame-<workload>.svg` next
+  to that run's `result.json` under `.cache/perf/runs/`.
+- **Build with `--frame-pointers`.** An optimized build drops frame pointers, which
+  degrades native unwinding; the flag forces them across the Rust crates. Keep it
+  OUT of a clean-timing build — a reserved register would skew the distribution, so
+  it's a separate profiling build.
+- **`sudo`.** Attaching to a process usually needs root (especially on macOS).
+  `--instrument` re-execs the run under py-spy; run the whole thing under `sudo`
+  (preserve `PATH`/`VIRTUAL_ENV` so it finds the venv interpreter).
+- **Rust-only detail:** [samply](https://github.com/mstange/samply) gives deeper
+  native frames (pleasant on macOS-arm64) but renders Python as opaque interpreter
+  frames — reach for it when the hotspot is known-Rust. The cross-boundary view is
+  py-spy's.
+
+Numeric per-span stage timings (parse → write → derive → embed → index, from the
+kernel's `tracing` spans) are the observability work (#800); the flamegraph already
+gives the visual breakdown. Budgets + regression gating are #869.
 
 ## The native (Rust) workspace
 

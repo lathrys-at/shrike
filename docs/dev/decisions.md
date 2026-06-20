@@ -643,5 +643,31 @@ Three deliberate choices:
   PR's wall-clock. The pure pieces (the distribution math, the artifact, the diff) are
   unit-tested on the per-PR lane, since that logic is where a silent measurement bug hides.
 
-Budgets + regression gating (#869) and the profiler-attach seam for hotspot attribution
-(#866) build on this; the seam's hook point is the runner's timing loop.
+Budgets + regression gating (#869) build on this.
+
+### Hotspot profiling uses py-spy `--native` for a cross-boundary flamegraph (#866)
+
+Distributions say *which workflow* is slow; attribution needs *which line*. `run.py
+--instrument` re-execs the run under **py-spy `--native`**, the only profiler that merges
+Python-level frames **and** native Rust frames into one flamegraph — so a hotspot is
+attributable whether it lives in the harness glue or the kernel (`run.py → search_notes →
+kernel.search → usearch…` in a single view). The cross-boundary view is the whole point: the
+kernel/harness split is exactly where "is this slow in Rust or Python?" gets asked, so the
+profiler has to see both sides. The alternatives each cover one:
+
+- **samply** — excellent native detail (pleasant on macOS-arm64), but renders the Python side
+  as opaque CPython interpreter C frames, so it can't separate glue cost from kernel cost.
+  Kept as a documented complement for deep Rust-only work.
+- **austin / cProfile / viztracer** — Python-only; blind to the kernel.
+- **cargo-flamegraph / perf / dtrace** — native-only; blind to the Python frames.
+
+Two consequences. An optimized build drops frame pointers, which degrades native unwinding, so
+the profiling build forces them across the Rust crates (`-Cforce-frame-pointers=yes`, opt-in
+via `build-native.sh --frame-pointers`) — never in a clean-timing build, where a reserved
+register would skew the distribution. And attaching to a process usually needs root, so this is
+a manual-lane tool, never CI.
+
+Numeric per-span durations — capturing the kernel's existing `tracing` spans through a real
+subscriber and a cross-FFI `traceparent` for a parse→write→derive→embed→index table — are
+deferred to the observability work (#800). The flamegraph gives the visual breakdown now; #800
+later adds the complementary numeric attribution.

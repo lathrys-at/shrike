@@ -14,6 +14,13 @@ test --test_output=errors
 # on a version change, since it lands in stable-status.txt.
 build --workspace_status_command=tools/workspace_status.sh
 
+# `--config=frame-pointers`: force frame pointers across the Rust crates so py-spy
+# --native can unwind cleanly on an optimized build (opt drops them by default,
+# degrading the native frames in a profiling flamegraph). Opt-in for the manual
+# profiling lane only (scripts/build-native.sh --frame-pointers) — never the
+# default: a reserved register would skew the clean-timing perf numbers.
+build:frame-pointers --@rules_rust//rust/settings:extra_rustc_flags=-Cforce-frame-pointers=yes
+
 # `bazel coverage` — measures the Python package, spawned server
 # subprocess included (each py_binary's rules_python bootstrap self-instruments
 # off the inherited COVERAGE_DIR; the integration conftest gives each spawned

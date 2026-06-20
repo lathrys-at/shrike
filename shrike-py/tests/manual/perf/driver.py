@@ -185,7 +185,8 @@ async def time_iterations(
     """Run ``run_one(i)`` ``warmup + repeats`` times, returning every iteration's
     wall time (ms) and the last iteration's item count. The warmup samples are
     kept here and discarded by :func:`~tests.manual.perf.stats.summarize`, so the
-    raw run is fully recorded. This is the profiler-attach seam (#866).
+    raw run is fully recorded. Under ``run.py --instrument`` the whole run executes
+    inside a py-spy sampler, so this loop is where the flamegraph's samples land.
 
     ``prepare(i)``, if given, runs UNTIMED before each iteration's ``run_one`` — the
     per-iteration setup a workload needs out of the timed region (reconcile
