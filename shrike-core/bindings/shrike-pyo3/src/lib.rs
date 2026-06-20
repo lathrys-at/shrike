@@ -52,8 +52,12 @@ mod anki_core;
 mod async_kernel;
 mod asyncio_bridge;
 // Injects the kernel's compute pool into the engine `Blocking` adapter; only
-// the route-1 sync engines (onnx/CLIP, Apple Vision) use it.
-#[cfg(any(feature = "engine-ort", feature = "engine-apple"))]
+// the route-1 sync engines (onnx/CLIP, Apple Vision, synthetic) use it.
+#[cfg(any(
+    feature = "engine-ort",
+    feature = "engine-apple",
+    feature = "engine-synthetic"
+))]
 mod compute_dispatch;
 mod finalize_gate;
 mod gated_log;
@@ -341,6 +345,10 @@ fn build_features() -> Vec<&'static str> {
         (cfg!(feature = "engine-apple"), "engine-apple"),
         (cfg!(feature = "engine-synthetic"), "engine-synthetic"),
         (cfg!(feature = "manage-llama"), "manage-llama"),
+        // Not a feature: a build-profile marker. Present on an unoptimized
+        // (fastbuild/debug) build, absent under `-c opt`. The perf harness records
+        // it so a debug-build latency is never mistaken for a release one.
+        (cfg!(debug_assertions), "debug-assertions"),
     ]
     .into_iter()
     .filter_map(|(compiled, name)| compiled.then_some(name))

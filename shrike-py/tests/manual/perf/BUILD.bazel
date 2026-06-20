@@ -4,34 +4,82 @@ load("@shrike_pip//:requirements.bzl", "requirement")
 
 package(default_testonly = True)
 
-# The perf-harness support: the deterministic corpus generator + the two profiles
-# (perf-stub / perf-real, ridden as data). The corpus is built through the REAL
-# native write path, so it needs shrike_native + the collection wrapper; pillow
-# generates the procedural images. The perf lane is off the per-PR critical path,
-# so its test target is `manual`; the library itself stays buildable on `//...`.
+# The PURE layer: distribution math + the result artifact + the baseline diff. No
+# native, no harness, no boot — so `pure_test` runs on the per-PR //... lane
+# without the native extension as a build prerequisite. (`result.Conditions.capture`
+# imports shrike_native lazily, only on a live run — never at import.)
+py_library(
+    name = "perf_pure",
+    srcs = [
+        "__init__.py",
+        "compare.py",
+        "result.py",
+        "stats.py",
+    ],
+    imports = ["../../.."],  # repo root on sys.path so `tests.manual.perf.*` resolves
+    visibility = ["//shrike-py/tests:__subpackages__"],
+)
+
+# The full harness support: the corpus generator (built through the REAL native
+# write path) + the runner (boots the REAL Harness from a profile). Pulls
+# shrike_native + the harness tier + pillow (procedural images) + pyyaml (profiles)
+# on top of the pure layer. The heavy test targets below are `manual`.
 py_library(
     name = "perf",
     srcs = [
-        "__init__.py",
         "corpus.py",
+        "driver.py",
+        "run.py",
+        "workloads.py",
     ],
     data = glob(["profiles/*.yml"]),
-    imports = ["../../.."],  # repo root on sys.path so `tests.manual.perf.*` resolves
+    imports = ["../../.."],
     visibility = ["//shrike-py/tests:__subpackages__"],
     deps = [
+        ":perf_pure",
         "//shrike-core/bindings/shrike-pyo3:shrike_native",
         "//shrike-py/src/shrike:collection",
+        "//shrike-py/src/shrike:derived",
+        "//shrike-py/src/shrike:driven_runtime",
+        "//shrike-py/src/shrike:embedding",
+        "//shrike-py/src/shrike:harness",
+        "//shrike-py/src/shrike:profiles",
+        "//shrike-py/src/shrike:tools",
         requirement("pillow"),
+        requirement("pyyaml"),
     ],
 )
 
-# The corpus generator's tests: build tiny collections through the native write
-# path (seconds). `manual` — the perf lane is benchmarking infra, not a per-PR
-# correctness gate; run it by name or locally.
+# The pure distribution / artifact / diff logic — runs on the per-PR //... lane
+# (the math + serialization is where regressions hide). Depends only on the pure
+# layer, so it needs no native build.
+pytest_test(
+    name = "pure_test",
+    size = "small",
+    srcs = [
+        "test_result.py",
+        "test_stats.py",
+    ],
+    deps = [":perf_pure"],
+)
+
+# The corpus generator: builds tiny collections through the native write path.
+# `manual` — the perf lane is benchmarking infra, off the per-PR critical path.
 pytest_test(
     name = "corpus_test",
     size = "small",
     srcs = ["test_corpus.py"],
+    tags = ["manual"],
+    deps = [":perf"],
+)
+
+# The runner smoke: boots perf-stub (synthetic) + times each workload. `manual`,
+# and it skips unless engine-synthetic is compiled — it boots a kernel + the
+# committed driver threads.
+pytest_test(
+    name = "run_test",
+    size = "medium",
+    srcs = ["test_run.py"],
     tags = ["manual"],
     deps = [":perf"],
 )

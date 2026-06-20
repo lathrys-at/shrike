@@ -633,3 +633,40 @@ features and swaps the linked engine variant for the one built with synthetic (B
 not unify across targets). A dev-only *second* extension target was rejected as heavier and against
 the single-build-graph principle; one toggled target is enough. The capability is reusable beyond
 perf — a config-selectable deterministic embedder is what fast, model-free tests want too.
+
+### The perf harness measures distributions through the real stack, off the per-PR lane (#865)
+
+The harness boots the **real** `Harness`/kernel from a config profile and times whole
+workflows against a deterministic corpus — not a microbenchmark of a function in isolation.
+The unit under test is the system (the #864 framing: a regression must point at a workflow,
+then a line, not at a synthetic loop). Both embedder modes run the identical runner; only
+the profile differs (`perf-stub` → the synthetic kernel-isolation run, `perf-real` →
+end-to-end with onnx/CLIP).
+
+Three deliberate choices:
+
+- **Distributions, not a number.** Every workload reports p50/p90/p99/max over N repeats
+  with an explicit warmup discard, *and* the conditions it was taken under (machine, build,
+  native-extension version, corpus size+variant, embedder mode). A stored run is a
+  comparable artifact; the baseline diff refuses to compare across mismatched invariant
+  conditions rather than report a meaningless cross-context delta. A regression is read off
+  the tail, not the mean.
+- **Deterministic, production-shaped corpora at 500/5k/50k.** Built through the real
+  `upsert_notes` write path (synthetic *content*, real *path*), seeded so a size/variant is
+  byte-identical across runs, cached + gitignored — no binary fixture in git. 50k is the
+  heaviest standard rung (revised down from the audit's 100k); 500/5k are the fast-feedback
+  rungs.
+- **Optimized builds, recorded.** The runner times whatever extension is staged, so it
+  must be built `-c opt` (`scripts/build-native.sh --release`) — the default fastbuild is
+  meaningless for perf. The extension reports its build profile (`debug-assertions` present
+  on a non-opt build), the runner captures `optimized` as an **invariant** condition, warns
+  on a debug run, and the baseline diff refuses to compare a debug run with a release one —
+  so a fastbuild number can never be mistaken for a real one.
+- **A manual lane.** The benchmark runs (the corpus build, the boot+drive) are `manual`
+  Bazel targets, off the per-PR critical path — perf is a measured property defended on
+  demand and (later, #869) on a scheduled lane, not a per-commit gate that would tax every
+  PR's wall-clock. The pure pieces (the distribution math, the artifact, the diff) are
+  unit-tested on the per-PR lane, since that logic is where a silent measurement bug hides.
+
+Budgets + regression gating (#869) and the profiler-attach seam for hotspot attribution
+(#866) build on this; the seam's hook point is the runner's timing loop.

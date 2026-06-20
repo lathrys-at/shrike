@@ -27,8 +27,10 @@ import pytest
 from tests.integration.conftest import (
     MCPClient,
     ServerInfo,
+    _raise_if_dead,
     requires_llama_server,
     requires_onnxruntime,
+    wait_for_index_ready,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedding]
@@ -73,17 +75,6 @@ def _base_url(server: ServerInfo) -> str:
     return server.url.rsplit("/", 1)[0]
 
 
-def _wait_for_index_ready(server: ServerInfo, timeout: float = 60.0) -> dict:
-    base = _base_url(server)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        idx = httpx.get(f"{base}/status", timeout=5.0).json().get("index", {})
-        if idx.get("state") == "ready" and idx.get("size", 0) > 0:
-            return idx
-        time.sleep(0.05)
-    raise TimeoutError("Index did not become ready")
-
-
 @pytest.fixture(
     scope="module",
     params=[
@@ -109,14 +100,16 @@ def backend_server(request: pytest.FixtureRequest, server_factory) -> tuple[Serv
         model = request.getfixturevalue("embedding_model")
         srv = server_factory("backend-llama", embedding_model=str(model))
 
+    # Wait for the backend to warm up UNBOUNDED — the ``requires_*`` marks
+    # already skip when the backend is absent, so a present-but-cold backend
+    # should just wait, not false-skip on a wall-clock budget (the move-right
+    # anti-pattern). Fail fast if the subprocess has died (a real failure); a
+    # backend that never warms while alive hits the bazel per-target
+    # ``test_timeout``.
     base = _base_url(srv)
-    deadline = time.monotonic() + 60.0
-    while time.monotonic() < deadline:
-        if httpx.get(f"{base}/status", timeout=5.0).json()["embedding"]["available"]:
-            break
+    while not httpx.get(f"{base}/status", timeout=5.0).json()["embedding"]["available"]:
+        _raise_if_dead(srv.proc, f"{backend} embedding service became available")
         time.sleep(0.05)
-    else:
-        pytest.skip(f"{backend} embedding service did not become available")
 
     mcp = MCPClient(srv.url)
     notes = [
@@ -134,14 +127,14 @@ def backend_server(request: pytest.FixtureRequest, server_factory) -> tuple[Serv
     assert created == _TOTAL_NOTES, f"expected {_TOTAL_NOTES} created, got {created}"
 
     httpx.post(f"{base}/index/rebuild", timeout=60.0)
-    _wait_for_index_ready(srv)
+    wait_for_index_ready(srv)
     return srv, backend, ndim
 
 
 class TestBackendParity:
     def test_index_dimension(self, backend_server: tuple[ServerInfo, str, int]) -> None:
         srv, _, ndim = backend_server
-        idx = _wait_for_index_ready(srv)
+        idx = wait_for_index_ready(srv)
         assert idx["size"] >= _TOTAL_NOTES
         assert idx["ndim"] == ndim
 
@@ -160,7 +153,7 @@ class TestBackendParity:
 
     def test_semantic_ranking(self, backend_server: tuple[ServerInfo, str, int]) -> None:
         srv, _, _ = backend_server
-        _wait_for_index_ready(srv)
+        wait_for_index_ready(srv)
         mcp = MCPClient(srv.url)
         # threshold=0 so a borderline absolute score doesn't drop the right answer
         # (the small models here score just under the default 0.5); this is a

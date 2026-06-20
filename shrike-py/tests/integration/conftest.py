@@ -325,9 +325,30 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _wait_for_server(url: str, timeout: float = 10.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+class _ServerDied(RuntimeError):
+    """A polled server subprocess exited before becoming ready — a real boot
+    failure, distinct from a slow-but-alive boot (which keeps waiting)."""
+
+
+def _raise_if_dead(proc: subprocess.Popen, what: str) -> None:
+    """Fail fast if ``proc`` has exited — for an unbounded readiness poll that
+    swallows connection errors and would otherwise hang on a dead endpoint."""
+    if proc.poll() is not None:
+        raise _ServerDied(f"Server subprocess exited with code {proc.returncode} before {what}")
+
+
+def _wait_for_server(url: str, proc: subprocess.Popen) -> None:
+    """Poll ``url`` until the server answers ``initialize``, UNBOUNDED — no
+    wall-clock deadline, which would flake a slow-but-not-hung loaded runner.
+
+    The poll swallows ``ConnectError`` (the not-yet-bound state), so a bare
+    unbounded loop would hang forever on a crashed boot; ``proc`` makes the
+    failure fast and specific instead — if the subprocess has exited, raise
+    ``_ServerDied`` at once. A genuinely-stuck-but-alive boot then hits the
+    bazel per-target ``test_timeout`` (the single global hang guard). The
+    per-request ``timeout=2.0`` bounds ONE socket read, not the poll."""
+    while True:
+        _raise_if_dead(proc, url)
         try:
             resp = httpx.post(
                 url,
@@ -349,21 +370,25 @@ def _wait_for_server(url: str, timeout: float = 10.0) -> None:
         except httpx.ConnectError:
             pass
         time.sleep(0.1)
-    raise TimeoutError(f"Server at {url} did not become ready within {timeout}s")
 
 
-def wait_for_index_ready(server: ServerInfo, timeout: float = 60.0) -> dict:
+def wait_for_index_ready(server: ServerInfo) -> dict:
     """Poll /status until the index is ready and non-empty (shared by the
     embedding suites — every test that triggers a rebuild must wait it out
-    before returning, or the running rebuild leaks into later tests)."""
+    before returning, or the running rebuild leaks into later tests).
+
+    The poll is UNBOUNDED — no wall-clock deadline, which would flake a
+    slow-but-not-hung cold runner mid-rebuild. This poll does NOT swallow
+    connection errors, so a crashed server raises here at once (a real
+    failure); a rebuild that never completes hangs and the bazel per-target
+    ``test_timeout`` (the single global hang guard) fails it. The per-request
+    ``timeout=5.0`` bounds ONE socket read, not the poll."""
     base = server.url.rsplit("/", 1)[0]
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    while True:
         idx = httpx.get(f"{base}/status", timeout=5.0).json().get("index", {})
         if idx.get("state") == "ready" and idx.get("size", 0) > 0:
             return idx
         time.sleep(0.05)
-    raise TimeoutError("Index did not become ready")
 
 
 def search_until(mcp, queries, predicate, *, limit: int = 10) -> list[dict]:
@@ -385,7 +410,12 @@ def search_until(mcp, queries, predicate, *, limit: int = 10) -> list[dict]:
 
 
 class ServerInfo:
-    """Connection details for a running test server."""
+    """Connection details for a running test server.
+
+    ``proc`` is the server subprocess handle: a post-boot readiness poll that
+    swallows connection errors (e.g. a /status availability wait) uses it to
+    fail fast if the server has died rather than hang on a dead endpoint.
+    """
 
     def __init__(
         self,
@@ -393,12 +423,14 @@ class ServerInfo:
         port: int,
         collection_path: str,
         log_dir: str,
+        proc: subprocess.Popen,
         embedding_port: int | None = None,
     ) -> None:
         self.url = url
         self.port = port
         self.collection_path = collection_path
         self.log_dir = log_dir
+        self.proc = proc
         self.embedding_port = embedding_port
         self.embedding_url = f"http://127.0.0.1:{embedding_port}" if embedding_port else None
 
@@ -534,7 +566,6 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         *,
         embedding_model: str | None = None,
         extra_args: list[str] | None = None,
-        boot_timeout: float | None = None,
     ) -> ServerInfo:
         root = tmp_path_factory.mktemp(name)
         log_dir = root / "logs"
@@ -602,33 +633,30 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         )
         processes.append(proc)
 
-        # An embedding server's boot includes the llama-server spawn + model
-        # load, which on a cold/slow CI runner can blow a 30s ceiling even with
-        # warm caches — give it the same generous deadline the collection_server
-        # availability poll uses. Costs nothing when boots are fast; the
-        # no-embedding case stays tight. ``boot_timeout`` overrides for boots
-        # the heuristic can't see (an attach/remote --config boot embeds over
-        # HTTP before serving).
-        timeout = boot_timeout if boot_timeout is not None else (120.0 if embedding_model else 10.0)
+        # Wait for the boot UNBOUNDED — a slow boot (an embedding server's
+        # llama-server spawn + model load is cold-runner-expensive) just waits;
+        # a genuinely-stuck-but-alive boot hits the bazel per-target
+        # ``test_timeout``. The only fast failure is a subprocess that has DIED
+        # (``_ServerDied``) — a real boot failure, not a hang.
         try:
-            _wait_for_server(url, timeout=timeout)
-        except TimeoutError:
+            _wait_for_server(url, proc)
+        except _ServerDied as died:
             proc.kill()
             stdout, stderr = proc.communicate(timeout=5)
             # stdout/stderr are usually EMPTY here — the server logs to
-            # --log-dir files — so include their tails, or a hung/slow boot
-            # on a CI runner is undiagnosable from the failure alone.
+            # --log-dir files — so include their tails, or a failed boot on a
+            # CI runner is undiagnosable from the failure alone.
             log_tails = []
             for log_file in sorted(Path(log_dir).glob("*.log")):
                 with suppress(OSError):
                     tail = log_file.read_text(errors="replace")[-4000:]
                     log_tails.append(f"--- {log_file.name} (tail) ---\n{tail}")
             raise RuntimeError(
-                f"Server '{name}' failed to start within {timeout:.0f}s.\n"
+                f"Server '{name}' failed to start: {died}\n"
                 f"stdout: {stdout.decode()}\nstderr: {stderr.decode()}\n" + "\n".join(log_tails)
-            ) from None
+            ) from died
 
-        return ServerInfo(url, port, collection_path, str(log_dir), embedding_port)
+        return ServerInfo(url, port, collection_path, str(log_dir), proc, embedding_port)
 
     yield create
 
@@ -1132,34 +1160,40 @@ def collection_server(server_factory, embedding_model: Path) -> ServerInfo:
     """
     srv = server_factory("semantic", embedding_model=str(embedding_model))
 
-    # Poll for embedding availability: on a fresh CI runner llama-server's
-    # first boot builds its model-preset cache (~6s, single-threaded), which
-    # can stall /status past a single short read timeout (warm locally, so it
-    # never reproduces).
+    # Poll for embedding availability UNBOUNDED: on a fresh CI runner
+    # llama-server's first boot builds its model-preset cache (~6s,
+    # single-threaded), which can stall /status well past any single short read
+    # timeout (warm locally, so it never reproduces); a wall-clock deadline here
+    # false-trips that slow-but-not-hung boot. This poll swallows connection
+    # errors (the not-yet-bound state), so it fails fast on a DEAD subprocess
+    # instead (``_raise_if_dead``) — a real boot failure, distinct from a slow
+    # boot. A genuinely-stuck-but-alive boot hits the bazel per-target
+    # ``test_timeout``. The per-request ``timeout=10.0`` bounds ONE socket read.
     status_url = srv.url.rsplit("/", 1)[0] + "/status"
     status: dict[str, Any] = {}
-    deadline = time.monotonic() + 120.0
-    while time.monotonic() < deadline:
-        try:
-            status = httpx.get(status_url, timeout=10.0).json()
-        except (httpx.ReadTimeout, httpx.ConnectError):
+    try:
+        while True:
+            _raise_if_dead(srv.proc, "embedding service became available")
+            try:
+                status = httpx.get(status_url, timeout=10.0).json()
+            except (httpx.ReadTimeout, httpx.ConnectError):
+                time.sleep(0.05)
+                continue
+            if status.get("embedding", {}).get("available"):
+                break
             time.sleep(0.05)
-            continue
-        if status.get("embedding", {}).get("available"):
-            break
-        time.sleep(0.05)
-    if not status.get("embedding", {}).get("available"):
+    except _ServerDied as died:
         log_dir = Path(srv.log_dir)
         stderr_log = log_dir / "llama-server-stderr.log"
         stderr_content = stderr_log.read_text() if stderr_log.exists() else "(no stderr log)"
         server_log = log_dir / "shrike.log"
         server_content = server_log.read_text() if server_log.exists() else "(no server log)"
         raise RuntimeError(
-            f"Embedding service not available within 120s of server start.\n"
-            f"Status: {status}\n"
+            f"Embedding service not available: {died}\n"
+            f"Last status: {status}\n"
             f"--- llama-server stderr ---\n{stderr_content}\n"
             f"--- shrike server log ---\n{server_content}"
-        )
+        ) from died
 
     mcp = MCPClient(srv.url)
     all_notes = []
