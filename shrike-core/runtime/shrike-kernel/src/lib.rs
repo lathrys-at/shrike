@@ -2795,6 +2795,14 @@ impl Kernel {
             // unbounded semantic read is bounded by the index size (USearch
             // allocates a result buffer of `k`), while the lexical-only path keeps
             // the cheap FTS5 `LIMIT` sentinel.
+            //
+            // This is the AGGREGATE size across every space, deliberately wider
+            // than a single space's count. It only ever RAISES a ceiling
+            // (`fetch_k`, and `SearchArgs.index_size` at the scoped clamp), and
+            // each sub-index re-clamps the fetch to its own size in
+            // `search_by_modality`, so a larger value never grows a result set —
+            // the over-fetch buffer is the only thing it touches. Parity rests on
+            // that per-sub-index clamp; don't drop it.
             let index_size: usize = self
                 .index_set
                 .all_orchestrators()

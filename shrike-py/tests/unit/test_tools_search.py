@@ -301,6 +301,9 @@ class TestSearchNotesResults:
         result = kharness.call_tool(mcp_sem, "search_notes", {"ids": [kbasic_note]})
         assert len(result["results"]) == 1
         assert result["results"][0]["source"] == f"note #{kbasic_note}"
+        # The anchor embeds its own note text; the planted neighbour (at cosine
+        # 0.8 against that text) surfaces — exercising the id-anchor embed path.
+        assert other in [m["id"] for m in result["results"][0]["matches"]]
 
     def test_exclude_ids(self, kharness, mcp_sem, kbasic_note):
         other = kharness.seed_note("Q", back="A")
