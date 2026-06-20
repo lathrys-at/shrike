@@ -1204,7 +1204,7 @@ def collection_server(server_factory, onnx_model: Path) -> ServerInfo:
     GGUF/llama-server surface is proved separately by ``llama_collection_server``
     (test_embedding.py).
 
-    Session-scoped: the embedding halves run serially (xdist=None in BUILD.bazel),
+    Session-scoped: the embedding lanes run serially (xdist=None in BUILD.bazel),
     and mutating tests clean up after themselves. No explicit rebuild: an
     empty-at-boot server materializes a ready index at boot, so the seeding upserts
     index incrementally.
