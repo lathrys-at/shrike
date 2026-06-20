@@ -1235,19 +1235,117 @@ fn fuse_cross_spaces(
     contribution
 }
 
-/// The fused search assembly (see module-section comment). `vectors` carries
-/// one query vector per source when `args.semantic`.
+/// The substring + fuzzy FTS5 batch results [`search_lexical`] returns: one
+/// substring entry (`None` = unservable) and one fuzzy entry per QUERY source.
+type LexicalBatches = (Vec<Option<Vec<LexicalRow>>>, Vec<Vec<LexicalRow>>);
+
+/// The thread-domain DISCOVERY outputs — the index + derived reads, computed
+/// WITHOUT touching `core`, so they can run off the collection actor (on the
+/// compute pool) while `core` serves other work. [`search_assemble`] consumes
+/// these to build the fused result from the prefetched notes.
+pub(crate) struct Discovery {
+    pub(crate) sem_by_source: Vec<ModalityHits>,
+    pub(crate) substr_batch: Vec<Option<Vec<LexicalRow>>>,
+    pub(crate) fuzzy_batch: Vec<Vec<LexicalRow>>,
+}
+
+/// The deck/tag lexical scope id set: one INDEXED anki query (deck:/tag: — never
+/// a field-text scan) shared by both lexical collectors, pushed into the FTS5
+/// queries so scoped literal/fuzzy search keeps exact recall without over-fetch.
+/// `None` = unscoped. The only collection read the discovery phase needs, so it
+/// is computed on the collection actor and handed to [`search_lexical`].
+pub(crate) fn compute_lex_scope(
+    core: &dyn Collection,
+    args: &SearchArgs,
+) -> NativeResult<Option<Vec<i64>>> {
+    if args.deck.is_some() || !args.tags.is_empty() {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(d) = &args.deck {
+            parts.push(format!("\"deck:{d}\""));
+        }
+        for tag in &args.tags {
+            parts.push(format!("\"tag:{tag}\""));
+        }
+        Ok(Some(core.find_notes(&parts.join(" "))?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// The semantic DISCOVERY read: per-modality `search_by_modality` rankings, one
+/// `ModalityHits` per source. No `core`. Over-fetches to cover exclusions and the
+/// post-hoc scope/substring filtering the assembly applies.
+pub(crate) fn search_semantic(
+    index: &dyn VectorIndex,
+    vectors: &[Vec<f32>],
+    args: &SearchArgs,
+) -> NativeResult<Vec<ModalityHits>> {
+    let exclude: HashSet<i64> = args.exclude.iter().copied().collect();
+    let mut fetch_k = args.top_k + exclude.len();
+    if args.deck.is_some() || !args.tags.is_empty() {
+        fetch_k = fetch_k.max(args.top_k * 10);
+        if args.index_size > 0 {
+            fetch_k = fetch_k.min(args.index_size);
+        }
+    }
+    // Scoped to the NOTE-item spaces: tag-centroid spaces share the engine but
+    // must never surface a tag key from a note search.
+    let note_spaces: Vec<String> = crate::NOTE_MODALITIES
+        .iter()
+        .map(|m| m.to_string())
+        .collect();
+    index.search_by_modality(vectors, fetch_k, Some(&note_spaces))
+}
+
+/// The lexical DISCOVERY reads: the batched substring + fuzzy FTS5 queries over
+/// every QUERY source, in source order. No `core`. `lex_scope` is the
+/// pre-computed deck/tag scope; each batch locks the derived connection, stages
+/// the scope id set, and compiles its statement ONCE for the whole set. Empty
+/// results when there are no query sources.
+///
+/// A REAL derived-read failure (e.g. a SQLITE_BUSY outliving the retry) surfaces
+/// here as an `Err` and must never become a silent field-text fallback — OCR/ASR
+/// text lives only in the derived store and the field scan can't serve it. `Ok`
+/// carries one entry per query source; a `None` substring entry means "the store
+/// couldn't serve this query" → the per-source fallback in the assembly.
+pub(crate) fn search_lexical(
+    derived: &dyn DerivedStore,
+    sources: &[SearchSource],
+    lex_scope: Option<&[i64]>,
+    args: &SearchArgs,
+) -> NativeResult<LexicalBatches> {
+    let exclude: HashSet<i64> = args.exclude.iter().copied().collect();
+    let query_texts: Vec<&str> = sources
+        .iter()
+        .filter(|s| s.is_query)
+        .map(|s| s.text.as_str())
+        .collect();
+    if query_texts.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let hidden: Vec<&str> = args
+        .hidden_lexical_sources
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let sub = derived.search_substring_batch(
+        &query_texts,
+        (args.top_k + exclude.len()) as i64,
+        lex_scope,
+        &hidden,
+    )?;
+    let fz = derived.search_fuzzy_batch(&query_texts, args.top_k as i64, lex_scope, &hidden)?;
+    Ok((sub, fz))
+}
+
+/// Sequential fused search: discover (index + derived reads) then assemble, all
+/// on the caller's thread. The `action_search_notes` binding rides this;
+/// [`crate::Kernel::search_fused`] drives the same phases across thread domains.
 ///
 /// # Errors
 ///
 /// Returns an error if semantic ranking is requested without an index, or any
-/// index/derived/collection read in the fusion fails.
-///
-/// # Panics
-///
-/// Panics only on an internal invariant violation — a candidate key collected
-/// from the assembled note map must still be present when scored
-/// (`expect("ordered key present")`).
+/// index/derived/collection read in the discovery or assembly fails.
 pub fn search_notes(
     core: &dyn Collection,
     index: Option<&dyn VectorIndex>,
@@ -1257,90 +1355,64 @@ pub fn search_notes(
     vectors: &[Vec<f32>],
     args: &SearchArgs,
 ) -> NativeResult<Vec<SearchResultGroup>> {
-    let exclude: HashSet<i64> = args.exclude.iter().copied().collect();
-
-    // Semantic pass (batched), per modality — over-fetch to cover exclusions
-    // and post-hoc scope/substring filtering.
-    let mut sem_by_source: Vec<ModalityHits> = Vec::new();
-    if args.semantic {
+    let lex_scope = compute_lex_scope(core, args)?;
+    let sem_by_source = if args.semantic {
         let index = index.ok_or_else(|| {
             NativeError::invalid_input("semantic search requested without an index engine")
         })?;
-        let mut fetch_k = args.top_k + exclude.len();
-        if args.deck.is_some() || !args.tags.is_empty() {
-            fetch_k = fetch_k.max(args.top_k * 10);
-            if args.index_size > 0 {
-                fetch_k = fetch_k.min(args.index_size);
-            }
-        }
-        // Scoped to the NOTE-item spaces: tag-centroid spaces share
-        // the engine but must never surface a tag key from a note search.
-        let note_spaces: Vec<String> = crate::NOTE_MODALITIES
-            .iter()
-            .map(|m| m.to_string())
-            .collect();
-        sem_by_source = index.search_by_modality(vectors, fetch_k, Some(&note_spaces))?;
-    }
-
-    // The lexical scope set: one INDEXED anki query (deck:/tag: —
-    // never a field-text scan) shared by both lexical collectors, pushed
-    // into the FTS5 queries so scoped literal/fuzzy search keeps exact
-    // recall without over-fetch. None = unscoped.
-    let lex_scope: Option<Vec<i64>> = if args.deck.is_some() || !args.tags.is_empty() {
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(d) = &args.deck {
-            parts.push(format!("\"deck:{d}\""));
-        }
-        for tag in &args.tags {
-            parts.push(format!("\"tag:{tag}\""));
-        }
-        Some(core.find_notes(&parts.join(" "))?)
+        search_semantic(index, vectors, args)?
     } else {
-        None
+        Vec::new()
     };
-
-    // Batch the lexical (FTS5) reads across ALL query sources up front: ONE
-    // search_*_batch call per signal, each locking the derived connection,
-    // staging the deck/tag scope id set, and compiling its statement ONCE for the
-    // whole set (an N-query search pays the lock/compile/scope-staging cost once,
-    // not per query). Anchor (id) sources are semantic-only and carry no lexical
-    // query, so the batch covers the QUERY sources, in source order.
-    //
-    // A REAL derived-read failure (e.g. a SQLITE_BUSY outliving the retry)
-    // surfaces here as an `Err` and must never become a silent field-text
-    // fallback — OCR/ASR text lives only in the derived store and the field scan
-    // can't serve it. `Ok` carries one entry per query source; a `None` substring
-    // entry means "the store couldn't serve this query" → the per-source fallback.
-    let query_texts: Vec<&str> = sources
-        .iter()
-        .filter(|s| s.is_query)
-        .map(|s| s.text.as_str())
-        .collect();
     let (substr_batch, fuzzy_batch) = match derived {
-        Some(d) if !query_texts.is_empty() => {
-            let hidden: Vec<&str> = args
-                .hidden_lexical_sources
-                .iter()
-                .map(String::as_str)
-                .collect();
-            let sub = d.search_substring_batch(
-                &query_texts,
-                (args.top_k + exclude.len()) as i64,
-                lex_scope.as_deref(),
-                &hidden,
-            )?;
-            let fz = d.search_fuzzy_batch(
-                &query_texts,
-                args.top_k as i64,
-                lex_scope.as_deref(),
-                &hidden,
-            )?;
-            (sub, fz)
-        }
-        // No store, or no query sources: each query source falls back per source
-        // (substring) and contributes no fuzzy signal.
-        _ => (Vec::new(), Vec::new()),
+        Some(d) => search_lexical(d, sources, lex_scope.as_deref(), args)?,
+        None => (Vec::new(), Vec::new()),
     };
+    search_assemble(
+        core,
+        index,
+        tag_keys,
+        sources,
+        vectors,
+        args,
+        Discovery {
+            sem_by_source,
+            substr_batch,
+            fuzzy_batch,
+        },
+    )
+}
+
+/// The ASSEMBLY phase: hydrate every candidate id across all sources in ONE
+/// batched `note_dicts`, then build each source's fused result from the
+/// prefetched notes + the discovery rankings. Touches `core` for the prefetch and
+/// the per-source `read_notes_batch` fallback (tag members + secondary
+/// cross-space image ids, discovered in-loop).
+///
+/// # Errors
+///
+/// Returns an error if a collection read (prefetch / per-source hydration) fails.
+///
+/// # Panics
+///
+/// Panics only on an internal invariant violation — a candidate key collected
+/// from the assembled note map must still be present when scored
+/// (`expect("ordered key present")`).
+pub(crate) fn search_assemble(
+    core: &dyn Collection,
+    index: Option<&dyn VectorIndex>,
+    tag_keys: Option<&crate::tag_centroids::TagKeyMap>,
+    sources: &[SearchSource],
+    vectors: &[Vec<f32>],
+    args: &SearchArgs,
+    discovery: Discovery,
+) -> NativeResult<Vec<SearchResultGroup>> {
+    let exclude: HashSet<i64> = args.exclude.iter().copied().collect();
+    let Discovery {
+        sem_by_source,
+        substr_batch,
+        fuzzy_batch,
+    } = discovery;
 
     // Collapse hydration: gather every candidate note id across ALL sources — the
     // semantic keys (per modality) plus the lexical (substring + fuzzy) row ids —

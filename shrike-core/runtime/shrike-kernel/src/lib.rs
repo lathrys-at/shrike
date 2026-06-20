@@ -2842,28 +2842,74 @@ impl Kernel {
                 cross_space_tau,
                 cross_space_budget,
             };
-            // Assembly on the collection actor (it touches `core`), bracketed by
-            // the freshness stamps. `settled` is read off the ingest gauge either
-            // side of the read; `col_mod` inside, where `core` lives.
+            // Thread-domain orchestration (TIER C): the discovery reads run OFF
+            // the collection actor (on the compute pool); only the lexical scope
+            // and the prefetch hydration sit on `core`. The freshness bracket
+            // spans the whole read — `col_mod` sampled in the first and last
+            // collection job, `settled` either side — so a write landing during
+            // the off-thread discovery is still caught (a wider, equal-or-safer
+            // window than a single-job bracket).
             let engine = self.index_set.primary().engine_arc();
             let derived = Arc::clone(&self.derived);
             let tag_keys = Arc::clone(&self.tag_keys);
             let settled_start = self.is_settled();
-            let (groups, start_mod, end_mod) = self
+
+            // Phase 1 (collection): the freshness start stamp + the deck/tag scope.
+            let (start_mod, lex_scope) = {
+                let args = args.clone();
+                self.collection
+                    .run(move |core| -> NativeResult<_> {
+                        Ok((core.col_mod()?, actions::compute_lex_scope(core, &args)?))
+                    })
+                    .await??
+            };
+
+            // Phase 2 (compute, forked): the semantic + lexical discovery reads.
+            // Both `dispatch_compute` futures are scheduled eagerly, so they run
+            // concurrently on the pool regardless of await order.
+            let sem_fut = {
+                let engine = Arc::clone(&engine);
+                let vectors = vectors.clone();
+                let args = args.clone();
+                crate::runtime::dispatch_compute(move || {
+                    if args.semantic {
+                        actions::search_semantic(&*engine, &vectors, &args)
+                    } else {
+                        Ok(Vec::new())
+                    }
+                })
+            };
+            let lex_fut = {
+                let sources = sources.clone();
+                let lex_scope = lex_scope.clone();
+                let args = args.clone();
+                crate::runtime::dispatch_compute(move || {
+                    actions::search_lexical(&*derived, &sources, lex_scope.as_deref(), &args)
+                })
+            };
+            let sem_by_source = sem_fut.await?;
+            let (substr_batch, fuzzy_batch) = lex_fut.await?;
+            let discovery = actions::Discovery {
+                sem_by_source,
+                substr_batch,
+                fuzzy_batch,
+            };
+
+            // Phase 3 (collection): the prefetch hydration + assembly + end stamp.
+            let (groups, end_mod) = self
                 .collection
                 .run(move |core| -> NativeResult<_> {
-                    let start_mod = core.col_mod()?;
-                    let groups = actions::search_notes(
+                    let groups = actions::search_assemble(
                         core,
                         Some(&*engine),
-                        Some(&*derived),
                         Some(&tag_keys),
                         &sources,
                         &vectors,
                         &args,
+                        discovery,
                     )?;
                     let end_mod = core.col_mod()?;
-                    Ok((groups, start_mod, end_mod))
+                    Ok((groups, end_mod))
                 })
                 .await??;
             let settled_end = self.is_settled();
