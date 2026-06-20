@@ -398,8 +398,9 @@ class _ControlListener:
         """Best-effort tighten the UDS to owner-only once uvicorn has bound it.
 
         uvicorn creates the socket file during startup; wait for that, then chmod
-        0o600. A no-op on the TCP fallback. Defense-in-depth on top of the state
-        dir's own (user-owned) permissions.
+        0o600. A no-op on the TCP fallback. The 0o700 runtime dir is the real
+        gate (on macOS, AF_UNIX connect authorization is by directory perms); the
+        chmod is defense-in-depth on top of it.
 
         Gives up if the server stops/never binds (``should_exit`` or a bounded
         deadline) rather than spinning forever — a control-startup that exits early
