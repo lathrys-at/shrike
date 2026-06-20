@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+import tests.manual.perf.corpus as corpus_mod
 from tests.manual.perf.corpus import (
     STANDARD_SIZES,
     CorpusSpec,
@@ -21,6 +22,25 @@ def test_text_corpus_builds_through_the_real_write_path(tmp_path):
     built = build_corpus(CorpusSpec(notes=20, variant="text"), tmp_path / "t")
     assert built.note_count == 20
     assert built.anki2_path.is_file()
+
+
+def test_build_tolerates_first_field_duplicates(tmp_path, monkeypatch):
+    # At 50k+ notes the short random first fields collide (birthday paradox), and
+    # Anki's first-field-duplicate rule would abort the whole build. The generator
+    # writes with on_duplicate="allow", so a collision creates the note rather than
+    # failing. Force the collision deterministically with an all-identical front.
+    colliding = [
+        {
+            "deck": "Perf::Deck 00",
+            "note_type": "Basic",
+            "tags": [],
+            "fields": {"Front": "identical front", "Back": f"body {i}"},
+        }
+        for i in range(5)
+    ]
+    monkeypatch.setattr(corpus_mod, "_generate_notes", lambda spec, media_dir: colliding)
+    built = build_corpus(CorpusSpec(notes=5, variant="text"), tmp_path / "dup")
+    assert built.note_count == 5  # all written despite identical first fields
 
 
 def test_image_corpus_attaches_images_to_a_fraction_of_notes(tmp_path):

@@ -109,20 +109,41 @@ class Conditions:
         return [f for f in self.INVARIANT if getattr(self, f) != getattr(other, f)]
 
 
+#: The phases a workload can measure, in display order. ``response`` (the op's
+#: time to return) is always present; a workload with an asynchronous tail
+#: (writes draining the index/derived queue) adds ``settle`` (the drain to
+#: quiescence) and ``total`` (response + settle, per iteration).
+PHASE_ORDER = ("response", "settle", "total")
+
+
 @dataclass(frozen=True)
 class WorkloadResult:
-    """One workload's measured distribution, plus how many items it processed
-    (so a throughput view — items/sec — is derivable downstream)."""
+    """One workload's measured latency distributions — one per timed *phase* —
+    plus how many items it processed (so a throughput view — items/sec — is
+    derivable downstream).
+
+    ``phases`` always carries ``"response"``; a settling workload also carries
+    ``"settle"`` and ``"total"`` (see :data:`PHASE_ORDER`)."""
 
     workload: str
-    distribution: Distribution
+    phases: dict[str, Distribution]
     items: int
+
+    @property
+    def distribution(self) -> Distribution:
+        """The response-phase distribution — the op's time to return. For a
+        non-settling workload (search, rebuild) this is the whole operation."""
+        return self.phases["response"]
+
+    def ordered_phases(self) -> list[tuple[str, Distribution]]:
+        """The measured phases in canonical display order (see :data:`PHASE_ORDER`)."""
+        return [(p, self.phases[p]) for p in PHASE_ORDER if p in self.phases]
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> WorkloadResult:
         return cls(
             workload=raw["workload"],
-            distribution=Distribution.from_dict(raw["distribution"]),
+            phases={k: Distribution.from_dict(v) for k, v in raw["phases"].items()},
             items=raw["items"],
         )
 
@@ -163,7 +184,9 @@ class RunResult:
 
 def render_table(run: RunResult) -> str:
     """A compact human-readable table of the run (the dogfooding artifact body),
-    one row per workload with the latency percentiles."""
+    one row per workload *phase* with the latency percentiles. A settling workload
+    spans three rows (response/settle/total); the workload name and item count
+    print once, on its first row."""
     lines = [
         f"# perf run — {run.conditions.profile} @ "
         f"{run.conditions.corpus_size} notes ({run.conditions.corpus_variant})",
@@ -173,12 +196,15 @@ def render_table(run: RunResult) -> str:
         f"commit={run.conditions.commit[:12]}{'+dirty' if run.conditions.dirty else ''}",
         f"# repeats={run.conditions.repeats} warmup={run.conditions.warmup} @ {run.timestamp}",
         "",
-        f"{'workload':<24}{'items':>8}{'p50 ms':>12}{'p90 ms':>12}{'p99 ms':>12}{'max ms':>12}",
+        f"{'workload':<18}{'phase':<10}{'items':>8}"
+        f"{'p50 ms':>12}{'p90 ms':>12}{'p99 ms':>12}{'max ms':>12}",
     ]
     for r in run.results:
-        d = r.distribution
-        lines.append(
-            f"{r.workload:<24}{r.items:>8}{d.p50_ms:>12.3f}{d.p90_ms:>12.3f}"
-            f"{d.p99_ms:>12.3f}{d.max_ms:>12.3f}"
-        )
+        for idx, (phase, d) in enumerate(r.ordered_phases()):
+            name = r.workload if idx == 0 else ""
+            items = str(r.items) if idx == 0 else ""
+            lines.append(
+                f"{name:<18}{phase:<10}{items:>8}{d.p50_ms:>12.3f}{d.p90_ms:>12.3f}"
+                f"{d.p99_ms:>12.3f}{d.max_ms:>12.3f}"
+            )
     return "\n".join(lines)

@@ -3,11 +3,11 @@ selected workloads, emit a result artifact (and optionally diff a baseline).
 
     # kernel-isolation run (needs scripts/build-native.sh --release --synthetic):
     python shrike-py/tests/manual/perf/run.py --profile stub --size 500 \
-        --variant text --workloads search,rebuild
+        --variant text --workloads search-batch,rebuild
 
     # end-to-end run (needs --release + the onnx/CLIP models in the model cache):
     python shrike-py/tests/manual/perf/run.py --profile real --size 5000 \
-        --variant text+image --workloads search
+        --variant text+image --workloads search-batch
 
 Build the extension OPTIMIZED (`--release`, i.e. `-c opt`) — the default fastbuild
 is meaningless for perf. The run records whether the build was optimized and warns
@@ -21,10 +21,13 @@ on-request `--baseline` diff against a prior run — there is no automated gate.
 from __future__ import annotations
 
 import argparse
+import io
+import logging
 import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -36,6 +39,7 @@ for _p in (_PKG_ROOT, _PKG_ROOT / "src"):
     if _p.is_dir() and str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from shrike.platform.log import FILE_DATE_FORMAT, FILE_FORMAT  # noqa: E402
 from tests.manual.perf.compare import compare, render_comparison  # noqa: E402
 from tests.manual.perf.corpus import (  # noqa: E402
     DEFAULT_CACHE_ROOT,
@@ -61,6 +65,62 @@ from tests.manual.perf.result import (  # noqa: E402
 from tests.manual.perf.workloads import WORKLOADS  # noqa: E402
 
 _RUNS_DIR = DEFAULT_CACHE_ROOT.parent / "runs"
+
+
+def _install_log_buffer() -> io.StringIO:
+    """Route all logging into an in-memory buffer instead of the terminal, so log
+    writes (the per-call INFO lines, native tracing) never perturb the timed
+    iterations. Cleared of any prior handlers, so nothing reaches stdout/stderr
+    during the run; flushed to ``run.log`` at the end (see :func:`_flush_log_buffer`)."""
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setFormatter(logging.Formatter(FILE_FORMAT, datefmt=FILE_DATE_FORMAT))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    return buf
+
+
+def _flush_log_buffer(buf: io.StringIO, path: Path) -> None:
+    """Write the captured log buffer to ``path`` (the run's ``run.log``)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(buf.getvalue())
+
+
+# A fixed-width in-place progress bar, refreshed once per completed iteration.
+_PROGRESS_WIDTH = 24
+
+
+def _progress_printer(label: str) -> Callable[[int, int], None]:
+    """A pytest-style in-place progress line for one workload's iterations, so a
+    long run shows forward motion instead of an apparent hang. Goes to stdout
+    (harness UI), separate from the captured log buffer; the per-tick write sits
+    between timed iterations, never inside a measurement."""
+
+    def tick(done: int, total: int) -> None:
+        filled = int(_PROGRESS_WIDTH * done / total) if total else _PROGRESS_WIDTH
+        bar = "#" * filled + "-" * (_PROGRESS_WIDTH - filled)
+        sys.stdout.write(f"\r  {label:<16} [{bar}] {done:>3}/{total}")
+        sys.stdout.flush()
+
+    return tick
+
+
+def _workload_summary(result: WorkloadResult) -> str:
+    """A one-line per-workload summary that overwrites its progress bar — response
+    p50/p90, plus settle/total p50 for a settling workload."""
+    d = result.distribution
+    extra = ""
+    if "total" in result.phases:
+        extra = (
+            f"  settle p50={result.phases['settle'].p50_ms:8.2f}ms"
+            f"  total p50={result.phases['total'].p50_ms:8.2f}ms"
+        )
+    return (
+        f"\r  {result.workload:<16} response p50={d.p50_ms:8.2f}ms p90={d.p90_ms:8.2f}ms"
+        f"{extra}  ({result.items} items)"
+    )
 
 
 def _isolated_working_copy(corpus_anki2: Path, corpus_media: Path, run_dir: Path) -> Path:
@@ -104,22 +164,27 @@ async def _run_workloads(
         booted = await boot_from_profile(profile_path, working, run_dir / "cache")
         try:
             for w in workloads:
-                results.append(await measure(w, booted, repeats=repeats, warmup=warmup))
+                res = await measure(
+                    w, booted, repeats=repeats, warmup=warmup, on_tick=_progress_printer(w.name)
+                )
+                print(_workload_summary(res))
+                results.append(res)
         finally:
             # Close before ingest opens its own kernels — the driven runtime holds
             # one kernel at a time.
             await booted.close()
     if INGEST in names:
-        results.append(
-            await measure_ingest(
-                profile_path,
-                corpus,
-                run_dir / "ingest",
-                repeats=repeats,
-                warmup=warmup,
-                with_media=with_media,
-            )
+        res = await measure_ingest(
+            profile_path,
+            corpus,
+            run_dir / "ingest",
+            repeats=repeats,
+            warmup=warmup,
+            with_media=with_media,
+            on_tick=_progress_printer(INGEST),
         )
+        print(_workload_summary(res))
+        results.append(res)
     return results
 
 
@@ -176,10 +241,10 @@ def main() -> int:
     parser.add_argument("--variant", choices=VARIANTS, default="text", help="Corpus modality.")
     parser.add_argument(
         "--workloads",
-        default="search,rebuild,upsert-batch",
-        help=f"Subset of {sorted({*WORKLOADS, INGEST})} (default: search,rebuild,upsert-batch). "
-        "'ingest' is the cold package-import scenario (its own boot per sample; heavy "
-        "— use a small --repeats).",
+        default="search-batch,rebuild,upsert-batch",
+        help=f"Subset of {sorted({*WORKLOADS, INGEST})} "
+        "(default: search-batch,rebuild,upsert-batch). 'ingest' is the cold "
+        "package-import scenario (its own boot per sample; heavy — use a small --repeats).",
     )
     parser.add_argument("--repeats", type=int, default=20, help="Timed iterations per workload.")
     parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations discarded.")
@@ -222,13 +287,15 @@ def main() -> int:
             + "` for real results."
         )
 
-    spec = CorpusSpec(notes=args.size, variant=args.variant)
-    print(f"Ensuring corpus: {args.size} notes ({args.variant}) ...")
-    corpus = ensure_corpus(spec)
+    # Capture logging into an in-memory buffer (off the terminal, so the per-call
+    # INFO lines and native tracing don't perturb the timed iterations); flushed
+    # to run.log at the end.
+    log_buffer = _install_log_buffer()
 
     profile_path = Path(__file__).resolve().parent / "profiles" / f"perf-{args.profile}.yml"
     # Under --instrument the outer run picks the dir and passes it down, so the
-    # flamegraph and this run's result.json land together.
+    # flamegraph and this run's result.json land together. Resolved before the
+    # corpus build so run.log has a home even if a later step fails.
     env_run_dir = os.environ.get(RUN_DIR_ENV)
     if env_run_dir:
         run_dir = Path(env_run_dir)
@@ -238,55 +305,64 @@ def main() -> int:
             _RUNS_DIR / f"perf-{args.profile}-{args.variant.replace('+', '_')}-{args.size}-{stamp}"
         )
 
-    # The kernel runs a harness-driven runtime with no lazy fallback: install +
-    # park the committed driver threads before any kernel op, tear down after.
-    from shrike.platform.driven_runtime import DrivenRuntime
-
-    runtime = DrivenRuntime()
-    runtime.install()
-    runtime.start()
     try:
-        results = run_async(
-            _run_workloads(
-                profile_path,
-                corpus,
-                run_dir,
-                names,
-                args.repeats,
-                args.warmup,
-                with_media=(args.variant == "text+image"),
-            )
-        )
-    finally:
-        runtime.shutdown()
+        spec = CorpusSpec(notes=args.size, variant=args.variant)
+        print(f"Ensuring corpus: {args.size} notes ({args.variant}) ...")
+        corpus = ensure_corpus(spec)
 
-    run = RunResult(
-        conditions=Conditions.capture(
-            profile=f"perf-{args.profile}",
-            corpus_size=args.size,
-            corpus_variant=args.variant,
-            repeats=args.repeats,
-            warmup=args.warmup,
-        ),
-        results=results,
-        timestamp=datetime.now(UTC).isoformat(),
-    )
+        # The kernel runs a harness-driven runtime with no lazy fallback: install +
+        # park the committed driver threads before any kernel op, tear down after.
+        from shrike.platform.driven_runtime import DrivenRuntime
 
-    out = args.out or (run_dir / "result.json")
-    run.save(out)
-    print()
-    print(render_table(run))
-    print(f"\nwrote {out}")
-
-    if args.baseline:
-        baseline = RunResult.load(args.baseline)
+        runtime = DrivenRuntime()
+        runtime.install()
+        runtime.start()
         try:
-            cmp = compare(baseline, run)
-        except ValueError as err:
-            print(f"\ncannot diff baseline: {err}")
-            return 0
-        print("\n# vs baseline")
-        print(render_comparison(cmp))
+            results = run_async(
+                _run_workloads(
+                    profile_path,
+                    corpus,
+                    run_dir,
+                    names,
+                    args.repeats,
+                    args.warmup,
+                    with_media=(args.variant == "text+image"),
+                )
+            )
+        finally:
+            runtime.shutdown()
+
+        run = RunResult(
+            conditions=Conditions.capture(
+                profile=f"perf-{args.profile}",
+                corpus_size=args.size,
+                corpus_variant=args.variant,
+                repeats=args.repeats,
+                warmup=args.warmup,
+            ),
+            results=results,
+            timestamp=datetime.now(UTC).isoformat(),
+        )
+
+        out = args.out or (run_dir / "result.json")
+        run.save(out)
+        print()
+        print(render_table(run))
+        print(f"\nwrote {out}")
+
+        if args.baseline:
+            baseline = RunResult.load(args.baseline)
+            try:
+                cmp = compare(baseline, run)
+            except ValueError as err:
+                print(f"\ncannot diff baseline: {err}")
+            else:
+                print("\n# vs baseline")
+                print(render_comparison(cmp))
+    finally:
+        log_path = run_dir / "run.log"
+        _flush_log_buffer(log_buffer, log_path)
+        print(f"wrote {log_path}")
     return 0
 
 

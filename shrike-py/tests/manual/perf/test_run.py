@@ -15,10 +15,12 @@ import shrike_native
 from tests.manual.perf.corpus import CorpusSpec, build_corpus
 from tests.manual.perf.driver import boot_from_profile, measure, measure_ingest, run_async
 from tests.manual.perf.workloads import (
-    DeleteWorkload,
+    DeleteBatchWorkload,
+    DeleteSeqWorkload,
     RebuildWorkload,
     ReconcileWorkload,
-    SearchWorkload,
+    SearchBatchWorkload,
+    SearchSeqWorkload,
     UpsertBatchWorkload,
     UpsertSeqWorkload,
 )
@@ -60,35 +62,56 @@ async def _measure(tmp_path: Path, workload, *, repeats: int, warmup: int):
         await booted.close()
 
 
-def test_search_workload_produces_a_distribution(_driven, tmp_path):
-    res = run_async(_measure(tmp_path, SearchWorkload(n_queries=4, limit=5), repeats=2, warmup=1))
-    assert res.workload == "search"
+def test_search_batch_produces_a_response_only_distribution(_driven, tmp_path):
+    res = run_async(_measure(tmp_path, SearchBatchWorkload(count=4, limit=5), repeats=2, warmup=1))
+    assert res.workload == "search-batch"
     assert res.distribution.n == 2  # the post-warmup repeats
     assert res.distribution.p50_ms >= 0.0
+    assert set(res.phases) == {"response"}  # a read path has no settle phase
+
+
+def test_search_seq_issues_one_call_per_query(_driven, tmp_path):
+    res = run_async(_measure(tmp_path, SearchSeqWorkload(count=4, limit=5), repeats=2, warmup=0))
+    assert res.workload == "search-seq"
+    assert res.distribution.n == 2
 
 
 def test_rebuild_workload_runs(_driven, tmp_path):
     res = run_async(_measure(tmp_path, RebuildWorkload(), repeats=2, warmup=0))
     assert res.workload == "rebuild"
     assert res.distribution.n == 2
+    assert set(res.phases) == {"response"}
 
 
-def test_upsert_batch_reports_items(_driven, tmp_path):
+def test_upsert_batch_reports_items_and_times_both_phases(_driven, tmp_path):
     res = run_async(_measure(tmp_path, UpsertBatchWorkload(count=8), repeats=2, warmup=0))
     assert res.workload == "upsert-batch"
     assert res.items == 8
+    # A write is timed in two phases: the action return, then the drain to settle,
+    # plus their per-iteration total.
+    assert set(res.phases) == {"response", "settle", "total"}
+    assert res.phases["total"].p50_ms >= res.phases["response"].p50_ms
 
 
 def test_upsert_seq_writes_each_note_separately(_driven, tmp_path):
     res = run_async(_measure(tmp_path, UpsertSeqWorkload(count=8), repeats=2, warmup=0))
     assert res.workload == "upsert-seq"
     assert res.items == 8
+    assert "settle" in res.phases
 
 
-def test_delete_workload_deletes_its_own_pool_slice(_driven, tmp_path):
-    # setup upserts iterations*batch notes; each iteration deletes one batch slice.
-    res = run_async(_measure(tmp_path, DeleteWorkload(batch=5), repeats=2, warmup=0))
-    assert res.workload == "delete"
+def test_delete_batch_deletes_its_own_pool_slice(_driven, tmp_path):
+    # setup upserts iterations*count notes (maintained + settled); each iteration
+    # deletes one disjoint slice.
+    res = run_async(_measure(tmp_path, DeleteBatchWorkload(count=5), repeats=2, warmup=0))
+    assert res.workload == "delete-batch"
+    assert res.items == 5
+    assert set(res.phases) == {"response", "settle", "total"}
+
+
+def test_delete_seq_deletes_one_id_per_call(_driven, tmp_path):
+    res = run_async(_measure(tmp_path, DeleteSeqWorkload(count=5), repeats=2, warmup=0))
+    assert res.workload == "delete-seq"
     assert res.items == 5
 
 
@@ -99,6 +122,7 @@ def test_reconcile_workload_recovers_out_of_band_drift(_driven, tmp_path):
     assert res.workload == "reconcile"
     assert res.distribution.n == 2
     assert res.items == 6
+    assert set(res.phases) == {"response", "settle", "total"}
 
 
 def test_ingest_workload_imports_a_cold_package(_driven, tmp_path):

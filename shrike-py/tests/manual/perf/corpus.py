@@ -289,8 +289,13 @@ def build_corpus(spec: CorpusSpec, dest: Path) -> BuiltCorpus:
     media_dir.mkdir(parents=True, exist_ok=True)
     try:
         notes = _generate_notes(spec, media_dir)
+        # `allow`, not `error`: the synthetic first fields are short random
+        # sentences, so at 50k+ notes two of them collide (birthday paradox) and
+        # Anki's first-field-duplicate rule would abort the whole build. A handful
+        # of duplicate fronts is harmless — even realistic — for a perf fixture, so
+        # the corpus is always created at the requested size.
         results = wrapper.run_sync(
-            lambda core: json.loads(core.upsert_notes(json.dumps(notes), "error", False))
+            lambda core: json.loads(core.upsert_notes(json.dumps(notes), "allow", False))
         )
     finally:
         wrapper.close()

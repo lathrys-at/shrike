@@ -74,11 +74,11 @@ distributions. Run it by name:
 ```bash
 # kernel-isolation run (the #445 hotspot class, no model inference):
 scripts/build-native.sh --release --synthetic   # OPTIMIZED (-c opt) + synthetic
-scripts/perf.sh --profile stub --size 5000 --variant text --workloads search,rebuild,upsert-batch
+scripts/perf.sh --profile stub --size 5000 --variant text --workloads search-batch,rebuild,upsert-batch
 
 # end-to-end run (real onnx + CLIP; models fetched to the model cache):
 scripts/build-native.sh --release                # optimized extension
-scripts/perf.sh --profile real --size 5000 --variant text+image --workloads search
+scripts/perf.sh --profile real --size 5000 --variant text+image --workloads search-batch
 ```
 
 **Build optimized.** The runner times whatever extension is staged in the venv, and
@@ -93,13 +93,25 @@ embedder, and the two are comparable because they share the modality shape.
 `--profile stub` selects `runtime: synthetic`, which a lean build refuses — hence
 the `--synthetic` extension build.
 
+- **Workloads** drive the transport-neutral **actions API** directly (the
+  maintained serving path, off the FastMCP transport — we measure the system, not
+  the wire adapter). The read/write ops come in two shapes on the batching axis:
+  `search-{batch,seq}`, `upsert-{batch,seq}`, `delete-{batch,seq}` (one call with N
+  items vs N calls of one), plus `rebuild`, `reconcile`, and `ingest`.
+- **Two-phase timing.** A write returns once committed with index/derived
+  maintenance *enqueued*, so each write/reconcile workload is timed in two phases —
+  `response` (the action returns) and `settle` (drain to quiescence) — and reports
+  both plus their per-iteration `total`. Read workloads have no tail and report
+  `response` only.
 - **Sizes** 500 / 5k / 50k notes; **variants** `text` and `text+image`. Corpora
   are deterministic, built through the real write path, and cached + gitignored
   under `.cache/perf/corpora/`.
 - **Results** are distributions (p50/p90/p99/max) plus the conditions they were
   taken under (machine, build, corpus, mode), written to `.cache/perf/runs/`.
-  `--baseline <result.json>` diffs a prior run and refuses to compare across
-  mismatched conditions.
+  `--baseline <result.json>` diffs a prior run (per phase) and refuses to compare
+  across mismatched conditions. Logging is captured to an in-memory buffer and
+  flushed to `run.log` beside the result — never to the terminal, so it can't
+  contaminate the timings.
 - The pure pieces (distribution math, the artifact, the diff) are unit-tested on
   the per-PR lane (`//shrike-py/tests/manual/perf:pure_test`); the corpus and the
   boot+drive are `manual` Bazel targets (the latter needs `--define
@@ -116,7 +128,7 @@ kernel.search → usearch…` across the boundary):
 ```bash
 pip install py-spy                                  # a manual-lane dev tool
 scripts/build-native.sh --release --synthetic --frame-pointers
-sudo scripts/perf.sh --profile stub --size 5000 --variant text --workloads search --instrument
+sudo scripts/perf.sh --profile stub --size 5000 --variant text --workloads search-batch --instrument
 ```
 
 - **One workload per instrumented run.** `--instrument` profiles a single

@@ -2,8 +2,8 @@
 # Performance harness entry point (#865): run gold workloads against a
 # deterministic corpus under a profile and report latency distributions.
 #
-#   scripts/perf.sh --profile stub --size 500 --variant text --workloads search,rebuild
-#   scripts/perf.sh --profile real --size 5000 --variant text+image --workloads search
+#   scripts/perf.sh --profile stub --size 500 --variant text --workloads search-batch,rebuild
+#   scripts/perf.sh --profile real --size 5000 --variant text+image --workloads search-batch
 #
 # Prerequisites:
 #   - Build OPTIMIZED. The runner times the staged extension, and the default

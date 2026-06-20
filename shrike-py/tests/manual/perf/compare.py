@@ -23,14 +23,20 @@ class IncomparableRuns(ValueError):
 
 @dataclass(frozen=True)
 class WorkloadDelta:
-    """One workload's change from baseline to run, per percentile. ``pct`` is the
-    relative change (``+0.10`` = 10% slower); positive is a regression."""
+    """One workload phase's p50 change from baseline to run. ``pct`` is the
+    relative change (``+0.10`` = 10% slower); positive is a regression. ``label``
+    is ``workload/phase`` — the diff is keyed per phase."""
 
     workload: str
+    phase: str
     baseline_ms: float
     current_ms: float
     delta_ms: float
     pct: float
+
+    @property
+    def label(self) -> str:
+        return f"{self.workload}/{self.phase}"
 
 
 def _delta(baseline: float, current: float) -> tuple[float, float]:
@@ -41,22 +47,29 @@ def _delta(baseline: float, current: float) -> tuple[float, float]:
 
 @dataclass(frozen=True)
 class Comparison:
-    """The per-workload p50 deltas from baseline to current. Workloads present in
-    only one run are reported separately so a renamed/added workload is visible
-    rather than silently dropped."""
+    """The per-(workload, phase) p50 deltas from baseline to current. Phases
+    present in only one run are reported separately so a renamed/added workload or
+    a changed phase set is visible rather than silently dropped."""
 
     deltas: list[WorkloadDelta]
     only_in_baseline: list[str]
     only_in_current: list[str]
 
     def regressions(self, threshold_pct: float) -> list[WorkloadDelta]:
-        """Workloads whose p50 grew by more than ``threshold_pct`` (e.g. ``0.10``
+        """Phases whose p50 grew by more than ``threshold_pct`` (e.g. ``0.10``
         for 10%) — surfaced for a human reading the diff, not an automated gate."""
         return [d for d in self.deltas if d.pct > threshold_pct]
 
 
+def _phase_p50s(run: RunResult) -> dict[tuple[str, str], float]:
+    """``(workload, phase) -> p50_ms`` over every measured phase of a run."""
+    return {
+        (r.workload, phase): dist.p50_ms for r in run.results for phase, dist in r.phases.items()
+    }
+
+
 def compare(baseline: RunResult, current: RunResult) -> Comparison:
-    """Diff ``current`` against ``baseline`` on p50.
+    """Diff ``current`` against ``baseline`` on p50, per workload phase.
 
     # Errors
 
@@ -70,33 +83,40 @@ def compare(baseline: RunResult, current: RunResult) -> Comparison:
         )
         raise IncomparableRuns(f"runs differ on invariant condition(s): {details}")
 
-    base_by_name = {r.workload: r for r in baseline.results}
-    cur_by_name = {r.workload: r for r in current.results}
+    base = _phase_p50s(baseline)
+    cur = _phase_p50s(current)
 
     deltas: list[WorkloadDelta] = []
-    for name in sorted(base_by_name.keys() & cur_by_name.keys()):
-        b = base_by_name[name].distribution.p50_ms
-        c = cur_by_name[name].distribution.p50_ms
+    for workload, phase in sorted(base.keys() & cur.keys()):
+        b = base[(workload, phase)]
+        c = cur[(workload, phase)]
         delta_ms, pct = _delta(b, c)
         deltas.append(
-            WorkloadDelta(workload=name, baseline_ms=b, current_ms=c, delta_ms=delta_ms, pct=pct)
+            WorkloadDelta(
+                workload=workload,
+                phase=phase,
+                baseline_ms=b,
+                current_ms=c,
+                delta_ms=delta_ms,
+                pct=pct,
+            )
         )
     return Comparison(
         deltas=deltas,
-        only_in_baseline=sorted(base_by_name.keys() - cur_by_name.keys()),
-        only_in_current=sorted(cur_by_name.keys() - base_by_name.keys()),
+        only_in_baseline=sorted(f"{w}/{p}" for (w, p) in base.keys() - cur.keys()),
+        only_in_current=sorted(f"{w}/{p}" for (w, p) in cur.keys() - base.keys()),
     )
 
 
 def render_comparison(cmp: Comparison) -> str:
-    """A human-readable diff table — one row per shared workload, p50 delta with
-    its sign, plus any workloads present in only one run."""
+    """A human-readable diff table — one row per shared workload phase, p50 delta
+    with its sign, plus any phases present in only one run."""
     lines = [
-        f"{'workload':<24}{'base ms':>12}{'cur ms':>12}{'Δ ms':>12}{'Δ %':>10}",
+        f"{'workload/phase':<26}{'base ms':>12}{'cur ms':>12}{'Δ ms':>12}{'Δ %':>10}",
     ]
     for d in cmp.deltas:
         lines.append(
-            f"{d.workload:<24}{d.baseline_ms:>12.3f}{d.current_ms:>12.3f}"
+            f"{d.label:<26}{d.baseline_ms:>12.3f}{d.current_ms:>12.3f}"
             f"{d.delta_ms:>+12.3f}{d.pct * 100:>+9.1f}%"
         )
     if cmp.only_in_baseline:

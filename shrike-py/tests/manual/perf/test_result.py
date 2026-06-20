@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 
 from tests.manual.perf.compare import IncomparableRuns, compare
-from tests.manual.perf.result import Conditions, RunResult, WorkloadResult
+from tests.manual.perf.result import Conditions, RunResult, WorkloadResult, render_table
 from tests.manual.perf.stats import summarize
 
 
@@ -34,7 +34,26 @@ def _run(conditions: Conditions, p50: float) -> RunResult:
     dist = summarize([p50] * 5)
     return RunResult(
         conditions=conditions,
-        results=[WorkloadResult("upsert", dist, items=500)],
+        results=[WorkloadResult("upsert", {"response": dist}, items=500)],
+        timestamp="2026-01-01T00:00:00Z",
+    )
+
+
+def _settling_run(conditions: Conditions, *, response: float, settle: float) -> RunResult:
+    # A write workload: response + settle + total phases (total = response+settle).
+    return RunResult(
+        conditions=conditions,
+        results=[
+            WorkloadResult(
+                "upsert-batch",
+                {
+                    "response": summarize([response] * 5),
+                    "settle": summarize([settle] * 5),
+                    "total": summarize([response + settle] * 5),
+                },
+                items=100,
+            )
+        ],
         timestamp="2026-01-01T00:00:00Z",
     )
 
@@ -42,6 +61,19 @@ def _run(conditions: Conditions, p50: float) -> RunResult:
 def test_runresult_json_round_trips():
     run = _run(_conditions(), 10.0)
     assert RunResult.from_json(run.to_json()) == run
+
+
+def test_multiphase_result_round_trips_and_renders_one_row_per_phase():
+    run = _settling_run(_conditions(), response=4.0, settle=20.0)
+    assert RunResult.from_json(run.to_json()) == run
+    (wr,) = run.results
+    assert [p for p, _ in wr.ordered_phases()] == ["response", "settle", "total"]
+    assert wr.distribution.p50_ms == pytest.approx(4.0)  # the response phase
+    table = render_table(run)
+    # One row per phase; the workload name + item count print once, on the first.
+    assert table.count("upsert-batch") == 1
+    for phase in ("response", "settle", "total"):
+        assert phase in table
 
 
 def test_compatible_when_invariants_match_despite_advisory_differences():
@@ -75,7 +107,38 @@ def test_compare_computes_p50_delta_and_flags_regressions():
     cmp = compare(baseline, current)
     (delta,) = cmp.deltas
     assert delta.workload == "upsert"
+    assert delta.phase == "response"
     assert delta.delta_ms == pytest.approx(2.0)
     assert delta.pct == pytest.approx(0.2)
     assert cmp.regressions(threshold_pct=0.10) == [delta]
     assert cmp.regressions(threshold_pct=0.30) == []
+
+
+def test_compare_diffs_each_phase_independently():
+    baseline = _settling_run(_conditions(), response=4.0, settle=20.0)
+    current = _settling_run(_conditions(commit="newer"), response=4.0, settle=30.0)
+    cmp = compare(baseline, current)
+    by_phase = {d.phase: d for d in cmp.deltas}
+    assert set(by_phase) == {"response", "settle", "total"}
+    assert by_phase["response"].delta_ms == pytest.approx(0.0)
+    assert by_phase["settle"].delta_ms == pytest.approx(10.0)
+    assert by_phase["total"].delta_ms == pytest.approx(10.0)
+    # Only the settle/total phases regressed; the labels are workload/phase.
+    assert {d.label for d in cmp.regressions(threshold_pct=0.10)} == {
+        "upsert-batch/settle",
+        "upsert-batch/total",
+    }
+
+
+def test_compare_reports_phases_present_in_only_one_run():
+    baseline = _run(_conditions(), 10.0)  # response only
+    current = _settling_run(_conditions(commit="newer"), response=4.0, settle=20.0)
+    cmp = compare(baseline, current)
+    # Different workload names entirely, so every phase is one-sided.
+    assert cmp.only_in_baseline == ["upsert/response"]
+    assert cmp.only_in_current == [
+        "upsert-batch/response",
+        "upsert-batch/settle",
+        "upsert-batch/total",
+    ]
+    assert cmp.deltas == []
