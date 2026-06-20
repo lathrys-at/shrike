@@ -340,10 +340,13 @@ class TestEmbeddingCLI:
     def test_embedding_status_json_and_pretty(self, semantic_runner):
         # Per-space: JSON is the per-space LIST (a one-element list on a
         # single-space server), each entry the same EmbeddingStatus shape.
+        # This is the in-process ONNX backend, so it carries no `url`/`pid`
+        # (those are the out-of-process llama service's fields, asserted in
+        # test_embedding.py) — assert the shape it does report.
         data = semantic_runner.json(["server", "embedding", "status"])
         assert isinstance(data, list)
         assert data[0]["available"] is True
-        assert "url" in data[0]
+        assert data[0]["modalities"] == ["text"]
         result = semantic_runner.invoke(["server", "embedding", "status"])
         assert result.exit_code == 0
         # `Embedding [text]` header, `Status:` on its own line.
