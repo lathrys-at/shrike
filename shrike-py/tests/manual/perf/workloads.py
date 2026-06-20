@@ -1,10 +1,12 @@
 """The gold workloads the perf harness times.
 
 A workload is one operation, repeated against a booted harness over a fixed
-corpus: search, rebuild, upsert-batch, upsert-seq, delete, reconcile. The workflows
-that need a heavier scenario harness remain a focused follow-up: a true *ingest*
-(importing a synthetic .apkg/.colpkg via the package-import path — NOT the upsert
-action), *sync*, and OCR sweeps.
+corpus: search, rebuild, upsert-batch, upsert-seq, delete, reconcile. A true
+*ingest* (cold import of a synthetic .apkg/.colpkg via the package-import path —
+NOT the upsert action) is measured by ``driver.measure_ingest`` instead: it owns
+its own boot lifecycle (a fresh empty collection per sample), so it isn't a
+``Workload`` in this registry. The remaining heavier scenarios — *sync* and OCR
+sweeps — are tracked as their own issues.
 
 ``mutates`` marks a workload that changes the collection
 (upsert-batch/upsert-seq/delete/reconcile); the runner orders read-only workloads

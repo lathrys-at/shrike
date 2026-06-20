@@ -25,6 +25,7 @@ import shutil
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 # Allow running from a bare checkout: put the repo's shrike-py/ (for `tests.*`)
 # and shrike-py/src (for `shrike.*`) on sys.path.
@@ -41,7 +42,13 @@ from tests.manual.perf.corpus import (  # noqa: E402
     CorpusSpec,
     ensure_corpus,
 )
-from tests.manual.perf.driver import boot_from_profile, measure, run_async  # noqa: E402
+from tests.manual.perf.driver import (  # noqa: E402
+    INGEST,
+    boot_from_profile,
+    measure,
+    measure_ingest,
+    run_async,
+)
 from tests.manual.perf.result import (  # noqa: E402
     Conditions,
     RunResult,
@@ -72,13 +79,45 @@ def _isolated_working_copy(corpus_anki2: Path, corpus_media: Path, run_dir: Path
 
 
 async def _run_workloads(
-    profile_path: Path, working: Path, cache_dir: Path, workloads: list, repeats: int, warmup: int
+    profile_path: Path,
+    corpus: Any,
+    run_dir: Path,
+    names: list[str],
+    repeats: int,
+    warmup: int,
+    with_media: bool,
 ) -> list[WorkloadResult]:
-    booted = await boot_from_profile(profile_path, working, cache_dir)
-    try:
-        return [await measure(w, booted, repeats=repeats, warmup=warmup) for w in workloads]
-    finally:
-        await booted.close()
+    results: list[WorkloadResult] = []
+    registry = [n for n in names if n != INGEST]
+    if registry:
+        # Read-only workloads first so the single shared boot stays representative.
+        workloads = sorted(
+            (WORKLOADS[n]() for n in registry), key=lambda w: getattr(w, "mutates", False)
+        )
+        # An isolated working copy so a mutating workload never pollutes the cached
+        # corpus (ingest makes its own copies; skipped when only ingest is requested).
+        working = _isolated_working_copy(corpus.anki2_path, corpus.media_dir, run_dir)
+        print(f"Booting {profile_path.stem} over {working} ...")
+        booted = await boot_from_profile(profile_path, working, run_dir / "cache")
+        try:
+            for w in workloads:
+                results.append(await measure(w, booted, repeats=repeats, warmup=warmup))
+        finally:
+            # Close before ingest opens its own kernels — the driven runtime holds
+            # one kernel at a time.
+            await booted.close()
+    if INGEST in names:
+        results.append(
+            await measure_ingest(
+                profile_path,
+                corpus,
+                run_dir / "ingest",
+                repeats=repeats,
+                warmup=warmup,
+                with_media=with_media,
+            )
+        )
+    return results
 
 
 def main() -> int:
@@ -89,7 +128,9 @@ def main() -> int:
     parser.add_argument(
         "--workloads",
         default="search,rebuild,upsert-batch",
-        help=f"Subset of {sorted(WORKLOADS)} (default: search,rebuild,upsert-batch).",
+        help=f"Subset of {sorted({*WORKLOADS, INGEST})} (default: search,rebuild,upsert-batch). "
+        "'ingest' is the cold package-import scenario (its own boot per sample; heavy "
+        "— use a small --repeats).",
     )
     parser.add_argument("--repeats", type=int, default=20, help="Timed iterations per workload.")
     parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations discarded.")
@@ -123,12 +164,10 @@ def main() -> int:
         )
 
     names = [n.strip() for n in args.workloads.split(",") if n.strip()]
-    unknown = [n for n in names if n not in WORKLOADS]
+    known = {*WORKLOADS, INGEST}
+    unknown = [n for n in names if n not in known]
     if unknown:
-        parser.error(f"unknown workload(s) {unknown}; choices: {sorted(WORKLOADS)}")
-    # Read-only workloads first so one boot stays representative (a mutator grows
-    # the collection, which would skew a later read).
-    workloads = sorted((WORKLOADS[n]() for n in names), key=lambda w: getattr(w, "mutates", False))
+        parser.error(f"unknown workload(s) {unknown}; choices: {sorted(known)}")
 
     spec = CorpusSpec(notes=args.size, variant=args.variant)
     print(f"Ensuring corpus: {args.size} notes ({args.variant}) ...")
@@ -139,9 +178,7 @@ def main() -> int:
     run_dir = (
         _RUNS_DIR / f"perf-{args.profile}-{args.variant.replace('+', '_')}-{args.size}-{stamp}"
     )
-    working = _isolated_working_copy(corpus.anki2_path, corpus.media_dir, run_dir)
 
-    print(f"Booting perf-{args.profile} over {working} ...")
     # The kernel runs a harness-driven runtime with no lazy fallback: install +
     # park the committed driver threads before any kernel op, tear down after.
     from shrike.platform.driven_runtime import DrivenRuntime
@@ -152,7 +189,13 @@ def main() -> int:
     try:
         results = run_async(
             _run_workloads(
-                profile_path, working, run_dir / "cache", workloads, args.repeats, args.warmup
+                profile_path,
+                corpus,
+                run_dir,
+                names,
+                args.repeats,
+                args.warmup,
+                with_media=(args.variant == "text+image"),
             )
         )
     finally:
