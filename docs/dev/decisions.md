@@ -637,13 +637,15 @@ Three deliberate choices:
   on a non-opt build), the runner captures `optimized` as an **invariant** condition, warns
   on a debug run, and the baseline diff refuses to compare a debug run with a release one —
   so a fastbuild number can never be mistaken for a real one.
-- **A manual lane.** The benchmark runs (the corpus build, the boot+drive) are `manual`
-  Bazel targets, off the per-PR critical path — perf is a measured property defended on
-  demand and (later, #869) on a scheduled lane, not a per-commit gate that would tax every
-  PR's wall-clock. The pure pieces (the distribution math, the artifact, the diff) are
-  unit-tested on the per-PR lane, since that logic is where a silent measurement bug hides.
-
-Budgets + regression gating (#869) build on this.
+- **A manual lane, defended on demand — not gated.** The benchmark runs (the corpus
+  build, the boot+drive) are `manual` Bazel targets, off the per-PR critical path. Perf is
+  a measured property checked by hand against a stored baseline, **not** a per-change or
+  scheduled gate. An automated regression gate was deliberately rejected: it would tax every
+  change for a property better watched on demand, and the harness already supports the
+  workflow — run, store the artifact, `--baseline`-diff a prior run (which refuses to
+  compare across mismatched conditions). The pure pieces (the distribution math, the
+  artifact, the diff) are unit-tested on the per-PR lane, since that logic is where a silent
+  measurement bug hides.
 
 ### Hotspot profiling uses py-spy `--native` for a cross-boundary flamegraph (#866)
 

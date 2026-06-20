@@ -4,7 +4,8 @@ A latency number is meaningless without its context — the machine, the build,
 the corpus, the embedder mode. :class:`RunResult` carries both, so a stored run
 is a comparable artifact (see :mod:`compare`) and a cross-machine diff can refuse
 itself rather than mislead. Artifacts serialize to JSON under ``.cache/perf/``
-(gitignored); a committed baseline is a later concern (#869).
+(gitignored); a baseline is just a prior run's JSON the user keeps and diffs
+against by hand — none is committed to the repo.
 """
 
 from __future__ import annotations

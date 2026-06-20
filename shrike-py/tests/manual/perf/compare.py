@@ -3,9 +3,9 @@
 Diffs two :class:`~tests.manual.perf.result.RunResult`s workload-by-workload —
 the p50/p90/p99 deltas, absolute and relative. It REFUSES to compare runs whose
 invariant conditions differ (a different machine, build, or corpus): a
-cross-context latency delta is noise dressed as signal. Whether a delta trips a
-regression gate (a budget, a threshold) is a later concern (#869); this is the
-mechanism, not the policy.
+cross-context latency delta is noise dressed as signal. A delta is read by hand —
+there is no automated gate; this is the diff mechanism, the policy is human
+judgement.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class Comparison:
 
     def regressions(self, threshold_pct: float) -> list[WorkloadDelta]:
         """Workloads whose p50 grew by more than ``threshold_pct`` (e.g. ``0.10``
-        for 10%) — the raw material a gate (#869) would act on."""
+        for 10%) — surfaced for a human reading the diff, not an automated gate."""
         return [d for d in self.deltas if d.pct > threshold_pct]
 
 

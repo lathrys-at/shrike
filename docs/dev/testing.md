@@ -136,7 +136,8 @@ sudo scripts/perf.sh --profile stub --size 5000 --variant text --workloads searc
 
 Numeric per-span stage timings (parse → write → derive → embed → index, from the
 kernel's `tracing` spans) are the observability work (#800); the flamegraph already
-gives the visual breakdown. Budgets + regression gating are #869.
+gives the visual breakdown. Perf is checked by hand against a stored baseline — there is
+no automated regression gate (a deliberate choice; see `decisions.md`).
 
 ## The native (Rust) workspace
 

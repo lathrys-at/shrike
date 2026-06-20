@@ -14,8 +14,8 @@ is meaningless for perf. The run records whether the build was optimized and war
 on a debug one; the baseline diff refuses to compare a debug run with a release one.
 
 Off the per-PR critical path; run by name. Results land under .cache/perf/runs/
-(gitignored). Comparison/gating against a stored baseline is the next child (#869);
-this emits the comparable artifact and a diff on request.
+(gitignored). Perf is checked by hand: this emits the comparable artifact and an
+on-request `--baseline` diff against a prior run — there is no automated gate.
 """
 
 from __future__ import annotations
