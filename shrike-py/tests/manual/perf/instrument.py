@@ -72,6 +72,32 @@ def pyspy_native_supported(platform: str) -> bool:
     return platform.startswith("linux") or platform.startswith("win")
 
 
+def validate_instrument_request(
+    *,
+    tool: str | None,
+    instrument_args: list[str],
+    workloads: list[str],
+    out_given: bool,
+    platform: str,
+) -> str | None:
+    """Validate an ``--instrument`` request purely — returns an error message if it
+    is malformed, else ``None``. Covers everything decidable without touching the
+    host: the arg-without-a-tool mistake, the one-workload-per-run rule, the
+    ``--out`` clash, and xctrace's macOS-only constraint. PATH availability of the
+    tool is impure and checked by the caller, not here."""
+    if instrument_args and tool is None:
+        return "--instrument-arg needs --instrument (no tool to pass it to)"
+    if tool is None:
+        return None
+    if len(workloads) != 1:
+        return "--instrument profiles ONE workload per run; pass a single --workloads"
+    if out_given:
+        return "--out is ignored under --instrument; result.json lands beside the artifact"
+    if tool == "xctrace" and not platform.startswith("darwin"):
+        return "--instrument=xctrace is macOS-only (Apple Instruments); use py-spy or samply"
+    return None
+
+
 def inner_run_argv(
     run_py: Path,
     *,
@@ -173,7 +199,7 @@ def _samply_command(artifact: str, inner: list[str], extra: list[str]) -> list[s
 def _xctrace_command(artifact: str, inner: list[str], extra: list[str]) -> list[str]:
     # Apple Instruments' Time Profiler. --output must not already exist (run_dir is
     # fresh per run); --target-stdout - forwards the inner run's stdout so its
-    # progress still prints; --launch runs the target command we hand it.
+    # progress still prints; --launch runs the target command that follows it.
     return [
         "xcrun", "xctrace", "record",
         "--template", "Time Profiler",

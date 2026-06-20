@@ -68,6 +68,7 @@ from tests.manual.perf.instrument import (  # noqa: E402
     instrument_binary,
     instrument_command,
     pyspy_native_supported,
+    validate_instrument_request,
 )
 from tests.manual.perf.result import (  # noqa: E402
     Conditions,
@@ -258,13 +259,9 @@ def _profile_under_instrumenter(
     py-spy ``--native`` is the cross-boundary view (Python + Rust in one
     flamegraph); samply/xctrace give deeper Rust detail but opaque Python frames.
     See :mod:`tests.manual.perf.instrument`."""
+    # The request shape (one workload, no --out, xctrace-on-macOS, …) is validated
+    # purely in main(); here only the impure tool-on-PATH probe remains.
     tool = args.instrument
-    if len(names) != 1:
-        parser.error("--instrument profiles ONE workload per run; pass a single --workloads")
-    if args.out is not None:
-        parser.error("--out is ignored under --instrument; result.json lands beside the artifact")
-    if tool == "xctrace" and sys.platform != "darwin":
-        parser.error("--instrument=xctrace is macOS-only (Apple Instruments); use py-spy or samply")
     binary = instrument_binary(tool)
     if shutil.which(binary) is None:
         parser.error(
@@ -402,8 +399,15 @@ def main() -> int:
     if unknown:
         parser.error(f"unknown workload(s) {unknown}; choices: {sorted(known)}")
 
-    if args.instrument_arg and not args.instrument:
-        parser.error("--instrument-arg needs --instrument (no tool to pass it to)")
+    instrument_error = validate_instrument_request(
+        tool=args.instrument,
+        instrument_args=args.instrument_arg,
+        workloads=names,
+        out_given=args.out is not None,
+        platform=sys.platform,
+    )
+    if instrument_error:
+        parser.error(instrument_error)
 
     profile_path = _resolve_profile_path(args, parser)
 

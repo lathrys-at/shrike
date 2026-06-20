@@ -13,7 +13,22 @@ from tests.manual.perf.instrument import (
     instrument_binary,
     instrument_command,
     pyspy_native_supported,
+    validate_instrument_request,
 )
+
+
+def _validate(**overrides):
+    """A ``validate_instrument_request`` call for a well-formed py-spy request, with
+    per-case overrides — returns the error message, or ``None`` when valid."""
+    kwargs = dict(
+        tool="py-spy",
+        instrument_args=[],
+        workloads=["search"],
+        out_given=False,
+        platform="linux",
+    )
+    kwargs.update(overrides)
+    return validate_instrument_request(**kwargs)
 
 
 def _command(tool: str, tmp_path: Path, *, platform: str = "linux", **overrides):
@@ -107,8 +122,10 @@ def test_extra_args_pass_through_to_the_tool(tmp_path):
     extra = ["--rate", "2000"]
     for tool in ("py-spy", "samply", "xctrace"):
         cmd = _command(tool, tmp_path, platform="darwin", extra_args=extra)
+        sep = cmd.index("--")
         start = next(i for i in range(len(cmd)) if cmd[i : i + len(extra)] == extra)
-        assert start + len(extra) <= cmd.index("--"), tool
+        assert start + len(extra) <= sep, tool  # on the tool's side of --
+        assert "--rate" not in cmd[sep + 1 :], tool  # and never leaks into the inner run
 
 
 def test_threads_a_baseline_and_unsanitized_variant(tmp_path):
@@ -145,3 +162,36 @@ def test_reproduces_a_custom_profile_path(tmp_path):
 def test_rejects_an_unknown_tool(tmp_path):
     with pytest.raises(ValueError, match="unknown instrumenter"):
         _command("perf", tmp_path)
+
+
+def test_validate_passes_a_well_formed_request():
+    assert _validate() is None
+    assert _validate(tool="samply") is None
+    # xctrace is fine on macOS.
+    assert _validate(tool="xctrace", platform="darwin") is None
+    # No --instrument at all (a plain timed run) is valid.
+    assert _validate(tool=None) is None
+
+
+def test_validate_rejects_instrument_arg_without_a_tool():
+    assert "needs --instrument" in _validate(tool=None, instrument_args=["--rate", "2000"])
+
+
+def test_validate_rejects_multiple_workloads():
+    assert "ONE workload" in _validate(workloads=["search", "rebuild"])
+
+
+def test_validate_rejects_out_under_instrument():
+    assert "--out is ignored" in _validate(out_given=True)
+
+
+def test_validate_rejects_xctrace_off_macos():
+    assert "macOS-only" in _validate(tool="xctrace", platform="linux")
+    assert "macOS-only" in _validate(tool="xctrace", platform="win32")
+
+
+def test_validate_checks_arg_without_tool_before_workload_count():
+    # The arg-without-a-tool mistake is reported even when the workload list is also
+    # wrong (it's the more fundamental error).
+    msg = _validate(tool=None, instrument_args=["-r"], workloads=["a", "b"])
+    assert "needs --instrument" in msg
