@@ -372,4 +372,47 @@ pub trait DerivedStore: Send + Sync {
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
     ) -> NativeResult<Vec<LexicalRow>>;
+    /// [`Self::search_substring`] over a batch of queries, one result per query
+    /// in `queries` order. A fused search runs the lexical signals once per query
+    /// string; batching lets an impl pay the fixed per-call cost (connection
+    /// lock, scope staging, statement compile) ONCE for the whole set instead of
+    /// once per query. The default loops the singular method (correct, unbatched);
+    /// the local engine overrides it with a single-lock, single-prepare pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any query's search fails (the batch is abandoned at
+    /// the first failure, exactly as the singular reads surface one).
+    fn search_substring_batch(
+        &self,
+        queries: &[&str],
+        limit: i64,
+        scope: Option<&[i64]>,
+        exclude_sources: &[&str],
+    ) -> NativeResult<Vec<Option<Vec<LexicalRow>>>> {
+        queries
+            .iter()
+            .map(|q| self.search_substring(q, limit, scope, exclude_sources))
+            .collect()
+    }
+    /// [`Self::search_fuzzy`] over a batch of queries, one result per query in
+    /// `queries` order — the fuzzy counterpart to
+    /// [`Self::search_substring_batch`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any query's search fails (the batch is abandoned at
+    /// the first failure, exactly as the singular reads surface one).
+    fn search_fuzzy_batch(
+        &self,
+        queries: &[&str],
+        top_k: i64,
+        scope: Option<&[i64]>,
+        exclude_sources: &[&str],
+    ) -> NativeResult<Vec<Vec<LexicalRow>>> {
+        queries
+            .iter()
+            .map(|q| self.search_fuzzy(q, top_k, scope, exclude_sources))
+            .collect()
+    }
 }

@@ -244,7 +244,7 @@ use shrike_derived::MIN_TRIGRAM;
 use shrike_schemas::{
     FuzzyMatch, Note, SearchMatch, SearchResultGroup, SignalContribution, SubstringInfo,
 };
-use shrike_store::{DerivedStore, VectorIndex};
+use shrike_store::{DerivedStore, LexicalRow, VectorIndex};
 
 /// A note's field map (`Note.content`): the "full" projection's fields, absent
 /// in "meta" mode. The literal-substring authority reads it.
@@ -791,42 +791,24 @@ fn rank_modality(
 
 fn collect_substring_candidates(
     ctx: SearchCtx,
-    derived: Option<&dyn DerivedStore>,
+    lex: Option<Vec<LexicalRow>>,
     text: &str,
     note_data: &mut NoteData,
-    scope: Option<&[i64]>,
 ) -> NativeResult<()> {
     let SearchCtx {
         core,
         exclude,
         args,
     } = ctx;
-    // The store serves scoped queries: the scope id set — from anki's INDEXED
-    // deck:/tag: search — is pushed into the FTS5 query, so a scoped literal
-    // search reads no note text outside the store. The wildcard `*text*`
-    // fallback (a full field scan) serves only the cases FTS5 can't: a
-    // sub-trigram query (<3 chars) or a missing/unbuilt store.
-    let hidden: Vec<&str> = args
-        .hidden_lexical_sources
-        .iter()
-        .map(String::as_str)
-        .collect();
-    // `Ok(None)` = the store can't serve this query (a sub-trigram query, or no
-    // store at all) → the `find_notes` field-text fallback below is correct.
-    // `Err` = a REAL derived-read failure (e.g. a transient SQLITE_BUSY that
-    // outlived the busy-retry). It must NOT silently fall back to `find_notes`:
-    // OCR/ASR text lives ONLY in the derived store, never in an anki
-    // field, so the field-text fallback structurally cannot serve it — a silent
-    // fallback would drop the OCR/ASR `exact`/substring signal with no error.
-    // Surface it instead (the store's own contract: "a MATCH error is a real
-    // error; the caller decides whether to degrade" — and degrading to a
-    // fallback that can't serve derived sources is not a valid degradation).
-    let lex = if let Some(d) = derived {
-        d.search_substring(text, (args.top_k + exclude.len()) as i64, scope, &hidden)?
-    } else {
-        None
-    };
-
+    // `lex` is this source's pre-fetched store result, read in one batched FTS5
+    // pass shared with every other query source (the store pushes the deck/tag
+    // scope id set into the MATCH query, so a scoped literal search reads no note
+    // text outside the store). `None` = the store couldn't serve this query (a
+    // sub-trigram query, or no store at all) → the wildcard `*text*` field-text
+    // fallback below is correct. A REAL derived-read failure (e.g. a SQLITE_BUSY
+    // that outlived the retry) already surfaced as an `Err` from the batched read
+    // — it is never silently turned into a fallback, because OCR/ASR text lives
+    // ONLY in the derived store and the field scan structurally cannot serve it.
     let Some(rows) = lex else {
         // Fallback: Anki's "*text*" wildcard as a fast pre-filter, scope in
         // the query; substring_info confirms + annotates each candidate.
@@ -929,28 +911,18 @@ impl FuzzyRanking {
 
 fn collect_fuzzy(
     ctx: SearchCtx,
-    derived: Option<&dyn DerivedStore>,
-    text: &str,
+    hits: Vec<LexicalRow>,
     note_data: &mut NoteData,
-    scope: Option<&[i64]>,
 ) -> NativeResult<FuzzyRanking> {
     let SearchCtx {
         core,
         exclude,
         args,
     } = ctx;
-    let Some(d) = derived else {
-        return Ok(FuzzyRanking::empty());
-    };
-    let hidden: Vec<&str> = args
-        .hidden_lexical_sources
-        .iter()
-        .map(String::as_str)
-        .collect();
-    // A real derived-read failure surfaces: the fuzzy signal has no
-    // anki-field fallback at all (no `find_notes` path here), so silently
-    // returning empty would drop OCR/ASR fuzzy matches with no error. Propagate.
-    let hits = d.search_fuzzy(text, args.top_k as i64, scope, &hidden)?;
+    // `hits` is this source's pre-fetched fuzzy rows, read in the batched FTS5
+    // pass. The fuzzy signal has no anki-field fallback (it lives only in the
+    // derived store), so a real derived-read failure already surfaced as an `Err`
+    // from the batched read rather than silently returning empty.
     let hit_ids: Vec<i64> = hits
         .iter()
         .map(|(nid, ..)| *nid)
@@ -1302,6 +1274,54 @@ pub fn search_notes(
         None
     };
 
+    // Batch the lexical (FTS5) reads across ALL query sources up front: ONE
+    // search_*_batch call instead of one search_* per source. Each batched call
+    // locks the derived connection, stages the scope id set, and compiles its
+    // statement ONCE for the whole set, so an N-query search no longer pays N
+    // locks + N statement compiles + N scope re-stagings (the per-source loop
+    // used to). Anchor (id) sources are semantic-only and carry no lexical query,
+    // so the batch covers the QUERY sources, in source order.
+    //
+    // A REAL derived-read failure (e.g. a SQLITE_BUSY outliving the retry)
+    // surfaces here as an `Err` and must never become a silent field-text
+    // fallback — OCR/ASR text lives only in the derived store and the field scan
+    // can't serve it. `Ok` carries one entry per query source; a `None` substring
+    // entry means "the store couldn't serve this query" → the per-source fallback.
+    let query_texts: Vec<&str> = sources
+        .iter()
+        .filter(|s| s.is_query)
+        .map(|s| s.text.as_str())
+        .collect();
+    let (substr_batch, fuzzy_batch) = match derived {
+        Some(d) if !query_texts.is_empty() => {
+            let hidden: Vec<&str> = args
+                .hidden_lexical_sources
+                .iter()
+                .map(String::as_str)
+                .collect();
+            let sub = d.search_substring_batch(
+                &query_texts,
+                (args.top_k + exclude.len()) as i64,
+                lex_scope.as_deref(),
+                &hidden,
+            )?;
+            let fz = d.search_fuzzy_batch(
+                &query_texts,
+                args.top_k as i64,
+                lex_scope.as_deref(),
+                &hidden,
+            )?;
+            (sub, fz)
+        }
+        // No store, or no query sources: each query source falls back per source
+        // (substring) and contributes no fuzzy signal.
+        _ => (Vec::new(), Vec::new()),
+    };
+    // Per-source consumers: advanced once per QUERY source, in source order, so
+    // each query source draws its own pre-fetched rows.
+    let mut substr_batch = substr_batch.into_iter();
+    let mut fuzzy_batch = fuzzy_batch.into_iter();
+
     let mut results: Vec<SearchResultGroup> = Vec::new();
     for (i, source) in sources.iter().enumerate() {
         let mut note_data = NoteData::new();
@@ -1314,15 +1334,13 @@ pub fn search_notes(
         };
 
         // Literal-substring candidates (query sources only): a fast pre-filter;
-        // substring_info below is the authority that confirms + annotates.
+        // substring_info below is the authority that confirms + annotates. The
+        // FTS5 rows were read in the batched pass above; `flatten` maps an
+        // exhausted iterator (no store) or an unservable query to `None` → the
+        // per-source field-text fallback.
         if source.is_query {
-            collect_substring_candidates(
-                ctx,
-                derived,
-                &source.text,
-                &mut note_data,
-                lex_scope.as_deref(),
-            )?;
+            let lex = substr_batch.next().flatten();
+            collect_substring_candidates(ctx, lex, &source.text, &mut note_data)?;
         }
 
         // Per-modality semantic rankings. Text is thresholded; image is not
@@ -1392,14 +1410,10 @@ pub fn search_notes(
 
         // Fuzzy ranking + evidence (query sources only), before the exact loop
         // so a fuzzy candidate that also literally matches joins the exact tier.
+        // The fuzzy rows came from the batched pass; an exhausted iterator (no
+        // store) yields no fuzzy signal.
         let mut fuzzy = if source.is_query {
-            collect_fuzzy(
-                ctx,
-                derived,
-                &source.text,
-                &mut note_data,
-                lex_scope.as_deref(),
-            )?
+            collect_fuzzy(ctx, fuzzy_batch.next().unwrap_or_default(), &mut note_data)?
         } else {
             FuzzyRanking::empty()
         };
