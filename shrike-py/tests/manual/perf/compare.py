@@ -124,3 +124,23 @@ def render_comparison(cmp: Comparison) -> str:
     if cmp.only_in_current:
         lines.append(f"# new (current only): {', '.join(cmp.only_in_current)}")
     return "\n".join(lines)
+
+
+def render_markdown_comparison(cmp: Comparison) -> str:
+    """The baseline diff as a GitHub-flavored markdown table — paste-ready into a
+    comment. One row per shared workload phase (signed p50 delta), with any
+    one-sided phases noted below the table."""
+    lines = [
+        "| workload/phase | base ms | cur ms | Δ ms | Δ % |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for d in cmp.deltas:
+        lines.append(
+            f"| {d.label} | {d.baseline_ms:.3f} | {d.current_ms:.3f} | "
+            f"{d.delta_ms:+.3f} | {d.pct * 100:+.1f}% |"
+        )
+    if cmp.only_in_baseline:
+        lines.append(f"\n_dropped (baseline only): {', '.join(cmp.only_in_baseline)}_")
+    if cmp.only_in_current:
+        lines.append(f"\n_new (current only): {', '.join(cmp.only_in_current)}_")
+    return "\n".join(lines)

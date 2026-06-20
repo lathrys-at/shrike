@@ -115,6 +115,10 @@ built-in `--profile`.
 - **Sizes** 500 / 5k / 50k notes; **variants** `text` and `text+image`. Corpora
   are deterministic, built through the real write path, and cached + gitignored
   under `.cache/perf/corpora/`.
+- **Output format.** The terminal table is fixed-width by default;
+  `--output-format table` renders it (and the baseline diff) as a GitHub-flavored
+  markdown table to paste into a PR/issue comment. The result JSON is written
+  either way.
 - **Results** are distributions (p50/p90/p99/max) plus the conditions they were
   taken under (machine, build, corpus, mode), written to `.cache/perf/runs/`.
   `--baseline <result.json>` diffs a prior run (per phase) and refuses to compare

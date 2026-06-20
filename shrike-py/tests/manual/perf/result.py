@@ -189,23 +189,52 @@ class RunResult:
         return cls.from_json(path.read_text())
 
 
+#: The table's column headers, shared by the plain and markdown renderers. The
+#: trailing ``p50 (amortized) ms`` is the per-op cost (see :func:`_amortized_p50`).
+_COLUMNS = (
+    "workload",
+    "phase",
+    "items",
+    "p50 ms",
+    "p90 ms",
+    "p99 ms",
+    "max ms",
+    "p50 (amortized) ms",
+)
+
+
+def _amortized_p50(d: Distribution, items: int) -> str:
+    """The per-op p50 cell: the phase p50 spread over the iteration's ops (so a
+    batch row reads against a sequential row directly; ``rebuild`` with items=1
+    amortizes to its own p50). ``-`` when the workload reported no items — the
+    divide must not throw."""
+    return f"{d.p50_ms / items:.3f}" if items else "-"
+
+
+def _meta_lines(run: RunResult) -> tuple[str, str, str]:
+    """The three provenance lines above the table: the run identity, the machine/
+    build, and the sampling parameters. Shared verbatim (sans prefix) by both
+    renderers."""
+    c = run.conditions
+    return (
+        f"perf run — {c.profile} @ {c.corpus_size} notes ({c.corpus_variant})",
+        f"{c.system}/{c.machine} py{c.python} native={c.native_version} "
+        f"build={'opt' if c.optimized else 'DEBUG'} "
+        f"commit={c.commit[:12]}{'+dirty' if c.dirty else ''}",
+        f"repeats={c.repeats} warmup={c.warmup} ops={c.ops} @ {run.timestamp}",
+    )
+
+
 def render_table(run: RunResult) -> str:
-    """A compact human-readable table of the run (the dogfooding artifact body),
-    one row per workload *phase* with the latency percentiles. A settling workload
+    """A compact fixed-width table of the run (the dogfooding artifact body), one
+    row per workload *phase* with the latency percentiles. A settling workload
     spans three rows (response/settle/total); the workload name and item count
-    print once, on its first row. The trailing ``p50 (amortized) ms`` is the
-    per-op cost — the phase's p50 divided by ``items`` (the per-iteration op count)
-    — so a batch row's amortized cost reads against a sequential row's directly.
-    ``rebuild`` (items=1) amortizes to its own p50."""
+    print once, on its first row."""
+    title, machine, sampling = _meta_lines(run)
     lines = [
-        f"# perf run — {run.conditions.profile} @ "
-        f"{run.conditions.corpus_size} notes ({run.conditions.corpus_variant})",
-        f"# {run.conditions.system}/{run.conditions.machine} "
-        f"py{run.conditions.python} native={run.conditions.native_version} "
-        f"build={'opt' if run.conditions.optimized else 'DEBUG'} "
-        f"commit={run.conditions.commit[:12]}{'+dirty' if run.conditions.dirty else ''}",
-        f"# repeats={run.conditions.repeats} warmup={run.conditions.warmup} "
-        f"ops={run.conditions.ops} @ {run.timestamp}",
+        f"# {title}",
+        f"# {machine}",
+        f"# {sampling}",
         "",
         f"{'workload':<18}{'phase':<10}{'items':>8}"
         f"{'p50 ms':>12}{'p90 ms':>12}{'p99 ms':>12}{'max ms':>12}"
@@ -215,11 +244,37 @@ def render_table(run: RunResult) -> str:
         for idx, (phase, d) in enumerate(r.ordered_phases()):
             name = r.workload if idx == 0 else ""
             items = str(r.items) if idx == 0 else ""
-            # Per-op cost: the phase p50 spread over the iteration's ops. Guarded
-            # against a zero-item workload (none today, but the divide must not throw).
-            amortized = f"{d.p50_ms / r.items:>20.3f}" if r.items else f"{'-':>20}"
+            amortized = _amortized_p50(d, r.items)
             lines.append(
                 f"{name:<18}{phase:<10}{items:>8}{d.p50_ms:>12.3f}{d.p90_ms:>12.3f}"
-                f"{d.p99_ms:>12.3f}{d.max_ms:>12.3f}{amortized}"
+                f"{d.p99_ms:>12.3f}{d.max_ms:>12.3f}{amortized:>20}"
             )
+    return "\n".join(lines)
+
+
+def render_markdown_table(run: RunResult) -> str:
+    """The same run as a GitHub-flavored markdown table — paste-ready into a PR or
+    issue comment. The provenance lines render as a bold title over two monospace
+    detail bullets (not ``#`` headings, which a comment would blow up to H1); the
+    numeric columns are right-aligned."""
+    title, machine, sampling = _meta_lines(run)
+    head = f"| {' | '.join(_COLUMNS)} |"
+    # workload/phase left-aligned, every numeric column right-aligned (`---:`).
+    align = "| --- | --- | " + " | ".join(["---:"] * (len(_COLUMNS) - 2)) + " |"
+    lines = [f"**{title}**", "", f"- `{machine}`", f"- `{sampling}`", "", head, align]
+    for r in run.results:
+        for idx, (phase, d) in enumerate(r.ordered_phases()):
+            name = r.workload if idx == 0 else ""
+            items = str(r.items) if idx == 0 else ""
+            cells = [
+                name,
+                phase,
+                items,
+                f"{d.p50_ms:.3f}",
+                f"{d.p90_ms:.3f}",
+                f"{d.p99_ms:.3f}",
+                f"{d.max_ms:.3f}",
+                _amortized_p50(d, r.items),
+            ]
+            lines.append(f"| {' | '.join(cells)} |")
     return "\n".join(lines)

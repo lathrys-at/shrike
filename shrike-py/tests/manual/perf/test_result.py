@@ -6,8 +6,14 @@ from __future__ import annotations
 
 import pytest
 
-from tests.manual.perf.compare import IncomparableRuns, compare
-from tests.manual.perf.result import Conditions, RunResult, WorkloadResult, render_table
+from tests.manual.perf.compare import IncomparableRuns, compare, render_markdown_comparison
+from tests.manual.perf.result import (
+    Conditions,
+    RunResult,
+    WorkloadResult,
+    render_markdown_table,
+    render_table,
+)
 from tests.manual.perf.stats import summarize
 
 
@@ -87,6 +93,34 @@ def test_render_table_amortizes_p50_over_items():
     table = render_table(run)
     assert "p50 (amortized) ms" in table
     assert "0.020" in table  # 10.0 / 500
+
+
+def test_render_markdown_table_is_paste_ready():
+    run = _settling_run(_conditions(), response=4.0, settle=20.0)
+    md = render_markdown_table(run)
+    lines = md.splitlines()
+    # A bold title, never an H1 — a `#` line would blow up to a heading in a comment.
+    assert lines[0].startswith("**perf run")
+    assert not md.lstrip().startswith("#")
+    # A GitHub table: a header row followed by an alignment-separator row.
+    header_idx = next(i for i, ln in enumerate(lines) if ln.startswith("| workload |"))
+    assert "p50 (amortized) ms" in lines[header_idx]
+    assert set(lines[header_idx + 1].replace(" ", "")) <= set("|-:")
+    # One data row per phase; amortized per-op = phase p50 / items (100).
+    assert "| upsert-batch | response |" in md
+    assert "| 0.040 |" in md  # 4.0 / 100
+    assert "| 0.200 |" in md  # 20.0 / 100
+
+
+def test_render_markdown_comparison_is_paste_ready():
+    baseline = _run(_conditions(), 10.0)
+    current = _run(_conditions(commit="newer"), 12.0)  # advisory diff only
+    md = render_markdown_comparison(compare(baseline, current))
+    lines = md.splitlines()
+    assert lines[0].startswith("| workload/phase |")
+    assert set(lines[1].replace(" ", "")) <= set("|-:")  # the alignment row
+    assert "| upsert/response |" in md
+    assert "+2.000" in md  # the signed p50 delta
 
 
 def test_compatible_when_invariants_match_despite_advisory_differences():

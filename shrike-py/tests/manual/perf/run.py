@@ -40,7 +40,11 @@ for _p in (_PKG_ROOT, _PKG_ROOT / "src"):
         sys.path.insert(0, str(_p))
 
 from shrike.platform.log import FILE_DATE_FORMAT, FILE_FORMAT  # noqa: E402
-from tests.manual.perf.compare import compare, render_comparison  # noqa: E402
+from tests.manual.perf.compare import (  # noqa: E402
+    compare,
+    render_comparison,
+    render_markdown_comparison,
+)
 from tests.manual.perf.corpus import (  # noqa: E402
     DEFAULT_CACHE_ROOT,
     STANDARD_SIZES,
@@ -60,6 +64,7 @@ from tests.manual.perf.result import (  # noqa: E402
     Conditions,
     RunResult,
     WorkloadResult,
+    render_markdown_table,
     render_table,
 )
 from tests.manual.perf.workloads import DEFAULT_OPS, WORKLOADS, build_workload  # noqa: E402
@@ -92,16 +97,17 @@ def _flush_log_buffer(buf: io.StringIO, path: Path) -> None:
 _PROGRESS_WIDTH = 24
 
 
-def _progress_printer(label: str, warmup: int, repeats: int) -> Callable[[int, int, bool], None]:
+def _progress_printer(label: str, warmup: int) -> Callable[[int, int, bool], None]:
     """A pytest-style in-place progress line for one workload's iterations, so a
     long run shows forward motion instead of an apparent hang. Goes to stdout
     (harness UI), separate from the captured log buffer; the per-tick write sits
     between timed iterations, never inside a measurement.
 
     Warmup is not counted: while ``warming`` the line reads ``warming up...``; once
-    the timed repeats begin it becomes a ``done/repeats`` bar (so the bar measures
-    only the iterations that land in the result). The warmup notice is shown up
-    front too — before the first (possibly slow) warmup iteration finishes."""
+    the timed repeats begin it becomes a ``done/total`` bar over the repeats (the
+    driver passes the repeat count as ``total``), so the bar measures only the
+    iterations that land in the result. The warmup notice is shown up front too —
+    before the first (possibly slow) warmup iteration finishes."""
 
     def render_warming() -> None:
         sys.stdout.write(f"\r  {label:<16} warming up...")
@@ -170,7 +176,7 @@ async def _run_workloads(
                     booted,
                     repeats=repeats,
                     warmup=warmup,
-                    on_tick=_progress_printer(w.name, warmup, repeats),
+                    on_tick=_progress_printer(w.name, warmup),
                 )
                 print()  # close the completed bar's line; the full table prints at the end
                 results.append(res)
@@ -186,7 +192,7 @@ async def _run_workloads(
             repeats=repeats,
             warmup=warmup,
             with_media=with_media,
-            on_tick=_progress_printer(INGEST, warmup, repeats),
+            on_tick=_progress_printer(INGEST, warmup),
         )
         print()  # close the completed bar's line; the full table prints at the end
         results.append(res)
@@ -317,6 +323,14 @@ def main() -> int:
         help="Where to write the result JSON (default: under runs/).",
     )
     parser.add_argument(
+        "--output-format",
+        choices=("plain", "table"),
+        default="plain",
+        help="Terminal rendering of the result + baseline diff: 'plain' fixed-width "
+        "text (default), or 'table' a GitHub-flavored markdown table to paste into a "
+        "comment. The result JSON is written regardless.",
+    )
+    parser.add_argument(
         "--instrument",
         action="store_true",
         help="Profile ONE workload under py-spy --native: a flamegraph (Python + Rust) "
@@ -419,10 +433,11 @@ def main() -> int:
             timestamp=datetime.now(UTC).isoformat(),
         )
 
+        markdown = args.output_format == "table"
         out = args.out or (run_dir / "result.json")
         run.save(out)
         print()
-        print(render_table(run))
+        print(render_markdown_table(run) if markdown else render_table(run))
         print(f"\nwrote {out}")
 
         if args.baseline:
@@ -432,8 +447,8 @@ def main() -> int:
             except ValueError as err:
                 print(f"\ncannot diff baseline: {err}")
             else:
-                print("\n# vs baseline")
-                print(render_comparison(cmp))
+                print("\n## vs baseline" if markdown else "\n# vs baseline")
+                print(render_markdown_comparison(cmp) if markdown else render_comparison(cmp))
     finally:
         log_path = run_dir / "run.log"
         _flush_log_buffer(log_buffer, log_path)

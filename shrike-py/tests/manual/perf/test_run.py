@@ -6,6 +6,7 @@ lane — off the per-PR critical path (it boots a kernel + driver threads)."""
 
 from __future__ import annotations
 
+import argparse
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -144,3 +145,34 @@ def test_build_workload_scales_ops_uniformly_excepting_rebuild() -> None:
         assert getattr(build_workload(name, ops=7), "_count") == 7  # noqa: B009
     # rebuild is the exception — an O(collection) pass with no per-op N.
     assert build_workload("rebuild", ops=7).name == "rebuild"
+
+
+def _profile_args(**overrides: object) -> argparse.Namespace:
+    base: dict[str, object] = {"profile": None, "profile_path": None}
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_resolve_profile_path_requires_exactly_one_selector() -> None:
+    from tests.manual.perf.run import _resolve_profile_path
+
+    parser = argparse.ArgumentParser()
+    # parser.error exits the process; neither and both selectors are rejected.
+    with pytest.raises(SystemExit):
+        _resolve_profile_path(_profile_args(), parser)
+    with pytest.raises(SystemExit):
+        _resolve_profile_path(_profile_args(profile="stub", profile_path=Path("/x.yml")), parser)
+    with pytest.raises(SystemExit):
+        _resolve_profile_path(_profile_args(profile_path=Path("/no/such/profile.yml")), parser)
+    # A built-in resolves to its checked-in YAML; the stem is the run/condition label.
+    resolved = _resolve_profile_path(_profile_args(profile="stub"), parser)
+    assert resolved.is_file()
+    assert resolved.stem == "perf-stub"
+
+
+def test_uses_synthetic_reads_the_profile_embedders() -> None:
+    from tests.manual.perf.run import _uses_synthetic
+
+    profiles = Path(__file__).resolve().parent / "profiles"
+    assert _uses_synthetic(profiles / "perf-stub.yml") is True
+    assert _uses_synthetic(profiles / "perf-real.yml") is False
