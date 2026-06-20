@@ -2845,21 +2845,30 @@ impl Kernel {
             // Thread-domain orchestration (TIER C): the discovery reads run OFF
             // the collection actor (on the compute pool); only the lexical scope
             // and the prefetch hydration sit on `core`. The freshness bracket
-            // spans the whole read — `col_mod` sampled in the first and last
-            // collection job, `settled` either side — so a write landing during
-            // the off-thread discovery is still caught (a wider, equal-or-safer
-            // window than a single-job bracket).
+            // spans the whole read — `col_mod` AND `settled` are both sampled
+            // INSIDE the first and last collection jobs. Co-locating `settled`
+            // with `col_mod` (rather than reading it on the io thread) is
+            // load-bearing: the collection actor is FIFO and the ingest bumps
+            // `outstanding` before its send inside the write's job, so a write
+            // ordered before phase 1 has its bump visible to phase 1's `settled`
+            // read — an io-thread read before the job is enqueued can miss it and
+            // report a committed-but-unindexed note as fresh.
             let engine = self.index_set.primary().engine_arc();
             let derived = Arc::clone(&self.derived);
             let tag_keys = Arc::clone(&self.tag_keys);
-            let settled_start = self.is_settled();
+            let settled = self.ingest.settled_probe();
 
-            // Phase 1 (collection): the freshness start stamp + the deck/tag scope.
-            let (start_mod, lex_scope) = {
+            // Phase 1 (collection): the freshness start stamps + the deck/tag scope.
+            let (start_mod, start_settled, lex_scope) = {
                 let args = args.clone();
+                let settled = settled.clone();
                 self.collection
                     .run(move |core| -> NativeResult<_> {
-                        Ok((core.col_mod()?, actions::compute_lex_scope(core, &args)?))
+                        Ok((
+                            core.col_mod()?,
+                            settled.is_settled(),
+                            actions::compute_lex_scope(core, &args)?,
+                        ))
                     })
                     .await??
             };
@@ -2895,8 +2904,8 @@ impl Kernel {
                 fuzzy_batch,
             };
 
-            // Phase 3 (collection): the prefetch hydration + assembly + end stamp.
-            let (groups, end_mod) = self
+            // Phase 3 (collection): the prefetch hydration + assembly + end stamps.
+            let (groups, end_mod, end_settled) = self
                 .collection
                 .run(move |core| -> NativeResult<_> {
                     let groups = actions::search_assemble(
@@ -2908,19 +2917,17 @@ impl Kernel {
                         &args,
                         discovery,
                     )?;
-                    let end_mod = core.col_mod()?;
-                    Ok((groups, end_mod))
+                    Ok((groups, core.col_mod()?, settled.is_settled()))
                 })
                 .await??;
-            let settled_end = self.is_settled();
             let stale = actions::is_stale_read(
                 actions::FreshnessStamp {
                     col_mod: start_mod,
-                    settled: settled_start,
+                    settled: start_settled,
                 },
                 actions::FreshnessStamp {
                     col_mod: end_mod,
-                    settled: settled_end,
+                    settled: end_settled,
                 },
             );
             Ok((groups, stale))

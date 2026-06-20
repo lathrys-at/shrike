@@ -998,10 +998,10 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             semantic=semantic_ok,
         )
         # The native read returns the fused groups plus the read-time `stale`
-        # verdict: computed inside the collection-actor job that ran the read, by
-        # bracketing the whole index/derived read with a col_mod + ingest-settled
-        # check — so it describes the snapshot the result was actually taken
-        # against, not a value sampled before the read.
+        # verdict: the kernel brackets the whole read with col_mod + ingest-settled
+        # stamps sampled INSIDE its collection-actor jobs (the first and last of
+        # the thread-domain orchestration) — so it describes the snapshot the
+        # result was actually taken against, not a value sampled before the read.
         payload = _SearchNotesNative.model_validate_json(raw)
         groups = payload.groups
         # Activation-floor calibration feedstock: one sample per query group —

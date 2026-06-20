@@ -1355,7 +1355,10 @@ pub fn search_notes(
     vectors: &[Vec<f32>],
     args: &SearchArgs,
 ) -> NativeResult<Vec<SearchResultGroup>> {
-    let lex_scope = compute_lex_scope(core, args)?;
+    // Semantic first (its `index` precondition is checked before any read), then
+    // the lexical scope — the original monolith's order, so a degenerate
+    // `semantic && index == None` surfaces the precondition error rather than a
+    // later find_notes failure.
     let sem_by_source = if args.semantic {
         let index = index.ok_or_else(|| {
             NativeError::invalid_input("semantic search requested without an index engine")
@@ -1364,6 +1367,7 @@ pub fn search_notes(
     } else {
         Vec::new()
     };
+    let lex_scope = compute_lex_scope(core, args)?;
     let (substr_batch, fuzzy_batch) = match derived {
         Some(d) => search_lexical(d, sources, lex_scope.as_deref(), args)?,
         None => (Vec::new(), Vec::new()),

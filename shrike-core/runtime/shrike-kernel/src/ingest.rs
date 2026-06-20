@@ -201,10 +201,34 @@ impl IngestEnqueuer {
     }
 }
 
+/// A cloneable, `Send + Sync` probe of the ingest drain gauge, so a freshness
+/// bracket can sample `settled` from INSIDE a collection-actor job — where the
+/// `IngestHandle` itself (Mutex-bearing, not `Clone`) can't go. Sampling inside
+/// the job is load-bearing: the actor is FIFO and [`IngestEnqueuer::enqueue`]
+/// bumps `outstanding` *before* its send, so a write ordered before the job has
+/// its bump visible to a probe read inside the job. A probe read on the io
+/// thread *before* the job is enqueued can miss that bump → a false-fresh verdict.
+#[derive(Clone)]
+pub struct SettledProbe(Arc<std::sync::atomic::AtomicU64>);
+
+impl SettledProbe {
+    /// `true` when the ingest queue has fully drained — the same gauge and
+    /// reading as [`IngestHandle::is_settled`].
+    pub fn is_settled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst) == 0
+    }
+}
+
 impl IngestHandle {
     /// A live sender clone, or `None` after shutdown.
     fn sender(&self) -> Option<mpsc::UnboundedSender<IngestMsg>> {
         self.tx.lock().expect("ingest sender poisoned").clone()
+    }
+
+    /// A [`SettledProbe`] over this handle's drain gauge — for sampling `settled`
+    /// inside a collection-actor job (see [`SettledProbe`]).
+    pub fn settled_probe(&self) -> SettledProbe {
+        SettledProbe(Arc::clone(&self.outstanding))
     }
 
     /// A cloneable enqueue handle to move into a collection-write job.
