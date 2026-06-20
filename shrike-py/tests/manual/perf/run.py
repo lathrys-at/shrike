@@ -21,10 +21,13 @@ this emits the comparable artifact and a diff on request.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 # Allow running from a bare checkout: put the repo's shrike-py/ (for `tests.*`)
 # and shrike-py/src (for `shrike.*`) on sys.path.
@@ -41,7 +44,14 @@ from tests.manual.perf.corpus import (  # noqa: E402
     CorpusSpec,
     ensure_corpus,
 )
-from tests.manual.perf.driver import boot_from_profile, measure, run_async  # noqa: E402
+from tests.manual.perf.driver import (  # noqa: E402
+    INGEST,
+    boot_from_profile,
+    measure,
+    measure_ingest,
+    run_async,
+)
+from tests.manual.perf.instrument import RUN_DIR_ENV, flame_path, pyspy_command  # noqa: E402
 from tests.manual.perf.result import (  # noqa: E402
     Conditions,
     RunResult,
@@ -72,13 +82,91 @@ def _isolated_working_copy(corpus_anki2: Path, corpus_media: Path, run_dir: Path
 
 
 async def _run_workloads(
-    profile_path: Path, working: Path, cache_dir: Path, workloads: list, repeats: int, warmup: int
+    profile_path: Path,
+    corpus: Any,
+    run_dir: Path,
+    names: list[str],
+    repeats: int,
+    warmup: int,
+    with_media: bool,
 ) -> list[WorkloadResult]:
-    booted = await boot_from_profile(profile_path, working, cache_dir)
-    try:
-        return [await measure(w, booted, repeats=repeats, warmup=warmup) for w in workloads]
-    finally:
-        await booted.close()
+    results: list[WorkloadResult] = []
+    registry = [n for n in names if n != INGEST]
+    if registry:
+        # Read-only workloads first so the single shared boot stays representative.
+        workloads = sorted(
+            (WORKLOADS[n]() for n in registry), key=lambda w: getattr(w, "mutates", False)
+        )
+        # An isolated working copy so a mutating workload never pollutes the cached
+        # corpus (ingest makes its own copies; skipped when only ingest is requested).
+        working = _isolated_working_copy(corpus.anki2_path, corpus.media_dir, run_dir)
+        print(f"Booting {profile_path.stem} over {working} ...")
+        booted = await boot_from_profile(profile_path, working, run_dir / "cache")
+        try:
+            for w in workloads:
+                results.append(await measure(w, booted, repeats=repeats, warmup=warmup))
+        finally:
+            # Close before ingest opens its own kernels — the driven runtime holds
+            # one kernel at a time.
+            await booted.close()
+    if INGEST in names:
+        results.append(
+            await measure_ingest(
+                profile_path,
+                corpus,
+                run_dir / "ingest",
+                repeats=repeats,
+                warmup=warmup,
+                with_media=with_media,
+            )
+        )
+    return results
+
+
+def _profile_under_pyspy(
+    args: argparse.Namespace, names: list[str], parser: argparse.ArgumentParser
+) -> int:
+    """Re-exec the run under ``py-spy record --native`` to capture a flamegraph
+    spanning the Python harness AND the Rust kernel. ONE workload per run keeps the
+    attribution clean; the inner run shares this run's output dir (via env) so the
+    flamegraph and result.json land together."""
+    if len(names) != 1:
+        parser.error("--instrument profiles ONE workload per run; pass a single --workloads")
+    if args.out is not None:
+        parser.error("--out is ignored under --instrument; result.json lands beside the flamegraph")
+    if shutil.which("py-spy") is None:
+        parser.error(
+            "--instrument needs py-spy on PATH (`pip install py-spy`); see docs/dev/testing.md"
+        )
+    workload = names[0]
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    run_dir = (
+        _RUNS_DIR
+        / f"perf-{args.profile}-{args.variant.replace('+', '_')}-{args.size}-{workload}-{stamp}"
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cmd = pyspy_command(
+        Path(__file__).resolve(),
+        run_dir,
+        profile=args.profile,
+        size=args.size,
+        variant=args.variant,
+        workload=workload,
+        repeats=args.repeats,
+        warmup=args.warmup,
+        baseline=args.baseline,
+    )
+    flame = flame_path(run_dir, workload)
+    print(f"Instrumenting '{workload}' under py-spy --native -> {flame}")
+    print(f"  $ {' '.join(cmd)}")
+    rc = subprocess.call(cmd, env={**os.environ, RUN_DIR_ENV: str(run_dir)})
+    if rc == 0:
+        print(f"\nwrote {flame}")
+    else:
+        # Attaching usually needs root, especially on macOS; preserve PATH/venv.
+        print(f"\npy-spy exited {rc}. Attaching often needs root — retry under sudo:")
+        print(f"  sudo --preserve-env=PATH,VIRTUAL_ENV {' '.join(cmd)}")
+    return rc
 
 
 def main() -> int:
@@ -89,7 +177,9 @@ def main() -> int:
     parser.add_argument(
         "--workloads",
         default="search,rebuild,upsert-batch",
-        help=f"Subset of {sorted(WORKLOADS)} (default: search,rebuild,upsert-batch).",
+        help=f"Subset of {sorted({*WORKLOADS, INGEST})} (default: search,rebuild,upsert-batch). "
+        "'ingest' is the cold package-import scenario (its own boot per sample; heavy "
+        "— use a small --repeats).",
     )
     parser.add_argument("--repeats", type=int, default=20, help="Timed iterations per workload.")
     parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations discarded.")
@@ -105,12 +195,22 @@ def main() -> int:
     parser.add_argument(
         "--instrument",
         action="store_true",
-        help="Reserved for the profiler-attach seam (#866); not wired yet.",
+        help="Profile ONE workload under py-spy --native: a flamegraph (Python + Rust) "
+        "next to the result. Needs py-spy + a `--frame-pointers` build; often needs sudo. "
+        "See docs/dev/testing.md.",
     )
     args = parser.parse_args()
 
-    if args.instrument:
-        print("note: --instrument is the #866 seam and is not wired yet; running clean-timed.")
+    names = [n.strip() for n in args.workloads.split(",") if n.strip()]
+    known = {*WORKLOADS, INGEST}
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        parser.error(f"unknown workload(s) {unknown}; choices: {sorted(known)}")
+
+    # The profiling run re-execs the inner run under py-spy (which carries no
+    # --instrument); the inner run lands here without re-entering this branch.
+    if args.instrument and not os.environ.get(RUN_DIR_ENV):
+        return _profile_under_pyspy(args, names, parser)
 
     import shrike_native
 
@@ -122,26 +222,22 @@ def main() -> int:
             + "` for real results."
         )
 
-    names = [n.strip() for n in args.workloads.split(",") if n.strip()]
-    unknown = [n for n in names if n not in WORKLOADS]
-    if unknown:
-        parser.error(f"unknown workload(s) {unknown}; choices: {sorted(WORKLOADS)}")
-    # Read-only workloads first so one boot stays representative (a mutator grows
-    # the collection, which would skew a later read).
-    workloads = sorted((WORKLOADS[n]() for n in names), key=lambda w: getattr(w, "mutates", False))
-
     spec = CorpusSpec(notes=args.size, variant=args.variant)
     print(f"Ensuring corpus: {args.size} notes ({args.variant}) ...")
     corpus = ensure_corpus(spec)
 
     profile_path = Path(__file__).resolve().parent / "profiles" / f"perf-{args.profile}.yml"
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
-    run_dir = (
-        _RUNS_DIR / f"perf-{args.profile}-{args.variant.replace('+', '_')}-{args.size}-{stamp}"
-    )
-    working = _isolated_working_copy(corpus.anki2_path, corpus.media_dir, run_dir)
+    # Under --instrument the outer run picks the dir and passes it down, so the
+    # flamegraph and this run's result.json land together.
+    env_run_dir = os.environ.get(RUN_DIR_ENV)
+    if env_run_dir:
+        run_dir = Path(env_run_dir)
+    else:
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+        run_dir = (
+            _RUNS_DIR / f"perf-{args.profile}-{args.variant.replace('+', '_')}-{args.size}-{stamp}"
+        )
 
-    print(f"Booting perf-{args.profile} over {working} ...")
     # The kernel runs a harness-driven runtime with no lazy fallback: install +
     # park the committed driver threads before any kernel op, tear down after.
     from shrike.platform.driven_runtime import DrivenRuntime
@@ -152,7 +248,13 @@ def main() -> int:
     try:
         results = run_async(
             _run_workloads(
-                profile_path, working, run_dir / "cache", workloads, args.repeats, args.warmup
+                profile_path,
+                corpus,
+                run_dir,
+                names,
+                args.repeats,
+                args.warmup,
+                with_media=(args.variant == "text+image"),
             )
         )
     finally:

@@ -13,7 +13,7 @@ import pytest
 import shrike_native
 
 from tests.manual.perf.corpus import CorpusSpec, build_corpus
-from tests.manual.perf.driver import boot_from_profile, measure, run_async
+from tests.manual.perf.driver import boot_from_profile, measure, measure_ingest, run_async
 from tests.manual.perf.workloads import (
     DeleteWorkload,
     RebuildWorkload,
@@ -99,3 +99,13 @@ def test_reconcile_workload_recovers_out_of_band_drift(_driven, tmp_path):
     assert res.workload == "reconcile"
     assert res.distribution.n == 2
     assert res.items == 6
+
+
+def test_ingest_workload_imports_a_cold_package(_driven, tmp_path):
+    # measure_ingest exports the corpus to a package, then imports it into a fresh
+    # empty collection per iteration (its own boot lifecycle, not a shared boot).
+    corpus = build_corpus(CorpusSpec(notes=12, variant="text"), tmp_path / "corpus")
+    res = run_async(measure_ingest(_PROFILE, corpus, tmp_path / "ingest", repeats=2, warmup=0))
+    assert res.workload == "ingest"
+    assert res.distribution.n == 2
+    assert res.items == 12  # all 12 notes imported as new

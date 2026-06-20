@@ -97,13 +97,31 @@ py_library(
     deps = [":pkg"],
 )
 
+# server/__init__.py carries real code (`main`), so it can't sit in the :pkg
+# marker — yet BOTH :server and :export_store materialize the server/ package dir.
+# A target that pulls :export_store WITHOUT :server would otherwise get an empty
+# Bazel-synthesized server/__init__.py (legacy_create_init fills package dirs that
+# lack one), which races real-init readers during concurrent //... runfiles tree
+# construction. Factoring the real init here, depended on by both, guarantees the
+# real init is always present. Acyclic: server/__init__.py imports lazily (no deps
+# but :pkg), so :export_store -> :server_pkg introduces no cycle with :server.
+py_library(
+    name = "server_pkg",
+    srcs = ["server/__init__.py"],
+    imports = [".."],
+    deps = [":pkg"],
+)
+
 # The export download store: server-named temp packages + their one-shot
 # download tokens, reaped on download/TTL/shutdown. Leaf — stdlib only.
 py_library(
     name = "export_store",
     srcs = ["server/export_store.py"],
     imports = [".."],
-    deps = [":pkg"],
+    deps = [
+        ":pkg",
+        ":server_pkg",
+    ],
 )
 
 py_library(
@@ -367,7 +385,6 @@ py_library(
 py_library(
     name = "server",
     srcs = [
-        "server/__init__.py",
         "server/__main__.py",
         "server/_mcp_perf.py",
         "server/server.py",
@@ -389,6 +406,7 @@ py_library(
         ":pkg",
         ":profiles",
         ":schemas",
+        ":server_pkg",  # the real server/__init__.py (also depped by :export_store)
         ":tools",
         "//shrike-core/bindings/shrike-pyo3:shrike_native",
         requirement("mcp"),

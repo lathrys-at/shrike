@@ -13,6 +13,7 @@ py_library(
     srcs = [
         "__init__.py",
         "compare.py",
+        "instrument.py",
         "result.py",
         "stats.py",
     ],
@@ -57,6 +58,7 @@ pytest_test(
     name = "pure_test",
     size = "small",
     srcs = [
+        "test_instrument.py",
         "test_result.py",
         "test_stats.py",
     ],

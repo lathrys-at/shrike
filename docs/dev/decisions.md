@@ -362,6 +362,31 @@ The only thing that recovers a *real* wedge is the recovery side — watch `is_s
 staying false with outstanding writes, surface it as a degraded `/status`, and let the host
 restart the embedder. That is filed as low-priority defense-in-depth (#891), not built here.
 
+### Code-bearing package `__init__.py` files need their own marker target
+
+Bazel's `legacy_create_init` (on by default — `--incompatible_default_to_explicit_init_py` is
+unset) synthesizes an EMPTY `__init__.py` into a target's runfiles for any package dir that
+holds a `.py` but no `__init__.py`. Harmless for the plain-marker subpackages, but
+`server/__init__.py` and `recognition/__init__.py` carry real code, so they live in their own
+targets (`:server`, `:recognition`), not the `:pkg` marker.
+
+The trap behind #872: `:export_store` (`server/export_store.py`) materializes the `server/`
+package dir but is dep-able WITHOUT `:server` (e.g. `//shrike-py/tests/unit:tools`). Bazel then
+synthesizes an EMPTY `server/__init__.py` for that target. Under `bazel test //...` on Linux —
+where runfiles are symlinks into one shared, writable execroot source — the bazel server's
+non-atomic empty-init write races concurrent reads of the real `server/__init__.py` by the
+`:server`-dependent targets, so they import an empty `shrike.server` (`main` absent) →
+intermittent `ImportError`/`AttributeError`. macOS never reproduced (APFS COW isolates each
+runfiles tree); per-action sandboxing (#894) couldn't fix it because the writer is the bazel
+server itself, not a sandboxed spawn.
+
+Fix: a `:server_pkg` marker carrying the real `server/__init__.py`, depended on by BOTH `:server`
+and `:export_store`, so every runfiles tree that materializes `server/` also carries the real
+init and `legacy_create_init` never synthesizes an empty one. The blanket
+`--incompatible_default_to_explicit_init_py=true` was rejected: it strips auto-init for the
+genuinely marker-only packages too, breaking `tests.*` imports. Any future code-bearing
+`__init__.py` pulled in by a target that does not dep its owner needs the same split.
+
 ### The engine-plugin architecture: a pure kernel
 
 The kernel composes engines it is *given* — never naming one. Contracts live in the leaf crate
@@ -668,5 +693,31 @@ Three deliberate choices:
   PR's wall-clock. The pure pieces (the distribution math, the artifact, the diff) are
   unit-tested on the per-PR lane, since that logic is where a silent measurement bug hides.
 
-Budgets + regression gating (#869) and the profiler-attach seam for hotspot attribution
-(#866) build on this; the seam's hook point is the runner's timing loop.
+Budgets + regression gating (#869) build on this.
+
+### Hotspot profiling uses py-spy `--native` for a cross-boundary flamegraph (#866)
+
+Distributions say *which workflow* is slow; attribution needs *which line*. `run.py
+--instrument` re-execs the run under **py-spy `--native`**, the only profiler that merges
+Python-level frames **and** native Rust frames into one flamegraph — so a hotspot is
+attributable whether it lives in the harness glue or the kernel (`run.py → search_notes →
+kernel.search → usearch…` in a single view). The cross-boundary view is the whole point: the
+kernel/harness split is exactly where "is this slow in Rust or Python?" gets asked, so the
+profiler has to see both sides. The alternatives each cover one:
+
+- **samply** — excellent native detail (pleasant on macOS-arm64), but renders the Python side
+  as opaque CPython interpreter C frames, so it can't separate glue cost from kernel cost.
+  Kept as a documented complement for deep Rust-only work.
+- **austin / cProfile / viztracer** — Python-only; blind to the kernel.
+- **cargo-flamegraph / perf / dtrace** — native-only; blind to the Python frames.
+
+Two consequences. An optimized build drops frame pointers, which degrades native unwinding, so
+the profiling build forces them across the Rust crates (`-Cforce-frame-pointers=yes`, opt-in
+via `build-native.sh --frame-pointers`) — never in a clean-timing build, where a reserved
+register would skew the distribution. And attaching to a process usually needs root, so this is
+a manual-lane tool, never CI.
+
+Numeric per-span durations — capturing the kernel's existing `tracing` spans through a real
+subscriber and a cross-FFI `traceparent` for a parse→write→derive→embed→index table — are
+deferred to the observability work (#800). The flamegraph gives the visual breakdown now; #800
+later adds the complementary numeric attribution.
