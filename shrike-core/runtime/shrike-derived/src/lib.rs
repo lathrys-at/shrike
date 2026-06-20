@@ -9,12 +9,16 @@
 //! SQLite always has FTS5 + the trigram tokenizer, so the facade's
 //! availability probe stops being load-bearing.
 //!
-//! **The single mutexed connection is a correctness invariant, not just
+//! **The single WRITE connection is a correctness invariant, not just
 //! thread-safety**: `idx` is an FTS5 virtual table, so nothing at the schema
 //! level (no FK, no trigger) ties its rowids to `rowmap` — the pairing holds
-//! because every write rides this one connection's `last_insert_rowid()` under
-//! [`DerivedEngine::lock`]. A move to a connection pool must make the coupling
-//! structural first.
+//! because every write rides ONE connection's `last_insert_rowid()` under
+//! [`DerivedEngine::lock`]. Reads run on a separate pool of connections under
+//! WAL, so the fanned lexical reads (substring ∥ fuzzy) run concurrently rather
+//! than taking turns on one mutexed connection. A pool connection only ever runs
+//! SELECTs (plus its own per-connection TEMP scope staging) and never writes, so
+//! it never touches `last_insert_rowid()` — the write↔rowmap pairing invariant
+//! is owned wholly by the single write connection and is untouched by the pool.
 //!
 //! MATCH-expression building, trigram filtering, and the state machine stay
 //! facade-side; this crate is storage + queries only. Pure Rust — no pyo3.
@@ -78,7 +82,103 @@ pub fn fts5_trigram_available() -> bool {
 /// The derived-text store: the FTS5 trigram sidecar over note/recognized
 /// text, backing the lexical search signals plus the recognition bookkeeping.
 pub struct DerivedEngine {
+    /// The single WRITE connection. Every write rides this one connection's
+    /// `last_insert_rowid()` under [`DerivedEngine::lock`] — the idx↔rowmap
+    /// pairing invariant (see the module docs). Writes serialize on it.
     conn: Mutex<Connection>,
+    /// Pooled READ connections, opened on demand, for the fanned lexical reads.
+    /// Under WAL these read concurrently with each other and with the write
+    /// connection without blocking.
+    read_pool: ReadPool,
+}
+
+/// A pool of read-only-by-discipline connections to the derived store, so the
+/// fanned lexical reads (substring ∥ fuzzy) run on distinct connections rather
+/// than serializing on one mutexed handle. Connections are opened on demand and
+/// returned on [`ReadGuard`] drop; the pool self-bounds at the live read
+/// concurrency (at most one checkout per compute thread), so it grows to the
+/// compute-pool width and no further without an explicit cap.
+struct ReadPool {
+    /// The sidecar path — read connections open against the same file as the
+    /// write connection (WAL is in the file header, so they inherit it).
+    path: String,
+    /// Idle connections available for checkout. A connection lives on exactly
+    /// one of: this vector, or a live [`ReadGuard`].
+    idle: Mutex<Vec<Connection>>,
+}
+
+impl ReadPool {
+    fn new(path: &str) -> Self {
+        Self {
+            path: path.to_string(),
+            idle: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Open a read connection against the sidecar.
+    ///
+    /// READ-WRITE (not `OPEN_READ_ONLY`): a WAL reader takes `-shm` read locks,
+    /// which a true read-only connection cannot. Read-only is held by DISCIPLINE
+    /// — only the audited read helpers ever receive a pool connection, and they
+    /// run SELECTs plus their own TEMP scope staging. `PRAGMA query_only` is
+    /// deliberately NOT set: it rejects the `CREATE TEMP TABLE` / `INSERT` the
+    /// large-scope staging needs (a temp write fails as `readonly` under it).
+    fn open_read_conn(path: &str) -> NativeResult<Connection> {
+        let conn = Connection::open(path).map_err(db_err)?;
+        // Match the write connection's wait budget: a read overlapping the
+        // single writer's commit waits the lock out rather than taking an
+        // instant SQLITE_BUSY (with_busy_retry is the belt past this).
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(db_err)?;
+        Ok(conn)
+    }
+
+    /// Check out a connection: reuse an idle one or open a fresh one on demand.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a new connection cannot be opened.
+    fn checkout(&self) -> NativeResult<ReadGuard<'_>> {
+        let popped = self.idle.lock().expect("derived read pool poisoned").pop();
+        let conn = match popped {
+            Some(conn) => conn,
+            None => Self::open_read_conn(&self.path)?,
+        };
+        Ok(ReadGuard {
+            pool: self,
+            conn: Some(conn),
+        })
+    }
+
+    fn checkin(&self, conn: Connection) {
+        self.idle
+            .lock()
+            .expect("derived read pool poisoned")
+            .push(conn);
+    }
+}
+
+/// A borrowed read connection that returns itself to its [`ReadPool`] on drop.
+/// `Deref`s to the [`Connection`] so the read helpers use it as a plain handle.
+struct ReadGuard<'p> {
+    pool: &'p ReadPool,
+    /// `Some` until drop; `take`n in `Drop` to hand the connection back.
+    conn: Option<Connection>,
+}
+
+impl Drop for ReadGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.checkin(conn);
+        }
+    }
+}
+
+impl std::ops::Deref for ReadGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("read guard connection taken")
+    }
 }
 
 fn db_err(e: rusqlite::Error) -> NativeError {
@@ -148,23 +248,30 @@ impl DerivedEngine {
     /// Returns an error if the database cannot be opened or its schema migrated.
     pub fn open(path: &str, schema_version: i64) -> NativeResult<Self> {
         let conn = Connection::open(path).map_err(db_err)?;
-        // Plain rollback journaling + synchronous=NORMAL. This store has exactly
-        // one connection (the engine mutex serializes everything), so WAL's
-        // concurrent-reader payoff never materializes — while its -wal/-shm
-        // sidecars complicate the one-file story the relay/sync design wants.
-        // DELETE keeps the store a single file between transactions; NORMAL may
-        // lose the last transaction on power loss (never integrity), which a
-        // rebuildable cache absorbs: the col_mod watermark lags, reads as drift,
-        // rebuilds. (Opening a previously-WAL file converts it back; WAL is the
-        // one persistent journal mode.)
-        conn.pragma_update(None, "journal_mode", "DELETE")
+        // WAL + synchronous=NORMAL. Reads run on a separate connection pool
+        // ([`ReadPool`]); WAL is what lets those pooled reads proceed
+        // concurrently with each other and with this single writer without
+        // blocking (a rollback journal would serialize a read against an
+        // overlapping write). The -wal/-shm sidecars are the cost of that
+        // concurrency. NORMAL may lose the last transaction(s) on power loss
+        // (never integrity), which a rebuildable cache absorbs: the col_mod
+        // watermark lags, reads as drift, rebuilds. WAL is persistent in the
+        // file header, so the pool's later read connections inherit it.
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
             .map_err(db_err)?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Err(NativeError::unavailable(format!(
+                "derived store could not enter WAL mode (got {mode:?})"
+            )));
+        }
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(db_err)?;
-        // "One connection" holds per ENGINE, but two engines can share the file
-        // (the kernel's + the Python facade's read surface). With the default
-        // busy_timeout of 0, a read overlapping a write transaction gets an
-        // instant SQLITE_BUSY instead of waiting out a brief lock.
+        // The write connection plus the read pool are per ENGINE, but two engines
+        // can share the file (the kernel's + the Python facade's read surface).
+        // With the default busy_timeout of 0, a read overlapping the OTHER engine's
+        // write transaction gets an instant SQLITE_BUSY instead of waiting out a
+        // brief lock. (The pool's read connections set the same timeout.)
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(db_err)?;
 
@@ -213,6 +320,7 @@ impl DerivedEngine {
         .map_err(db_err)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            read_pool: ReadPool::new(path),
         })
     }
 
@@ -1167,12 +1275,15 @@ impl DerivedEngine {
         with_busy_retry(run)?
     }
 
-    /// [`Self::match_rows`] over many MATCH expressions, sharing ONE connection
-    /// lock, ONE scope staging, and ONE compiled statement (through the
-    /// connection's statement cache) across the whole batch. The fused-search
-    /// lexical reads call this once for all query strings rather than locking,
-    /// re-staging the scope, and recompiling the statement per query. Returns one
-    /// row vector per expression, in `exprs` order.
+    /// [`Self::match_rows`] over many MATCH expressions on `conn`, sharing ONE
+    /// scope staging and ONE compiled statement (through the connection's
+    /// statement cache) across the whole batch. The fused-search lexical reads
+    /// call this once for all query strings rather than re-staging the scope and
+    /// recompiling the statement per query. Returns one row vector per
+    /// expression, in `exprs` order.
+    ///
+    /// `conn` is a checked-out [`ReadPool`] connection — read-only by discipline
+    /// (SELECTs plus the TEMP scope staging below, never a store write).
     ///
     /// The scope (when present) is staged ONCE in a per-connection TEMP table and
     /// referenced as an invariant `IN (SELECT id FROM temp.…)` subquery, so the
@@ -1184,8 +1295,8 @@ impl DerivedEngine {
     ///
     /// Returns an error if scope staging fails, or any expression's MATCH query
     /// fails (the batch stops at the first failure, like the singular read).
-    pub fn match_rows_batch(
-        &self,
+    fn match_rows_batch(
+        conn: &Connection,
         exprs: &[String],
         limit: i64,
         with_text: bool,
@@ -1193,18 +1304,17 @@ impl DerivedEngine {
         exclude_sources: &[&str],
     ) -> NativeResult<Vec<Vec<MatchRow>>> {
         if exprs.is_empty() {
-            return Ok(Vec::new()); // nothing to match — skip the lock and staging
+            return Ok(Vec::new()); // nothing to match — skip the staging
         }
         let span = tracing::debug_span!("derived.match_batch", n = exprs.len(), limit, with_text);
         let _enter = span.enter();
-        let conn = self.lock();
         let txt_col = if with_text { "idx.txt" } else { "NULL" };
         // Stage the scope ONCE for the whole batch as an invariant subquery: it is
         // referenced by every query below, and the staged form keeps the SQL — the
         // statement-cache key — stable so the statement compiles once.
         let scope_clause = match scope {
             Some(ids) if !ids.is_empty() => {
-                Self::stage_id_set(&conn, "shrike_scope_ids", ids)?;
+                Self::stage_id_set(conn, "shrike_scope_ids", ids)?;
                 "AND m.note_id IN (SELECT id FROM temp.shrike_scope_ids) ".to_string()
             }
             Some(_) => "AND 0 ".to_string(), // an empty scope matches nothing
@@ -1274,20 +1384,19 @@ impl DerivedEngine {
     /// `terms`, from the `idx_vocab` view — the fuzzy path reads it to prune common
     /// trigrams. A term absent from the result is absent from the index (DF 0). The
     /// `term IN (…)` lookup is a pushed-down seek (not a vocab scan); chunked under
-    /// the inline-parameter cap. One lock for the whole set.
+    /// the inline-parameter cap. Reads on the passed [`ReadPool`] connection.
     ///
     /// # Errors
     ///
     /// Returns an error if the vocabulary lookup fails.
-    pub fn trigram_dfs(
-        &self,
+    fn trigram_dfs(
+        conn: &Connection,
         terms: &[&str],
     ) -> NativeResult<std::collections::HashMap<String, i64>> {
         let mut out: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         if terms.is_empty() {
             return Ok(out);
         }
-        let conn = self.lock();
         for chunk in terms.chunks(Self::INLINE_ID_MAX) {
             let marks = vec!["?"; chunk.len()].join(",");
             let sql = format!("SELECT term, doc FROM idx_vocab WHERE term IN ({marks})");
@@ -2365,9 +2474,11 @@ impl DerivedEngine {
                 exprs.push(fts_quote(trimmed));
             }
         }
-        let mut batched = self
-            .match_rows_batch(&exprs, limit, false, scope, exclude_sources)?
-            .into_iter();
+        // One pool connection for the whole batch's single MATCH read.
+        let conn = self.read_pool.checkout()?;
+        let mut batched =
+            Self::match_rows_batch(&conn, &exprs, limit, false, scope, exclude_sources)?
+                .into_iter();
         // `batched` yields one entry per served query, in order; reattach each to
         // its query. A served query maps to `Some(rows)` (possibly empty — the
         // store served it and found nothing); a sub-trigram query maps to `None`
@@ -2422,7 +2533,12 @@ impl DerivedEngine {
             .flatten()
             .flat_map(|g| g.iter().map(String::as_str))
             .collect();
-        let df = self.trigram_dfs(&distinct.into_iter().collect::<Vec<_>>())?;
+        // One pool connection for the whole fuzzy read: the DF lookup, the posting
+        // reads, and the snippet reads all run on it. Each sub-read is its own
+        // statement (its own committed snapshot) — the same per-sub-read freshness
+        // as before; the freshness bracket flags a write that lands mid-read.
+        let conn = self.read_pool.checkout()?;
+        let df = Self::trigram_dfs(&conn, &distinct.into_iter().collect::<Vec<_>>())?;
         let pruned: Vec<Option<Vec<String>>> = gram_sets
             .iter()
             .map(|g| g.as_ref().map(|gs| Self::prune_to_rare_terms(gs, &df)))
@@ -2437,7 +2553,8 @@ impl DerivedEngine {
         if distinct_terms.is_empty() {
             return Ok(queries.iter().map(|_| Vec::new()).collect());
         }
-        let (term_rowids, seg_meta) = self.term_segments_batch(
+        let (term_rowids, seg_meta) = Self::term_segments_batch(
+            &conn,
             &distinct_terms.into_iter().collect::<Vec<_>>(),
             scope,
             exclude_sources,
@@ -2465,7 +2582,7 @@ impl DerivedEngine {
                 (terms, surv.iter().map(|(_, _, _, rid)| *rid).collect())
             })
             .collect();
-        let snippets = self.fuzzy_snippets_batch(&snippet_jobs)?;
+        let snippets = Self::fuzzy_snippets_batch(&conn, &snippet_jobs)?;
         let out = survivors
             .into_iter()
             .zip(snippets)
@@ -2482,17 +2599,18 @@ impl DerivedEngine {
     /// text contains it: `term_rowids[term]` is the matching idx rowids, and
     /// `seg_meta[rowid]` their `(note_id, source, ref)` provenance (owned once,
     /// shared across queries). One MATCH per term — no rank, no text, no limit, just
-    /// the posting — sharing ONE connection lock and ONE staged scope across the
-    /// set, like [`Self::match_rows_batch`]. No `LIMIT`: the overlap ranker needs
-    /// every match to stay recall-safe; a rowid `LIMIT` here would silently drop
-    /// high-rowid (recently-added) high-overlap notes.
+    /// the posting — sharing ONE connection and ONE staged scope across the set, like
+    /// [`Self::match_rows_batch`]. No `LIMIT`: the overlap ranker needs every match
+    /// to stay recall-safe; a rowid `LIMIT` here would silently drop high-rowid
+    /// (recently-added) high-overlap notes. Reads on the passed [`ReadPool`]
+    /// connection.
     ///
     /// # Errors
     ///
     /// Returns an error if scope staging or any term's MATCH query fails.
     #[allow(clippy::type_complexity)]
     fn term_segments_batch(
-        &self,
+        conn: &Connection,
         terms: &[&str],
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
@@ -2509,10 +2627,9 @@ impl DerivedEngine {
         }
         let span = tracing::debug_span!("derived.fuzzy_terms", n = terms.len());
         let _enter = span.enter();
-        let conn = self.lock();
         let scope_clause = match scope {
             Some(ids) if !ids.is_empty() => {
-                Self::stage_id_set(&conn, "shrike_scope_ids", ids)?;
+                Self::stage_id_set(conn, "shrike_scope_ids", ids)?;
                 "AND m.note_id IN (SELECT id FROM temp.shrike_scope_ids) ".to_string()
             }
             Some(_) => "AND 0 ".to_string(), // an empty scope matches nothing
@@ -2584,13 +2701,14 @@ impl DerivedEngine {
     /// a `MATCH`, and re-running the OR over the index to snippet a handful of rows
     /// re-pays the posting scan the overlap path exists to avoid; a rowid lookup
     /// reads only the survivor pages. Snippets are off the hot path: reading text
-    /// for every candidate is what made bm25 expensive. Shares ONE connection lock.
+    /// for every candidate is what made bm25 expensive. Reads on the passed
+    /// [`ReadPool`] connection.
     ///
     /// # Errors
     ///
     /// Returns an error if a text lookup fails.
     fn fuzzy_snippets_batch(
-        &self,
+        conn: &Connection,
         jobs: &[(&[String], Vec<i64>)],
     ) -> NativeResult<Vec<std::collections::HashMap<i64, String>>> {
         let mut out: Vec<std::collections::HashMap<i64, String>> = Vec::with_capacity(jobs.len());
@@ -2600,7 +2718,6 @@ impl DerivedEngine {
                 .map(|_| std::collections::HashMap::new())
                 .collect());
         }
-        let conn = self.lock();
         for (terms, rowids) in jobs {
             if rowids.is_empty() || terms.is_empty() {
                 out.push(std::collections::HashMap::new());
@@ -3091,7 +3208,8 @@ mod lexical_tests {
             1,
         )
         .unwrap();
-        let df = e.trigram_dfs(&["abc", "xyz", "qqq"]).unwrap();
+        let conn = e.read_pool.checkout().unwrap();
+        let df = DerivedEngine::trigram_dfs(&conn, &["abc", "xyz", "qqq"]).unwrap();
         assert_eq!(df.get("abc"), Some(&2), "'abc' is in both docs");
         assert_eq!(df.get("xyz"), Some(&1), "'xyz' is in one doc");
         assert_eq!(df.get("qqq"), None, "absent trigram has no row (DF 0)");
@@ -3194,23 +3312,165 @@ mod hardening_tests {
     }
 
     #[test]
-    fn open_converts_a_wal_store_back_to_single_file() {
+    fn open_puts_the_store_in_wal_mode() {
         let (dir, path) = temp_db();
+        // A pre-existing rollback-journal store (e.g. one written by an older build).
         {
             let raw = Connection::open(&path).unwrap();
-            raw.pragma_update(None, "journal_mode", "WAL").unwrap();
+            raw.pragma_update(None, "journal_mode", "DELETE").unwrap();
         }
-        {
-            let _e = DerivedEngine::open(path.to_str().unwrap(), 1).unwrap();
-        }
-        // WAL is the one persistent journal mode — after open() the file is
-        // back on rollback journaling and a fresh connection sees it.
+        let e = DerivedEngine::open(path.to_str().unwrap(), 1).unwrap();
+        // open() switches the file to WAL — persistent in the file header, so a
+        // fresh connection to the same file (a pool read connection) inherits it
+        // and reads concurrently with the single writer.
         let raw = Connection::open(&path).unwrap();
         let mode: String = raw
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(mode.to_lowercase(), "delete");
-        assert!(!path.with_extension("db-wal").exists());
+        assert_eq!(mode.to_lowercase(), "wal");
+        drop(e);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn read_pool_serves_concurrent_reads_and_reuses_connections() {
+        let (dir, path) = temp_db();
+        let e = std::sync::Arc::new(DerivedEngine::open(path.to_str().unwrap(), 1).unwrap());
+        build_snapshot_live(
+            &e,
+            &[
+                (
+                    1,
+                    "field".into(),
+                    "Front".into(),
+                    "the mitochondria is the powerhouse".into(),
+                ),
+                (
+                    2,
+                    "field".into(),
+                    "Front".into(),
+                    "momentum is mass times velocity".into(),
+                ),
+                (
+                    3,
+                    "field".into(),
+                    "Front".into(),
+                    "mitochondrial dna replication".into(),
+                ),
+            ],
+            1,
+        )
+        .unwrap();
+
+        // Many threads hammer both lexical reads at once. Under the old single
+        // mutexed connection these serialized; the pool hands each thread its own
+        // connection so they run concurrently (WAL) and must all agree on the
+        // committed data — a serialization bug would corrupt or deadlock here.
+        let threads = 8;
+        let mut handles = Vec::new();
+        for _ in 0..threads {
+            let e = std::sync::Arc::clone(&e);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..50 {
+                    let sub = e
+                        .search_substring_batch(&["mitochondria"], 10, None, &[])
+                        .unwrap();
+                    assert_eq!(sub.len(), 1);
+                    let ids: std::collections::BTreeSet<i64> = sub[0]
+                        .as_ref()
+                        .expect("served")
+                        .iter()
+                        .map(|r| r.0)
+                        .collect();
+                    assert_eq!(ids, std::collections::BTreeSet::from([1, 3]));
+
+                    let fz = e
+                        .search_fuzzy_batch(&["mitochondira"], 10, None, &[])
+                        .unwrap();
+                    assert_eq!(fz.len(), 1);
+                    assert!(!fz[0].is_empty(), "the transposition typo fuzzy-matches");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Every checkout was returned (reuse, no leak) and the pool grew no wider
+        // than the live concurrency: idle count is in 1..=threads.
+        let idle = e.read_pool.idle.lock().unwrap().len();
+        assert!(
+            (1..=threads).contains(&idle),
+            "pool idle conns = {idle}, expected 1..={threads}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn read_pool_reads_concurrently_with_writes() {
+        let (dir, path) = temp_db();
+        let e = std::sync::Arc::new(DerivedEngine::open(path.to_str().unwrap(), 1).unwrap());
+        build_snapshot_live(
+            &e,
+            &[(
+                1,
+                "field".into(),
+                "Front".into(),
+                "mitochondria seed".into(),
+            )],
+            1,
+        )
+        .unwrap();
+
+        // Start the writer and readers together (the barrier) so the reads
+        // genuinely overlap the writes; both run BOUNDED loops so the index can
+        // never blow up. The window stays small — a few hundred tiny notes.
+        let writes = 200i64;
+        let reads = 200;
+        let readers = 4;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(readers + 1));
+
+        // Writer: incremental ingests on the SINGLE write connection while reads run.
+        let writer = {
+            let e = std::sync::Arc::clone(&e);
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                for i in 0..writes {
+                    e.ingest(
+                        100 + i,
+                        "field",
+                        &[("Front".to_string(), format!("mitochondria gen {i}"))],
+                    )
+                    .unwrap();
+                }
+            })
+        };
+
+        // Readers: pooled reads keep returning a consistent snapshot (always at
+        // least the seed note) and must never error or deadlock against the
+        // in-flight writer — the WAL reader/writer concurrency the pool exists for.
+        let mut handles = Vec::new();
+        for _ in 0..readers {
+            let e = std::sync::Arc::clone(&e);
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..reads {
+                    let sub = e
+                        .search_substring_batch(&["mitochondria"], 50, None, &[])
+                        .unwrap();
+                    assert!(
+                        !sub[0].as_ref().expect("served").is_empty(),
+                        "the seed note is in every committed snapshot"
+                    );
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        writer.join().unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
 

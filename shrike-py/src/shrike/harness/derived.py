@@ -269,10 +269,10 @@ class DerivedTextStore:
         ATOMIC: it builds the new FTS5 index into a shadow off the live tables and swaps it over
         them in ONE transaction, so any reader sees either the complete OLD index or the complete
         NEW one — never a torn/partial state mid-rebuild. (The justification is the atomic swap,
-        NOT a journal mode — the store opens ``journal_mode=DELETE``, not WAL.) Production lexical
-        reads run through the kernel's own mutex'd connection, serialized against the swap; this
-        facade's separate connection (the ``/status`` surface) likewise sees only committed state.
-        So a BUILDING read must not silently field-fall-back already-present rows — serve it.
+        not the journal mode.) Production lexical reads run through the kernel's own derived store
+        (a WAL read pool, serialized against the swap by SQLite); this facade's separate connection
+        (the ``/status`` surface) likewise sees only committed state. So a BUILDING read must not
+        silently field-fall-back already-present rows — serve it.
         """
         if not self._available or self._engine is None:
             return False
