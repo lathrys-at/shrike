@@ -592,45 +592,59 @@ fn in_scope(note: &Note, deck: Option<&str>, tags: &[String]) -> bool {
     true
 }
 
-/// Batch-hydrate candidates: ONE `note_dicts` call per ranking, not one per
-/// candidate (a per-candidate call pays two DB-proxy queries plus a full
-/// `deck_names` RPC plus a full notetype proto — hundreds of times per search).
-/// Each wire dict is parsed into the typed [`Note`] once here (it is exactly a
-/// serialized `Note`), so the ranking works a typed model rather than a
-/// stringly-indexed `Value`. Returns `nid -> Candidate` for ids not already
-/// hydrated; a missing/unreadable id is simply absent (skipped per note).
+/// Hydrate candidates from the cross-source `prefetch` map, falling back to ONE
+/// `note_dicts` call for any id not prefetched. `search_notes` prefetches every
+/// candidate id across ALL sources in a single batched read (the union of the
+/// semantic + lexical hits), so the common case here is a cheap clone out of
+/// `prefetch` with no collection-actor round-trip — instead of a `note_dicts` per
+/// ranking per source (each paying two DB-proxy queries plus a `deck_names` RPC
+/// plus a notetype proto). The fallback keeps it correct when the prefetch is
+/// incomplete — tag-member ids (not known until the loop) and secondary
+/// cross-space image ids both hydrate this way. Each wire dict is a serialized
+/// `Note`; a missing/unreadable id is simply absent (skipped per note).
 fn read_notes_batch(
     core: &dyn Collection,
+    prefetch: &HashMap<i64, Note>,
     note_data: &NoteData,
     ids: &[i64],
 ) -> HashMap<i64, Candidate> {
-    let missing: Vec<i64> = ids
-        .iter()
-        .copied()
-        .filter(|nid| !note_data.contains(*nid))
-        .collect();
-    if missing.is_empty() {
-        return HashMap::new();
+    let mut out: HashMap<i64, Candidate> = HashMap::new();
+    let mut need_fetch: Vec<i64> = Vec::new();
+    for &nid in ids {
+        if note_data.contains(nid) {
+            continue;
+        }
+        match prefetch.get(&nid) {
+            Some(note) => {
+                out.insert(nid, Candidate::new(note.clone()));
+            }
+            None => need_fetch.push(nid),
+        }
     }
-    match core.note_dicts(&missing, true) {
-        Ok(dicts) => dicts
-            .into_iter()
-            .filter_map(|d| match serde_json::from_value::<Note>(d) {
-                Ok(note) => Some((note.id, Candidate::new(note))),
-                Err(e) => {
+    if need_fetch.is_empty() {
+        return out;
+    }
+    match core.note_dicts(&need_fetch, true) {
+        Ok(dicts) => {
+            for d in dicts {
+                match serde_json::from_value::<Note>(d) {
                     // A dict that won't parse as a Note is a core/schema
                     // disagreement (a bug), but a search must degrade rather
                     // than fail — skip the candidate, exactly like a missing id.
-                    tracing::debug!(error = ?e, "search: candidate dict is not a Note; skipped");
-                    None
+                    Ok(note) => {
+                        out.insert(note.id, Candidate::new(note));
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = ?e, "search: candidate dict is not a Note; skipped");
+                    }
                 }
-            })
-            .collect(),
+            }
+        }
         Err(e) => {
             tracing::debug!(error = ?e, "search: batch hydrate failed; candidates skipped");
-            HashMap::new()
         }
     }
+    out
 }
 
 /// The fusion signal name for a SECONDARY vision space's image ranking:
@@ -708,6 +722,9 @@ fn apply_image_floor(ranking: &mut Vec<i64>, score: &mut HashMap<i64, f64>, floo
 #[derive(Clone, Copy)]
 struct SearchCtx<'a> {
     core: &'a dyn Collection,
+    /// Cross-source prefetched notes (built once before the per-source loop), so
+    /// hydration is a clone, not a per-source `note_dicts`. See [`read_notes_batch`].
+    prefetch: &'a HashMap<i64, Note>,
     exclude: &'a HashSet<i64>,
     args: &'a SearchArgs,
 }
@@ -748,6 +765,7 @@ fn rank_modality(
 ) -> Vec<i64> {
     let SearchCtx {
         core,
+        prefetch,
         exclude,
         args,
     } = ctx;
@@ -761,7 +779,7 @@ fn rank_modality(
         .take_while(|(_, dist)| !thresholded || round3(1.0 - f64::from(**dist)) >= args.threshold)
         .map(|(nid, _)| *nid)
         .collect();
-    let mut hydrated = read_notes_batch(core, note_data, &prospective);
+    let mut hydrated = read_notes_batch(core, prefetch, note_data, &prospective);
     let mut ranking: Vec<i64> = Vec::new();
     for (nid, dist) in slice.keys.iter().zip(slice.distances.iter()) {
         let nid = *nid;
@@ -802,6 +820,7 @@ fn collect_substring_candidates(
 ) -> NativeResult<()> {
     let SearchCtx {
         core,
+        prefetch,
         exclude,
         args,
     } = ctx;
@@ -832,7 +851,7 @@ fn collect_substring_candidates(
             .into_iter()
             .filter(|nid| !exclude.contains(nid))
             .collect();
-        let mut hydrated = read_notes_batch(core, note_data, &candidates);
+        let mut hydrated = read_notes_batch(core, prefetch, note_data, &candidates);
         let mut added = 0usize;
         for nid in candidates.iter().copied() {
             if note_data.contains(nid) {
@@ -860,7 +879,7 @@ fn collect_substring_candidates(
         .map(|(nid, ..)| *nid)
         .filter(|nid| !exclude.contains(nid))
         .collect();
-    let mut hydrated = read_notes_batch(core, note_data, &row_ids);
+    let mut hydrated = read_notes_batch(core, prefetch, note_data, &row_ids);
     let mut added = 0usize;
     for (nid, source, reference, snippet) in rows {
         if exclude.contains(&nid) || note_data.contains(nid) {
@@ -921,6 +940,7 @@ fn collect_fuzzy(
 ) -> NativeResult<FuzzyRanking> {
     let SearchCtx {
         core,
+        prefetch,
         exclude,
         args,
     } = ctx;
@@ -933,7 +953,7 @@ fn collect_fuzzy(
         .map(|(nid, ..)| *nid)
         .filter(|nid| !exclude.contains(nid))
         .collect();
-    let mut hydrated = read_notes_batch(core, note_data, &hit_ids);
+    let mut hydrated = read_notes_batch(core, prefetch, note_data, &hit_ids);
     let mut out = FuzzyRanking::empty();
     for (nid, source, r#ref, snippet) in hits {
         if exclude.contains(&nid) || out.evidence.contains_key(&nid) {
@@ -1321,6 +1341,46 @@ pub fn search_notes(
         // (substring) and contributes no fuzzy signal.
         _ => (Vec::new(), Vec::new()),
     };
+
+    // Collapse hydration: gather every candidate note id across ALL sources — the
+    // semantic keys (per modality) plus the lexical (substring + fuzzy) row ids —
+    // and hydrate them in ONE batched `note_dicts`, shared across the per-source
+    // assembly via `read_notes_batch`. This replaces a `note_dicts` per ranking per
+    // source (the house rule: discover the id set, then ONE batched read). Excluded
+    // ids are never looked up, so drop them; ids not known until the loop
+    // (tag members, secondary cross-space image hits) hydrate via
+    // `read_notes_batch`'s per-source fallback.
+    let prefetch: HashMap<i64, Note> = {
+        let mut cand_ids: HashSet<i64> = HashSet::new();
+        for hits in &sem_by_source {
+            for (keys, _) in hits.values() {
+                cand_ids.extend(keys.iter().copied());
+            }
+        }
+        for rows in substr_batch.iter().flatten() {
+            cand_ids.extend(rows.iter().map(|(nid, ..)| *nid));
+        }
+        for rows in &fuzzy_batch {
+            cand_ids.extend(rows.iter().map(|(nid, ..)| *nid));
+        }
+        cand_ids.retain(|nid| !exclude.contains(nid));
+        if cand_ids.is_empty() {
+            HashMap::new()
+        } else {
+            let ids: Vec<i64> = cand_ids.into_iter().collect();
+            match core.note_dicts(&ids, true) {
+                Ok(dicts) => dicts
+                    .into_iter()
+                    .filter_map(|d| serde_json::from_value::<Note>(d).ok().map(|n| (n.id, n)))
+                    .collect(),
+                Err(e) => {
+                    tracing::debug!(error = ?e, "search: cross-source prefetch failed; per-source fallback");
+                    HashMap::new()
+                }
+            }
+        }
+    };
+
     // Per-source consumers: advanced once per QUERY source, in source order, so
     // each query source draws its own pre-fetched rows.
     let mut substr_batch = substr_batch.into_iter();
@@ -1333,6 +1393,7 @@ pub fn search_notes(
         // args), grouped so the helpers take it as one param.
         let ctx = SearchCtx {
             core,
+            prefetch: &prefetch,
             exclude: &exclude,
             args,
         };
