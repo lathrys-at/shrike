@@ -1,7 +1,10 @@
 """Integration tests for semantic search, contextual upsert, and index management.
 
-Requires llama-server on PATH and downloads a small GGUF model.
-Tests exercise the full pipeline: embedding, indexing, and search.
+Runs in-process on the ONNX MiniLM backend (the `collection_server` fixture) —
+the semantic behaviour under test (ranking, filters, neighbours, index updates)
+is backend-agnostic, so it needs an embedder, not specifically llama-server. The
+out-of-process GGUF/llama-server lifecycle is proved separately in
+test_embedding.py. Tests exercise the full pipeline: embedding, indexing, search.
 """
 
 from __future__ import annotations
@@ -13,12 +16,18 @@ from tests.integration.conftest import (
     CLIRunner,
     MCPClient,
     ServerInfo,
-    requires_llama_server,
+    requires_onnxruntime,
+    requires_shrike_native,
     search_until,
     wait_for_index_ready,
 )
 
-pytestmark = [pytest.mark.integration, pytest.mark.embedding, requires_llama_server]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.embedding,
+    requires_onnxruntime,
+    requires_shrike_native,
+]
 
 # ---------------------------------------------------------------------------
 # Test collection: 50 notes across 10 concepts, 5 per concept
@@ -409,146 +418,6 @@ class TestServerStatusWithIndex:
         assert data["index"]["state"] == "ready"
         assert data["index"]["size"] >= 50
         assert data["embedding"]["available"] is True
-
-
-# ---------------------------------------------------------------------------
-# Embedding service lifecycle — start/stop independently of the server
-# ---------------------------------------------------------------------------
-
-
-class TestEmbeddingLifecycle:
-    """The full embedding lifecycle as ONE woven flow on ONE server.
-
-    One server booted `--no-embedding`, two llama boots. The flow is a single
-    ordered test: every step's contract depends on the state the previous step
-    left, which is exactly why these are flaky as separate tests and cheap as
-    one.
-    """
-
-    @pytest.fixture(scope="class")
-    def lifecycle_server(self, server_factory, embedding_model) -> ServerInfo:
-        """Booted with --no-embedding though a model IS configured — the cold
-        no-auto-start contract is the fixture's own first state."""
-        return server_factory(
-            "emb-lifecycle",
-            embedding_model=str(embedding_model),
-            extra_args=["--no-embedding"],
-        )
-
-    def test_full_lifecycle_flow(
-        self,
-        lifecycle_server: ServerInfo,
-        embedding_model,
-        tmp_path_factory: pytest.TempPathFactory,
-    ) -> None:
-        base = _base_url(lifecycle_server)
-        mcp = MCPClient(lifecycle_server.url)
-
-        # (a) Cold: --no-embedding suppressed auto-start despite the configured
-        # model.
-        status = httpx.get(f"{base}/status", timeout=5.0).json()
-        assert status["embedding"]["available"] is False
-        assert status["index"]["state"] == "unavailable"
-
-        # (b) Empty-body start uses the boot-configured model (llama boot #1).
-        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
-        assert resp.json()["status"] == "started"
-        status = httpx.get(f"{base}/status", timeout=5.0).json()
-        assert status["embedding"]["available"] is True
-
-        # (c) Seed two notes; the empty-at-boot index materialized at start, so
-        # incremental upserts index them — searchable.
-        mcp(
-            "upsert_notes",
-            {
-                "notes": [
-                    {
-                        "deck": "Bio",
-                        "note_type": "Basic",
-                        "fields": {
-                            "Front": "What is a mitochondrion?",
-                            "Back": "An organelle that produces ATP",
-                        },
-                        "tags": ["cell-biology"],
-                    },
-                    {
-                        "deck": "Bio",
-                        "note_type": "Basic",
-                        "fields": {
-                            "Front": "What is ATP synthase?",
-                            "Back": "Enzyme that synthesizes ATP from a proton gradient",
-                        },
-                        "tags": ["cell-biology"],
-                    },
-                ]
-            },
-        )
-        _wait_for_index_ready(lifecycle_server)
-        # The seed upserts index off the async drain — poll until they're
-        # searchable so the positive assertion can't flake on a lagging drain.
-        before = search_until(mcp, ["mitochondria ATP energy"], lambda ms: bool(ms), limit=5)
-        assert before
-
-        # (d) Stop: embedding unavailable, index unavailable, search degrades to
-        # the exact tier (no index needed; "ATP" is literal in the seeds).
-        resp = httpx.post(f"{base}/embedding/stop", timeout=30.0)
-        assert resp.json()["status"] == "stopped"
-        status = httpx.get(f"{base}/status", timeout=5.0).json()
-        assert status["embedding"]["available"] is False
-        assert status["index"]["state"] == "unavailable"
-        degraded = mcp("search_notes", {"queries": ["ATP"], "limit": 5})
-        matches = degraded["results"][0]["matches"]
-        assert matches
-        assert all(m["score"] is None for m in matches)
-        assert matches[0]["substring"]["matched_fields"]
-        assert "not running" in degraded["message"].lower()
-        # Stopping again is a no-op.
-        assert httpx.post(f"{base}/embedding/stop", timeout=10.0).json()["status"] == "not_running"
-
-        # (e) CLI start with explicit model + port (llama boot #2) — the CLI
-        # wiring half.
-        cfg_dir = tmp_path_factory.mktemp("emb-lifecycle-cli")
-        cfg = cfg_dir / "config.yml"
-        cfg.write_text(
-            f"server:\n  host: 127.0.0.1\n  port: {lifecycle_server.port}\n"
-            f"collection: {lifecycle_server.collection_path}\n"
-            f"logging:\n  dir: {lifecycle_server.log_dir}\n"
-        )
-        runner = CLIRunner(lifecycle_server.url, str(cfg))
-        started = runner.invoke(
-            [
-                "server",
-                "embedding",
-                "start",
-                "--embedding-model",
-                str(embedding_model),
-                "--embedding-port",
-                str(lifecycle_server.embedding_port),
-                "--background",
-            ]
-        )
-        assert started.exit_code == 0, started.output
-        _wait_for_index_ready(lifecycle_server)
-        # The restart rebuilds the index off the async drain — poll until the
-        # notes are searchable again so the positive assertion can't flake.
-        after = search_until(mcp, ["mitochondria ATP energy"], lambda ms: bool(ms), limit=5)
-        assert after
-
-        # (f) Idempotent start while running.
-        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=30.0)
-        assert resp.json()["status"] == "already_running"
-
-        # (g) The fingerprint came from llama-server's /v1/models meta block,
-        # not the file-size fallback.
-        idx = httpx.get(f"{base}/status", timeout=5.0).json()["index"]
-        assert idx.get("model_id", "").startswith("meta:")
-
-        # (h) CLI stop — the other half of the CLI wiring.
-        stopped = runner.invoke(["server", "embedding", "stop"])
-        assert stopped.exit_code == 0, stopped.output
-        assert "stopped" in stopped.output.lower()
-        status = httpx.get(f"{base}/status", timeout=5.0).json()
-        assert status["embedding"]["available"] is False
 
 
 class TestSearchQuality:

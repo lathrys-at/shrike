@@ -1,13 +1,17 @@
-"""Integration tests for the embedding service.
+"""Integration tests for the out-of-process embedding service (llama-server, GGUF).
 
-These tests require llama-server on PATH and download a small (~20MB)
-GGUF model on first run. They are skipped automatically when
-llama-server is not available.
+This is the MINIMAL out-of-process surface: it proves the GGUF/llama-server
+backend loads and serves correctly — the /status health wiring, the
+/v1/embeddings canary, attach mode, orphan reaping, and the start/stop lifecycle.
+The backend-agnostic semantic behaviour (ranking, filters, neighbours) runs
+in-process on ONNX in test_semantic.py and is not re-proved here.
 
-The read-only classes share the session `collection_server` (no dedicated boot),
-each class is one test against one response, and the orphan-reap test fakes the
-orphan — the reap LOGIC is pinned by shrike-core/managed/shrike-llama-server's Rust
-tests; this lane proves only the wiring, which needs one real boot, not two.
+These tests require llama-server on PATH and download a small (~20MB) GGUF model
+on first run; they skip automatically when llama-server is not available. The
+read-only classes share the session `llama_collection_server` (one real boot);
+the orphan-reap test fakes the orphan — the reap LOGIC is pinned by
+shrike-core/managed/shrike-llama-server's Rust tests, so this lane proves only the
+wiring.
 """
 
 from __future__ import annotations
@@ -16,19 +20,32 @@ import httpx
 import pytest
 import shrike_native
 
-from tests.integration.conftest import requires_llama_server
+from tests.integration.conftest import (
+    CLIRunner,
+    MCPClient,
+    ServerInfo,
+    requires_llama_server,
+    search_until,
+    wait_for_index_ready,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.embedding, requires_llama_server]
+
+_wait_for_index_ready = wait_for_index_ready
+
+
+def _base_url(server: ServerInfo) -> str:
+    return server.url.rsplit("/", 1)[0]
 
 
 class TestEmbeddingHealth:
     """The /status embedding block is wired through from the live service."""
 
-    def test_status_reports_embedding_fields(self, collection_server):
+    def test_status_reports_embedding_fields(self, llama_collection_server):
         # One /status fetch, every field of the embedding block asserted together —
         # these are all properties of the same response. `available is True`
         # subsumes a separate llama /health probe (availability requires it).
-        status_url = collection_server.url.rsplit("/", 1)[0] + "/status"
+        status_url = llama_collection_server.url.rsplit("/", 1)[0] + "/status"
         resp = httpx.get(status_url, timeout=5.0)
         assert resp.status_code == 200
         body = resp.json()
@@ -36,7 +53,7 @@ class TestEmbeddingHealth:
         emb = body["embedding"]
         assert emb["available"] is True
         assert isinstance(emb["pid"], int)
-        assert emb["url"] == f"http://127.0.0.1:{collection_server.embedding_port}"
+        assert emb["url"] == f"http://127.0.0.1:{llama_collection_server.embedding_port}"
         assert emb["model"].endswith(".gguf")
 
 
@@ -45,14 +62,14 @@ class TestEmbeddings:
     pinned externals, not for Shrike code). One batch covers shape, dim
     consistency, float types, and semantic ordering."""
 
-    def test_batch_embeds_with_consistent_dims_and_semantics(self, collection_server):
+    def test_batch_embeds_with_consistent_dims_and_semantics(self, llama_collection_server):
         texts = [
             "the weather is sunny today",
             "it is a bright and sunny day",
             "quantum chromodynamics describes strong nuclear force",
         ]
         resp = httpx.post(
-            f"{collection_server.embedding_url}/v1/embeddings",
+            f"{llama_collection_server.embedding_url}/v1/embeddings",
             json={"input": texts},
             timeout=30.0,
         )
@@ -79,11 +96,11 @@ class TestEmbeddingServiceViaShrike:
     RemoteEmbedder against live llama-server — the wire path the unit
     tests stub."""
 
-    def test_embed_method_types_and_dims(self, collection_server):
+    def test_embed_method_types_and_dims(self, llama_collection_server):
         from shrike.harness.engines.embedding.runtime import EmbeddingService
 
         svc = EmbeddingService.__new__(EmbeddingService)
-        svc._base_url = collection_server.embedding_url
+        svc._base_url = llama_collection_server.embedding_url
         svc._model = "test"
         svc._model_name = None
         svc._manager = type("FakeMgr", (), {"running": lambda self: True, "pid": lambda self: 1})()
@@ -91,7 +108,7 @@ class TestEmbeddingServiceViaShrike:
         svc._batch_cap = None
         # The native client pair __init__/start() would have built: the unpinned
         # fallback drives REAL requests against live llama-server.
-        svc._client = shrike_native.RemoteEmbedder(collection_server.embedding_url)
+        svc._client = shrike_native.RemoteEmbedder(llama_collection_server.embedding_url)
         svc._remote = None
 
         r1 = svc.embed_texts(["a single sentence"])
@@ -177,11 +194,11 @@ class TestOrphanReaping:
 
 class TestAttachMode:
     """managed.llama_server.manage: attach: a daemon that embeds via a
-    llama-server another process owns — here, the collection_server's child.
-    The attaching server never spawns, reaps, or stops it."""
+    llama-server another process owns — here, the llama_collection_server's
+    child. The attaching server never spawns, reaps, or stops it."""
 
     def test_attach_serves_embeddings_from_a_server_it_does_not_own(
-        self, collection_server, server_factory, tmp_path_factory
+        self, llama_collection_server, server_factory, tmp_path_factory
     ):
         cfg = tmp_path_factory.mktemp("attach-config") / "config.yml"
         cfg.write_text(
@@ -191,7 +208,7 @@ class TestAttachMode:
             "managed:\n"
             "  llama_server:\n"
             "    manage: attach\n"
-            f"    port: {collection_server.embedding_port}\n"
+            f"    port: {llama_collection_server.embedding_port}\n"
         )
         # The attach boot embeds against the upstream (connectivity proof +
         # batch probe) before serving — slow on a cold runner, but the boot
@@ -203,7 +220,7 @@ class TestAttachMode:
         assert emb["available"] is True
         # Attached, not owned: it points at the upstream's port and reports no
         # pid (there is no child process to manage).
-        assert emb["url"] == f"http://127.0.0.1:{collection_server.embedding_port}"
+        assert emb["url"] == f"http://127.0.0.1:{llama_collection_server.embedding_port}"
         assert emb.get("pid") is None
         # The cross-modal coverage matrix golden for the attach shape:
         # text-only space → text→text native, every other pair unavailable.
@@ -216,7 +233,7 @@ class TestAttachMode:
 
         # And the upstream is untouched — still serving its own daemon.
         upstream = httpx.get(
-            collection_server.url.rsplit("/", 1)[0] + "/status", timeout=5.0
+            llama_collection_server.url.rsplit("/", 1)[0] + "/status", timeout=5.0
         ).json()
         assert upstream["embedding"]["available"] is True
 
@@ -290,3 +307,138 @@ class TestSharedRouterWiring:
             mgr.stop()
         # Owner stop terminated the single router.
         assert not mgr.running()
+
+
+class TestEmbeddingLifecycle:
+    """The full embedding lifecycle as ONE woven flow on ONE server.
+
+    One server booted `--no-embedding`, two llama boots. The flow is a single
+    ordered test: every step's contract depends on the state the previous step
+    left, which is exactly why these are flaky as separate tests and cheap as
+    one.
+    """
+
+    @pytest.fixture(scope="class")
+    def lifecycle_server(self, server_factory, embedding_model) -> ServerInfo:
+        """Booted with --no-embedding though a model IS configured — the cold
+        no-auto-start contract is the fixture's own first state."""
+        return server_factory(
+            "emb-lifecycle",
+            embedding_model=str(embedding_model),
+            extra_args=["--no-embedding"],
+        )
+
+    def test_full_lifecycle_flow(
+        self,
+        lifecycle_server: ServerInfo,
+        embedding_model,
+        tmp_path_factory: pytest.TempPathFactory,
+    ) -> None:
+        base = _base_url(lifecycle_server)
+        mcp = MCPClient(lifecycle_server.url)
+
+        # (a) Cold: --no-embedding suppressed auto-start despite the configured
+        # model.
+        status = httpx.get(f"{base}/status", timeout=5.0).json()
+        assert status["embedding"]["available"] is False
+        assert status["index"]["state"] == "unavailable"
+
+        # (b) Empty-body start uses the boot-configured model (llama boot #1).
+        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=120.0)
+        assert resp.json()["status"] == "started"
+        status = httpx.get(f"{base}/status", timeout=5.0).json()
+        assert status["embedding"]["available"] is True
+
+        # (c) Seed two notes; the empty-at-boot index materialized at start, so
+        # incremental upserts index them — searchable.
+        mcp(
+            "upsert_notes",
+            {
+                "notes": [
+                    {
+                        "deck": "Bio",
+                        "note_type": "Basic",
+                        "fields": {
+                            "Front": "What is a mitochondrion?",
+                            "Back": "An organelle that produces ATP",
+                        },
+                        "tags": ["cell-biology"],
+                    },
+                    {
+                        "deck": "Bio",
+                        "note_type": "Basic",
+                        "fields": {
+                            "Front": "What is ATP synthase?",
+                            "Back": "Enzyme that synthesizes ATP from a proton gradient",
+                        },
+                        "tags": ["cell-biology"],
+                    },
+                ]
+            },
+        )
+        _wait_for_index_ready(lifecycle_server)
+        # The seed upserts index off the async drain — poll until they're
+        # searchable so the positive assertion can't flake on a lagging drain.
+        before = search_until(mcp, ["mitochondria ATP energy"], lambda ms: bool(ms), limit=5)
+        assert before
+
+        # (d) Stop: embedding unavailable, index unavailable, search degrades to
+        # the exact tier (no index needed; "ATP" is literal in the seeds).
+        resp = httpx.post(f"{base}/embedding/stop", timeout=30.0)
+        assert resp.json()["status"] == "stopped"
+        status = httpx.get(f"{base}/status", timeout=5.0).json()
+        assert status["embedding"]["available"] is False
+        assert status["index"]["state"] == "unavailable"
+        degraded = mcp("search_notes", {"queries": ["ATP"], "limit": 5})
+        matches = degraded["results"][0]["matches"]
+        assert matches
+        assert all(m["score"] is None for m in matches)
+        assert matches[0]["substring"]["matched_fields"]
+        assert "not running" in degraded["message"].lower()
+        # Stopping again is a no-op.
+        assert httpx.post(f"{base}/embedding/stop", timeout=10.0).json()["status"] == "not_running"
+
+        # (e) CLI start with explicit model + port (llama boot #2) — the CLI
+        # wiring half.
+        cfg_dir = tmp_path_factory.mktemp("emb-lifecycle-cli")
+        cfg = cfg_dir / "config.yml"
+        cfg.write_text(
+            f"server:\n  host: 127.0.0.1\n  port: {lifecycle_server.port}\n"
+            f"collection: {lifecycle_server.collection_path}\n"
+            f"logging:\n  dir: {lifecycle_server.log_dir}\n"
+        )
+        runner = CLIRunner(lifecycle_server.url, str(cfg))
+        started = runner.invoke(
+            [
+                "server",
+                "embedding",
+                "start",
+                "--embedding-model",
+                str(embedding_model),
+                "--embedding-port",
+                str(lifecycle_server.embedding_port),
+                "--background",
+            ]
+        )
+        assert started.exit_code == 0, started.output
+        _wait_for_index_ready(lifecycle_server)
+        # The restart rebuilds the index off the async drain — poll until the
+        # notes are searchable again so the positive assertion can't flake.
+        after = search_until(mcp, ["mitochondria ATP energy"], lambda ms: bool(ms), limit=5)
+        assert after
+
+        # (f) Idempotent start while running.
+        resp = httpx.post(f"{base}/embedding/start", json={}, timeout=30.0)
+        assert resp.json()["status"] == "already_running"
+
+        # (g) The fingerprint came from llama-server's /v1/models meta block,
+        # not the file-size fallback.
+        idx = httpx.get(f"{base}/status", timeout=5.0).json()["index"]
+        assert idx.get("model_id", "").startswith("meta:")
+
+        # (h) CLI stop — the other half of the CLI wiring.
+        stopped = runner.invoke(["server", "embedding", "stop"])
+        assert stopped.exit_code == 0, stopped.output
+        assert "stopped" in stopped.output.lower()
+        status = httpx.get(f"{base}/status", timeout=5.0).json()
+        assert status["embedding"]["available"] is False

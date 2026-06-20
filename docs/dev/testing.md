@@ -224,7 +224,7 @@ mypy --config-file shrike-py/pyproject.toml shrike-py/src/shrike/
 `src/`, so it must be named explicitly or it falls into no lint scope.
 
 CI runs on every PR (`.github/workflows/test.yml`): a `lint` job and a `tests`
-job (one `bazel test` over the full graph plus the embedding halves). The
+job (one `bazel test` over the full graph plus the embedding lanes). The
 expensive cross-platform ARM legs are opt-in by label — `rc` selects all legs,
 `macos` and `linux-arm` select one each — and never run on a plain PR or on merge
 to `main`.

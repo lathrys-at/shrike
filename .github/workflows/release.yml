@@ -20,7 +20,7 @@ permissions:
   contents: write
 
 jobs:
-  # The full Bazel graph + the embedding halves on every supported platform.
+  # The full Bazel graph + the embedding lanes on every supported platform.
   # This is the cross-platform job from test.yml run unconditionally instead of
   # gated on the `rc` label (plus linux x64, which the per-PR lanes cover) — a
   # release must be green everywhere before we build or publish. Harmonized
@@ -42,7 +42,7 @@ jobs:
       - name: Run the test graph
         run: |
           ./bazel test \
-            -- //... //shrike-py/tests/integration:embedding_core //shrike-py/tests/integration:embedding_backends
+            -- //... //shrike-py/tests/integration:embedding_core //shrike-py/tests/integration:embedding_semantic //shrike-py/tests/integration:embedding_backends
       - uses: ./.github/actions/bazel-save
         if: always()
 

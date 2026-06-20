@@ -557,7 +557,9 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
     Each call spins up a new server with its own collection, log dir,
     and random port. All servers are torn down at session end.
 
-    Pass ``embedding_model`` to start with ``--embedding-model``.
+    Pass ``embedding_model`` to start with ``--embedding-model``; pass
+    ``embedding_backend`` to pick the backend (``"onnx"`` for the in-process
+    backend, default ``"llama"`` for the out-of-process one).
     """
     processes: list[subprocess.Popen] = []
 
@@ -565,6 +567,7 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
         name: str = "server",
         *,
         embedding_model: str | None = None,
+        embedding_backend: str | None = None,
         extra_args: list[str] | None = None,
     ) -> ServerInfo:
         root = tmp_path_factory.mktemp(name)
@@ -599,15 +602,15 @@ def server_factory(tmp_path_factory: pytest.TempPathFactory):
 
         embedding_port: int | None = None
         if embedding_model:
-            embedding_port = _free_port()
-            cmd.extend(
-                [
-                    "--embedding-model",
-                    embedding_model,
-                    "--embedding-port",
-                    str(embedding_port),
-                ]
-            )
+            cmd.extend(["--embedding-model", embedding_model])
+            if embedding_backend:
+                cmd.extend(["--embedding-backend", embedding_backend])
+            # Only the out-of-process llama backend serves over an HTTP port; the
+            # in-process backends (onnx/clip) embed inside the daemon, so they get
+            # no --embedding-port and ServerInfo.embedding_{port,url} stay None.
+            if embedding_backend in (None, "llama"):
+                embedding_port = _free_port()
+                cmd.extend(["--embedding-port", str(embedding_port)])
 
         if extra_args:
             cmd.extend(extra_args)
@@ -1148,27 +1151,19 @@ CONCEPTS: list[dict[str, Any]] = [
 ]
 
 
-@pytest.fixture(scope="session")
-def collection_server(server_factory, embedding_model: Path) -> ServerInfo:
-    """ONE embedding-enabled server with a 50-note seeded collection, shared by
-    every read-only embedding/semantic class. Session-scoped: the embedding
-    halves run serially (xdist=None in BUILD.bazel), and mutating tests clean up
-    after themselves.
+def _wait_for_embedding_available(srv: ServerInfo) -> None:
+    """Poll ``/status`` until the embedding backend reports available, failing
+    fast if the server process dies.
 
-    No explicit rebuild: an empty-at-boot server materializes a ready index at
-    boot, so the seeding upserts index incrementally.
+    UNBOUNDED by design: an out-of-process llama-server's first boot builds its
+    model-preset cache (~6s, single-threaded) and can stall ``/status`` well past
+    any single short read timeout (warm locally, so it never reproduces); a
+    wall-clock deadline here would false-trip that slow-but-not-hung boot. The
+    poll swallows connection errors (the not-yet-bound state) so it fails fast on
+    a DEAD subprocess instead (``_raise_if_dead``) — a real boot failure, distinct
+    from a slow boot. A genuinely-stuck-but-alive boot hits the bazel per-target
+    ``test_timeout``. The per-request ``timeout=10.0`` bounds ONE socket read.
     """
-    srv = server_factory("semantic", embedding_model=str(embedding_model))
-
-    # Poll for embedding availability UNBOUNDED: on a fresh CI runner
-    # llama-server's first boot builds its model-preset cache (~6s,
-    # single-threaded), which can stall /status well past any single short read
-    # timeout (warm locally, so it never reproduces); a wall-clock deadline here
-    # false-trips that slow-but-not-hung boot. This poll swallows connection
-    # errors (the not-yet-bound state), so it fails fast on a DEAD subprocess
-    # instead (``_raise_if_dead``) — a real boot failure, distinct from a slow
-    # boot. A genuinely-stuck-but-alive boot hits the bazel per-target
-    # ``test_timeout``. The per-request ``timeout=10.0`` bounds ONE socket read.
     status_url = srv.url.rsplit("/", 1)[0] + "/status"
     status: dict[str, Any] = {}
     try:
@@ -1180,7 +1175,7 @@ def collection_server(server_factory, embedding_model: Path) -> ServerInfo:
                 time.sleep(0.05)
                 continue
             if status.get("embedding", {}).get("available"):
-                break
+                return
             time.sleep(0.05)
     except _ServerDied as died:
         log_dir = Path(srv.log_dir)
@@ -1194,6 +1189,28 @@ def collection_server(server_factory, embedding_model: Path) -> ServerInfo:
             f"--- llama-server stderr ---\n{stderr_content}\n"
             f"--- shrike server log ---\n{server_content}"
         ) from died
+
+
+@pytest.fixture(scope="session")
+def collection_server(server_factory, onnx_model: Path) -> ServerInfo:
+    """ONE in-process-ONNX embedding server with a 50-note seeded collection,
+    shared by every read-only embedding/semantic class.
+
+    The behaviour these classes assert — search ranking, deck/tag filters,
+    neighbours, index-update-on-delete — is backend-agnostic, so it runs on the
+    in-process ONNX MiniLM backend: no llama-server subprocess, no cold-boot
+    preset cache, and bit-exact + batch-deterministic vectors (steadier ranking
+    assertions than the tolerance-tier llama path). The out-of-process
+    GGUF/llama-server surface is proved separately by ``llama_collection_server``
+    (test_embedding.py).
+
+    Session-scoped: the embedding halves run serially (xdist=None in BUILD.bazel),
+    and mutating tests clean up after themselves. No explicit rebuild: an
+    empty-at-boot server materializes a ready index at boot, so the seeding upserts
+    index incrementally.
+    """
+    srv = server_factory("semantic", embedding_model=str(onnx_model), embedding_backend="onnx")
+    _wait_for_embedding_available(srv)
 
     mcp = MCPClient(srv.url)
     all_notes = []
@@ -1233,3 +1250,17 @@ def collection_server(server_factory, embedding_model: Path) -> ServerInfo:
         if idx.get("state") == "ready" and idx.get("size", 0) >= created:
             return srv
         time.sleep(0.05)
+
+
+@pytest.fixture(scope="session")
+def llama_collection_server(server_factory, embedding_model: Path) -> ServerInfo:
+    """ONE out-of-process llama-server embedding server (the pinned GGUF), shared
+    by the embedding-service lifecycle/wiring tests (test_embedding.py).
+
+    This is the MINIMAL out-of-process surface — it proves the GGUF/llama-server
+    backend loads and serves correctly (health wiring, the /v1/embeddings canary,
+    attach mode, the live embed path). Unseeded: those tests assert on the live
+    service, not on a corpus, so there is no collection to seed."""
+    srv = server_factory("llama-embedding", embedding_model=str(embedding_model))
+    _wait_for_embedding_available(srv)
+    return srv

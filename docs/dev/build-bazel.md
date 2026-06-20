@@ -52,16 +52,17 @@ extension).
 ./bazel test //shrike-py/tests/unit:unit           # one suite
 ./bazel test -- //... \
   //shrike-py/tests/integration:embedding_core \
-  //shrike-py/tests/integration:embedding_backends # what CI runs (adds the manual halves)
+  //shrike-py/tests/integration:embedding_semantic \
+  //shrike-py/tests/integration:embedding_backends # what CI runs (adds the manual lanes)
 ./bazel build //shrike-py:wheel --stamp           # the platform wheel (or tools/build-wheel.sh)
 ./bazel build //shrike-py:sdist --stamp           # the sdist (or tools/build-sdist.sh)
 ./bazel build //shrike-skills:skill      # the create-cards.skill bundle (unversioned)
 ```
 
-**Manual targets.** The embedding test halves, the llama-server alias, and
+**Manual targets.** The embedding test lanes, the llama-server alias, and
 the release artifacts are tagged `manual`, so `//...` never touches them —
 that is what keeps the default lane from fetching hundreds of MB of models.
-Name them explicitly when you want them (the embedding halves need ~1 GB of
+Name them explicitly when you want them (the embedding lanes need ~1 GB of
 externals on first fetch, then they're cached).
 
 **Running the embedding tests locally.** The Bazel embedding lane *is* the local
@@ -73,7 +74,8 @@ assembles the models into `$SHRIKE_TEST_MODEL_DIR`, so there is **no separate
 fetch step**:
 
 ```bash
-./bazel test //shrike-py/tests/integration:embedding_core      # llama-server + GGUF semantic/neighbor lane
+./bazel test //shrike-py/tests/integration:embedding_core      # out-of-process llama-server + GGUF lifecycle lane
+./bazel test //shrike-py/tests/integration:embedding_semantic  # in-process ONNX semantic/search behaviour
 ./bazel test //shrike-py/tests/integration:embedding_backends  # the onnx/clip/llama backend zoo
 ```
 

@@ -160,7 +160,7 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
 
   # The authoritative test lane (#422): ONE `bazel test` invocation over the
-  # full graph plus the embedding halves; Bazel's dependency analysis + the
+  # full graph plus the embedding lanes; Bazel's dependency analysis + the
   # content-addressed caches decide what re-executes. That includes TEST
   # RESULTS — a populated disk cache replays an unchanged test as "(cached)
   # PASSED" (verified: a wiped workspace replayed the unit suite in ~3s) — and
@@ -172,7 +172,7 @@ jobs:
   # gate (a skipped `changes` cascades), and a docs-only labeled PR costs one
   # mostly-cache-hit invocation — the price of having no hand-rolled filter to
   # get wrong (#418's tests/** gap, the embedding filter missing shrike-core/**).
-  # The embedding halves are named explicitly only because they're `manual` —
+  # The embedding lanes are named explicitly only because they're `manual` —
   # which they are to keep the local `bazel test //...` dev loop from fetching
   # models / booting llama-server, not as a CI distinction. The committed
   # ./bazel launcher bootstraps bazelisk + Bazel; no setup-python (the
@@ -187,7 +187,7 @@ jobs:
       - name: Run the test graph
         run: |
           ./bazel test \
-            -- //... //shrike-py/tests/integration:embedding_core //shrike-py/tests/integration:embedding_backends
+            -- //... //shrike-py/tests/integration:embedding_core //shrike-py/tests/integration:embedding_semantic //shrike-py/tests/integration:embedding_backends
       # Save even when tests failed (#438): the compiled graph + passing test
       # results are valid regardless of which test flaked. `save: pr` (#645):
       # save ONLY the churning bazel-disk (compiled-crate + test-result) entry.
@@ -241,7 +241,7 @@ jobs:
       - name: Run the test graph
         run: |
           ./bazel test \
-            -- //... //shrike-py/tests/integration:embedding_core //shrike-py/tests/integration:embedding_backends
+            -- //... //shrike-py/tests/integration:embedding_core //shrike-py/tests/integration:embedding_semantic //shrike-py/tests/integration:embedding_backends
       # `save: all` (the default), NOT `pr` (#645): warm-cache.yml only warms the
       # linux x64 scope, so the arm64/macos scopes have NO main-warmed
       # bazel-repo/bazel-models entry to read — this rare label-gated lane is the

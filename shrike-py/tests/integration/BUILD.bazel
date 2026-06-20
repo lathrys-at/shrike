@@ -62,13 +62,23 @@ py_library(
     ],
 )
 
-# The embedding-half rosters, named here so :integration can be a GLOB minus
+# The embedding-lane rosters, named here so :integration can be a GLOB minus
 # these: an explicit srcs list silently orphans new files (a file on disk in no
 # target runs in no CI lane). With the glob, a new test file lands in
 # :integration by default; if it actually needs model externals it fails loudly
-# there, and the author moves it into a half.
+# there, and the author moves it into a lane.
+# The out-of-process llama-server lane: the embedding-service lifecycle (health
+# wiring, the /v1/embeddings canary, attach mode, orphan reaping, start/stop)
+# against the pinned GGUF. The MINIMAL out-of-process surface — the
+# backend-agnostic semantic behaviour runs in-process in _EMBEDDING_SEMANTIC.
 _EMBEDDING_CORE = [
     "test_embedding.py",
+]
+
+# The in-process ONNX lane: semantic search / ranking / filters / neighbours /
+# index updates against the in-process ONNX MiniLM backend — no llama-server, no
+# GGUF download, no subprocess boot. Backend-agnostic behaviour.
+_EMBEDDING_SEMANTIC = [
     "test_semantic.py",
 ]
 
@@ -87,7 +97,7 @@ _SEARCH_QUALITY = ["test_search_quality.py"]
 
 # Non-embedding integration: the server-spawn-bound suite (~230 tests), the
 # slowest non-manual target and the per-PR wall-clock bottleneck. Glob-partitioned:
-# everything that isn't an embedding half OR the manual search-quality suite runs
+# everything that isn't an embedding lane OR the manual search-quality suite runs
 # here.
 #
 # Sharded into 4 parallel Bazel test actions (`shard_count`) rather than one
@@ -105,30 +115,33 @@ pytest_test(
     size = "large",
     srcs = glob(
         ["test_*.py"],
-        exclude = _EMBEDDING_CORE + _EMBEDDING_BACKENDS + _SEARCH_QUALITY,
+        exclude = _EMBEDDING_CORE + _EMBEDDING_SEMANTIC + _EMBEDDING_BACKENDS + _SEARCH_QUALITY,
     ),
     shard_count = 4,
     xdist = None,
     deps = [":conftest"],
 )
 
-# Embedding integration: two `manual` halves (so the per-PR //... lane never
+# Embedding integration: three `manual` targets (so the per-PR //... lane never
 # fetches the hundreds of MB of model + llama-server externals; they run as
 # part of the unified lane). Pulls models as pinned http_files
 # and the host llama-server as an http_archive; the conftest assembles
 # whichever are in a target's runfiles (atomically, so any future xdist
-# workers can't race the copy). Each half runs SERIALLY (xdist=None): it's
+# workers can't race the copy). Each runs SERIALLY (xdist=None): it's
 # model-load-bound with session/module-scoped servers, so one process = one
 # boot per fixture — file-parallel xdist measured as a net LOSS here
 # (each extra worker pays the full interpreter+import tax and oversubscribes
-# the runner against the other concurrent test actions). The two halves run
+# the runner against the other concurrent test actions). The targets run
 # CONCURRENTLY as separate Bazel test actions, so the lane's wall cost is
-# ~max of the halves, not their sum.
+# ~max of them, not their sum.
 
-# The llama-server core: the embedding-service lifecycle (incl. orphan reaping)
-# + semantic search / neighbors / index CLI against the GGUF model. The server
-# binary comes from the conftest's //shrike-py/bin:server data-dep (the lean default —
-# _server_launch_cmd falls back to it when server_embedding isn't in runfiles).
+# The llama-server core: the out-of-process embedding-service lifecycle (health
+# wiring, the /v1/embeddings canary, attach mode, orphan reaping, start/stop)
+# against the GGUF model — the minimal surface that proves the out-of-process
+# backend loads and serves. The server binary comes from the conftest's
+# //shrike-py/bin:server data-dep (the lean default — _server_launch_cmd falls
+# back to it when server_embedding isn't in runfiles; llama is a subprocess, so
+# the lean server suffices).
 pytest_test(
     name = "embedding_core",
     size = "large",
@@ -139,6 +152,28 @@ pytest_test(
     data = [
         ":llama_server",
         "@model_gguf_minilm//file",
+    ],
+)
+
+# The in-process ONNX semantic suite: the backend-agnostic search behaviour
+# (ranking, filters, neighbours, index updates) on the in-process ONNX MiniLM
+# backend. No llama_server, no GGUF — server_embedding carries the onnx extras,
+# and the MiniLM int8 graph + tokenizer are the only model externals it needs.
+pytest_test(
+    name = "embedding_semantic",
+    size = "large",
+    srcs = _EMBEDDING_SEMANTIC,
+    tags = ["manual"],
+    xdist = None,
+    deps = [
+        ":conftest",
+        requirement("onnxruntime"),
+        requirement("tokenizers"),
+    ],
+    data = [
+        "//shrike-py/bin:server_embedding",
+        "@model_minilm_int8_onnx//file",
+        "@model_minilm_tokenizer//file",
     ],
 )
 
@@ -176,7 +211,7 @@ pytest_test(
 )
 
 # The manual adversarial search-quality suite — `manual`, NEVER named on
-# a CI command line (unlike the embedding halves, which the unified lane runs).
+# a CI command line (unlike the embedding lanes, which the unified lane runs).
 # `bazel test //...` skips it twice over: the :integration glob excludes it AND
 # `manual` keeps `//...` from building it. It needs the CLIP + MiniLM ONNX
 # externals (the real 2-space proof) and the in-process search-quality support
