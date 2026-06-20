@@ -105,7 +105,9 @@ def test_render_markdown_table_is_paste_ready():
     # A GitHub table: a header row followed by an alignment-separator row.
     header_idx = next(i for i, ln in enumerate(lines) if ln.startswith("| workload |"))
     assert "p50 (amortized) ms" in lines[header_idx]
-    assert set(lines[header_idx + 1].replace(" ", "")) <= set("|-:")
+    sep = lines[header_idx + 1]
+    assert set(sep.replace(" ", "")) <= set("|-:")
+    assert sep.count("|") == lines[header_idx].count("|")  # separator spans every column
     # One data row per phase; amortized per-op = phase p50 / items (100).
     assert "| upsert-batch | response |" in md
     assert "| 0.040 |" in md  # 4.0 / 100
@@ -119,6 +121,7 @@ def test_render_markdown_comparison_is_paste_ready():
     lines = md.splitlines()
     assert lines[0].startswith("| workload/phase |")
     assert set(lines[1].replace(" ", "")) <= set("|-:")  # the alignment row
+    assert lines[1].count("|") == lines[0].count("|")  # separator spans every column
     assert "| upsert/response |" in md
     assert "+2.000" in md  # the signed p50 delta
 
