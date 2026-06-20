@@ -1146,8 +1146,8 @@ impl DerivedEngine {
     ///
     /// The scope (when present) is staged ONCE in a per-connection TEMP table and
     /// referenced as an invariant `IN (SELECT id FROM temp.…)` subquery, so the
-    /// SQL text — hence the statement-cache key — is stable across the queries in
-    /// the batch and across searches, keeping the cache warm. (The singular
+    /// SQL text — hence the statement-cache key — is identical for every query in
+    /// the batch and the statement compiles once for the whole set. (The singular
     /// [`Self::match_rows`] inlines a small scope; the result set is identical.)
     ///
     /// # Errors
@@ -1162,13 +1162,16 @@ impl DerivedEngine {
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
     ) -> NativeResult<Vec<Vec<MatchRow>>> {
+        if exprs.is_empty() {
+            return Ok(Vec::new()); // nothing to match — skip the lock and staging
+        }
         let span = tracing::debug_span!("derived.match_batch", n = exprs.len(), limit, with_text);
         let _enter = span.enter();
         let conn = self.lock();
         let txt_col = if with_text { "idx.txt" } else { "NULL" };
-        // Stage the scope ONCE for the whole batch as an invariant subquery (a
-        // large scope used to re-stage inside every per-query match_rows; the
-        // staged form also keeps the SQL — the statement-cache key — stable).
+        // Stage the scope ONCE for the whole batch as an invariant subquery: it is
+        // referenced by every query below, and the staged form keeps the SQL — the
+        // statement-cache key — stable so the statement compiles once.
         let scope_clause = match scope {
             Some(ids) if !ids.is_empty() => {
                 Self::stage_id_set(&conn, "shrike_scope_ids", ids)?;

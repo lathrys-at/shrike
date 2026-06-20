@@ -1275,12 +1275,11 @@ pub fn search_notes(
     };
 
     // Batch the lexical (FTS5) reads across ALL query sources up front: ONE
-    // search_*_batch call instead of one search_* per source. Each batched call
-    // locks the derived connection, stages the scope id set, and compiles its
-    // statement ONCE for the whole set, so an N-query search no longer pays N
-    // locks + N statement compiles + N scope re-stagings (the per-source loop
-    // used to). Anchor (id) sources are semantic-only and carry no lexical query,
-    // so the batch covers the QUERY sources, in source order.
+    // search_*_batch call per signal, each locking the derived connection,
+    // staging the deck/tag scope id set, and compiling its statement ONCE for the
+    // whole set (an N-query search pays the lock/compile/scope-staging cost once,
+    // not per query). Anchor (id) sources are semantic-only and carry no lexical
+    // query, so the batch covers the QUERY sources, in source order.
     //
     // A REAL derived-read failure (e.g. a SQLITE_BUSY outliving the retry)
     // surfaces here as an `Err` and must never become a silent field-text
