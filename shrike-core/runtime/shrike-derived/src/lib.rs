@@ -1060,11 +1060,15 @@ impl DerivedEngine {
         Ok(rows)
     }
 
-    /// One FTS5 MATCH (rank-ordered), returning provenance + snippet rows.
-    /// A bad expression is `invalid_input` — the facade maps it to its
-    /// OperationalError fallback path. `scope`, when given, restricts the
-    /// match to those note ids INSIDE the query (the scoped-search path:
-    /// the id set comes from anki's indexed deck:/tag: search, so scoped
+    /// One FTS5 MATCH returning provenance + snippet rows. Rows come back in FTS5's
+    /// natural (rowid) order, NOT bm25 rank: `ORDER BY rank` forces a bm25 pass over
+    /// every match (the search hotspot), and the kernel doesn't need it — substring
+    /// hits are all equally-valid literal matches (RRF consumes rank POSITION, not
+    /// magnitude; the exact tier floats them), and the fuzzy path re-ranks by trigram
+    /// overlap in Rust ([`Self::fuzzy_filter`]). A bad expression is `invalid_input`
+    /// — the facade maps it to its OperationalError fallback path. `scope`, when
+    /// given, restricts the match to those note ids INSIDE the query (the scoped-
+    /// search path: the id set comes from anki's indexed deck:/tag: search, so scoped
     /// literal search needs no over-fetch and no post-hoc recall gamble).
     ///
     /// # Errors
@@ -1121,7 +1125,7 @@ impl DerivedEngine {
             "SELECT m.note_id, m.source, m.ref, {txt_col}, \
              snippet(idx, 0, '', '', '…', ?1) \
              FROM idx JOIN rowmap m ON m.rowid = idx.rowid \
-             WHERE idx MATCH ?2 {scope_clause}{exclude_clause}ORDER BY rank LIMIT ?3"
+             WHERE idx MATCH ?2 {scope_clause}{exclude_clause}LIMIT ?3"
         );
         // Retry a transient busy: two engines share the file, so a read can lose
         // the lock to a concurrent write even with `busy_timeout`. The closure
@@ -1223,7 +1227,7 @@ impl DerivedEngine {
             "SELECT m.note_id, m.source, m.ref, {txt_col}, \
              snippet(idx, 0, '', '', '…', ?1) \
              FROM idx JOIN rowmap m ON m.rowid = idx.rowid \
-             WHERE idx MATCH ?2 {scope_clause}{exclude_clause}ORDER BY rank LIMIT ?3"
+             WHERE idx MATCH ?2 {scope_clause}{exclude_clause}LIMIT ?3"
         );
         let mut out: Vec<Vec<MatchRow>> = Vec::with_capacity(exprs.len());
         for expr in exprs {
@@ -2231,28 +2235,38 @@ impl DerivedEngine {
             .join(" OR ")
     }
 
-    /// The fuzzy post-filter shared by the singular and batched paths: from FTS5's
-    /// OR-matched rows (best-first, with text), keep one (best) row per note that
-    /// shares at least [`FUZZY_MIN_SHARED`] trigrams with the query, capped at
-    /// `top_k`. The min-overlap floor drops single-common-trigram noise that an
-    /// FTS5 OR (matching ≥1 trigram) would otherwise surface.
+    /// The fuzzy post-filter + RANKING shared by the singular and batched paths.
+    /// FTS5 rows arrive in rowid order (no bm25 — see [`Self::match_rows`]), so this
+    /// ranks them: score each by its trigram overlap with the query, drop rows below
+    /// the [`FUZZY_MIN_SHARED`] floor (single-common-trigram noise an FTS5 OR
+    /// surfaces), then keep one row per note — the highest-overlap — best-first, up
+    /// to `top_k`. Overlap is a more faithful "fuzzy = shared-trigram similarity"
+    /// signal than bm25, and RRF consumes the resulting rank position.
     fn fuzzy_filter(
         rows: Vec<MatchRow>,
         gram_set: &std::collections::BTreeSet<String>,
         top_k: i64,
     ) -> Vec<LexicalRow> {
-        let mut seen = std::collections::HashSet::new();
-        let mut out: Vec<LexicalRow> = Vec::new();
+        // (overlap, row): keep rows clearing the floor, with their overlap score.
+        let mut scored: Vec<(usize, LexicalRow)> = Vec::new();
         for (note_id, source, r, txt, snippet) in rows {
             let txt_grams: std::collections::BTreeSet<String> =
                 trigrams(txt.as_deref().unwrap_or("")).into_iter().collect();
-            if gram_set.intersection(&txt_grams).count() < FUZZY_MIN_SHARED {
+            let overlap = gram_set.intersection(&txt_grams).count();
+            if overlap < FUZZY_MIN_SHARED {
                 continue;
             }
-            if !seen.insert(note_id) {
-                continue; // dedup to one (best) row per note — rows arrive best-first
+            scored.push((overlap, (note_id, source, r, snippet)));
+        }
+        // Highest overlap first; note_id as a deterministic tiebreak.
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
+        let mut seen = std::collections::HashSet::new();
+        let mut out: Vec<LexicalRow> = Vec::new();
+        for (_, row) in scored {
+            if !seen.insert(row.0) {
+                continue; // dedup to the best-overlap row per note
             }
-            out.push((note_id, source, r, snippet));
+            out.push(row);
             if out.len() as i64 >= top_k {
                 break;
             }
