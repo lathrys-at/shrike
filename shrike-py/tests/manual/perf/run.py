@@ -287,15 +287,11 @@ def main() -> int:
             + "` for real results."
         )
 
-    # Capture logging into an in-memory buffer (off the terminal, so the per-call
-    # INFO lines and native tracing don't perturb the timed iterations); flushed
-    # to run.log at the end.
-    log_buffer = _install_log_buffer()
-
     profile_path = Path(__file__).resolve().parent / "profiles" / f"perf-{args.profile}.yml"
     # Under --instrument the outer run picks the dir and passes it down, so the
-    # flamegraph and this run's result.json land together. Resolved before the
-    # corpus build so run.log has a home even if a later step fails.
+    # flamegraph and this run's result.json land together. Resolved before the log
+    # buffer (and the corpus build) so run.log always has a home, even on a later
+    # failure.
     env_run_dir = os.environ.get(RUN_DIR_ENV)
     if env_run_dir:
         run_dir = Path(env_run_dir)
@@ -305,6 +301,10 @@ def main() -> int:
             _RUNS_DIR / f"perf-{args.profile}-{args.variant.replace('+', '_')}-{args.size}-{stamp}"
         )
 
+    # Capture logging into an in-memory buffer (off the terminal, so the per-call
+    # INFO lines and native tracing don't perturb the timed iterations); flushed
+    # to run.log in the finally below.
+    log_buffer = _install_log_buffer()
     try:
         spec = CorpusSpec(notes=args.size, variant=args.variant)
         print(f"Ensuring corpus: {args.size} notes ({args.variant}) ...")

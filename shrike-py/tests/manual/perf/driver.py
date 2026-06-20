@@ -7,7 +7,7 @@ mock. The only difference between the kernel-isolation and end-to-end runs is
 onnx + CLIP); the runner code is identical.
 
 ``time_iterations`` is the single place a profiler attaches (the
-attach-a-profiler-to-a-run seam, #866); today it is the clean-timing path only.
+attach-a-profiler-to-a-run seam); today it is the clean-timing path only.
 """
 
 from __future__ import annotations
