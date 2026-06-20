@@ -220,6 +220,41 @@ class TestClipBackend:
         _start(be)
         assert be._resize == 248 and be._crop == 224
 
+    def test_missing_image_mean_std_defaults_to_openai_clip(self, tmp_path: Path) -> None:
+        # Some exports (e.g. MobileCLIP) omit image_mean/image_std; a CLIP image processor
+        # falls back to the OpenAI CLIP constants, so start() must not KeyError and must
+        # pass those defaults to the engine.
+        d = _model_dir(tmp_path)
+        (d / "preprocessor_config.json").write_text(
+            json.dumps({"size": {"shortest_edge": 256}, "crop_size": {"height": 256}})
+        )
+        be = ClipBackend(model=str(d))
+        _start(be)
+        kw = be._native_engine.init_kwargs
+        assert pytest.approx(kw["image_mean"][0]) == 0.48145466
+        assert pytest.approx(kw["image_std"][0]) == 0.26862954
+
+    def test_do_normalize_false_uses_identity(self, tmp_path: Path) -> None:
+        # An explicit do_normalize:false means no normalization → identity mean/std,
+        # even if stray image_mean/std values are present in the config.
+        d = _model_dir(tmp_path)
+        (d / "preprocessor_config.json").write_text(
+            json.dumps(
+                {
+                    "size": 224,
+                    "crop_size": 224,
+                    "do_normalize": False,
+                    "image_mean": [0.5, 0.5, 0.5],
+                    "image_std": [0.5, 0.5, 0.5],
+                }
+            )
+        )
+        be = ClipBackend(model=str(d))
+        _start(be)
+        kw = be._native_engine.init_kwargs
+        assert kw["image_mean"] == [0.0, 0.0, 0.0]
+        assert kw["image_std"] == [1.0, 1.0, 1.0]
+
     def test_health(self, tmp_path: Path) -> None:
         be = ClipBackend(model=str(_model_dir(tmp_path)))
         _start(be)

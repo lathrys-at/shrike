@@ -39,6 +39,12 @@ logger = logging.getLogger("shrike.embedding")
 DEFAULT_PROVIDERS = ("CPUExecutionProvider",)
 # CLIP text models use a fixed 77-token context (positional embeddings); pad/truncate to it.
 CLIP_CONTEXT = 77
+# The OpenAI CLIP image normalization constants — the default a HF/transformers.js CLIP
+# image processor applies when a preprocessor_config omits image_mean/image_std (e.g. a
+# MobileCLIP export). Mirroring that fallback is what makes such an export's preprocessing
+# match the runtime it was exported for.
+_OPENAI_CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+_OPENAI_CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 # CLIP exports ship a graph at several precisions; auto-discovery prefers full precision (best
 # quality, and it batches) and falls back to a quantized one, picking the first precision for
 # which *both* graphs exist (so text and vision stay the same precision — no mixed-precision pair).
@@ -161,8 +167,16 @@ class ClipBackend:
 
         # The preprocessor config is parsed here: only scalars cross the FFI.
         pp = json.loads(pp_path.read_text())
-        self._mean = [float(v) for v in pp["image_mean"]]
-        self._std = [float(v) for v in pp["image_std"]]
+        # image_mean/image_std are optional in the config: a HF/transformers.js CLIP image
+        # processor falls back to the OpenAI CLIP constants when they're absent (some exports,
+        # e.g. MobileCLIP, omit them), so a missing key means "use the defaults", not an error.
+        # An explicit `do_normalize: false` (rare) means no normalization → identity.
+        if pp.get("do_normalize", True):
+            self._mean = [float(v) for v in pp.get("image_mean", _OPENAI_CLIP_MEAN)]
+            self._std = [float(v) for v in pp.get("image_std", _OPENAI_CLIP_STD)]
+        else:
+            self._mean = [0.0, 0.0, 0.0]
+            self._std = [1.0, 1.0, 1.0]
         # CLIP preprocessing has two independent knobs: resize the shortest edge to `size`, then
         # center-crop to `crop_size`. Each may be a dict or a bare scalar across exports.
         self._resize = _read_edge(pp.get("size"), ("shortest_edge", "height", "width"), 224)
