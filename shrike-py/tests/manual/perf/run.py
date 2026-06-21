@@ -108,7 +108,7 @@ def _flush_log_buffer(buf: io.StringIO, path: Path) -> None:
 _PROGRESS_WIDTH = 24
 
 
-def _progress_printer(label: str, warmup: int) -> Callable[[int, int, bool], None]:
+def _progress_printer(label: str, warmup: int, width: int = 16) -> Callable[[int, int, bool], None]:
     """A pytest-style in-place progress line for one workload's iterations, so a
     long run shows forward motion instead of an apparent hang. Goes to stdout
     (harness UI), separate from the captured log buffer; the per-tick write sits
@@ -121,7 +121,7 @@ def _progress_printer(label: str, warmup: int) -> Callable[[int, int, bool], Non
     before the first (possibly slow) warmup iteration finishes."""
 
     def render_warming() -> None:
-        sys.stdout.write(f"\r  {label:<16} warming up...")
+        sys.stdout.write(f"\r  {label:<{width}} warming up...")
         sys.stdout.flush()
 
     if warmup > 0:
@@ -133,7 +133,7 @@ def _progress_printer(label: str, warmup: int) -> Callable[[int, int, bool], Non
             return
         filled = int(_PROGRESS_WIDTH * done / total) if total else _PROGRESS_WIDTH
         bar = "#" * filled + "-" * (_PROGRESS_WIDTH - filled)
-        sys.stdout.write(f"\r  {label:<16} [{bar}] {done:>3}/{total}")
+        sys.stdout.write(f"\r  {label:<{width}} [{bar}] {done:>3}/{total}")
         sys.stdout.flush()
 
     return tick
@@ -168,6 +168,9 @@ async def _run_workloads(
     with_media: bool,
 ) -> list[WorkloadResult]:
     results: list[WorkloadResult] = []
+    # Every progress bar aligns its `[bar]` to the longest workload name in this run
+    # (floored at the historical width), so the bars line up regardless of name length.
+    label_w = max(16, *(len(n) for n in names)) if names else 16
     registry = [n for n in names if n != INGEST]
     if registry:
         # Read-only workloads first so the single shared boot stays representative.
@@ -187,7 +190,7 @@ async def _run_workloads(
                     booted,
                     repeats=repeats,
                     warmup=warmup,
-                    on_tick=_progress_printer(w.name, warmup),
+                    on_tick=_progress_printer(w.name, warmup, label_w),
                 )
                 print()  # close the completed bar's line; the full table prints at the end
                 results.append(res)
@@ -203,7 +206,7 @@ async def _run_workloads(
             repeats=repeats,
             warmup=warmup,
             with_media=with_media,
-            on_tick=_progress_printer(INGEST, warmup),
+            on_tick=_progress_printer(INGEST, warmup, label_w),
         )
         print()  # close the completed bar's line; the full table prints at the end
         results.append(res)

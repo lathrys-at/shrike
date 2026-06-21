@@ -95,6 +95,24 @@ def test_render_table_amortizes_p50_over_items():
     assert "0.020" in table  # 10.0 / 500
 
 
+def test_render_table_widens_name_column_for_long_workload_names():
+    # A long workload name (a scoped variant, 19 chars) must not overrun the phase
+    # column, and every row's phase column stays aligned to the same offset.
+    run = RunResult(
+        conditions=_conditions(),
+        results=[
+            WorkloadResult("search-batch", {"response": summarize([1.0] * 5)}, items=20),
+            WorkloadResult("search-scoped-batch", {"response": summarize([2.0] * 5)}, items=20),
+        ],
+        timestamp="2026-01-01T00:00:00Z",
+    )
+    table = render_table(run)
+    assert "search-scoped-batchresponse" not in table  # name never glued to phase
+    phase_rows = [ln for ln in table.splitlines() if "response" in ln]
+    assert len(phase_rows) == 2
+    assert len({ln.index("response") for ln in phase_rows}) == 1  # columns aligned
+
+
 def test_render_markdown_table_is_paste_ready():
     run = _settling_run(_conditions(), response=4.0, settle=20.0)
     md = render_markdown_table(run)

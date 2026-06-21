@@ -232,12 +232,16 @@ def render_table(run: RunResult) -> str:
     spans three rows (response/settle/total); the workload name and item count
     print once, on its first row."""
     title, machine, sampling = _meta_lines(run)
+    # The workload-name column widens to the longest name in this run (+2 gutter),
+    # floored at the historical width — a long name (a scoped workload) would
+    # otherwise overrun the adjacent phase column.
+    name_w = max(18, max(len(_COLUMNS[0]), *(len(r.workload) for r in run.results)) + 2)
     lines = [
         f"# {title}",
         f"# {machine}",
         f"# {sampling}",
         "",
-        f"{'workload':<18}{'phase':<10}{'items':>8}"
+        f"{'workload':<{name_w}}{'phase':<10}{'items':>8}"
         f"{'p50 ms':>12}{'p90 ms':>12}{'p99 ms':>12}{'max ms':>12}{'p50 drift ms':>14}"
         f"{'p50 (amortized) ms':>20}",
     ]
@@ -247,7 +251,7 @@ def render_table(run: RunResult) -> str:
             items = str(r.items) if idx == 0 else ""
             amortized = _amortized_p50(d, r.items)
             lines.append(
-                f"{name:<18}{phase:<10}{items:>8}{d.p50_ms:>12.3f}{d.p90_ms:>12.3f}"
+                f"{name:<{name_w}}{phase:<10}{items:>8}{d.p50_ms:>12.3f}{d.p90_ms:>12.3f}"
                 f"{d.p99_ms:>12.3f}{d.max_ms:>12.3f}{d.drift_ms:>14.3f}{amortized:>20}"
             )
     return "\n".join(lines)
