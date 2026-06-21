@@ -48,3 +48,23 @@ def test_single_sample_collapses_all_percentiles():
 def test_distribution_round_trips_through_dict():
     d = summarize([1.0, 2.0, 3.0, 4.0])
     assert Distribution.from_dict(asdict(d)) == d
+
+
+def test_drift_reads_the_within_run_trend_in_iteration_order():
+    # A rising run (each later iteration slower) drifts POSITIVE: the second-half
+    # median sits above the first-half median. The order-blind percentiles can't
+    # show this — drift is the index-fragmentation signal #938's churn workload
+    # reads.
+    rising = summarize([10.0, 12.0, 14.0, 30.0, 34.0, 38.0])
+    assert rising.drift_ms == pytest.approx(
+        _percentile([30.0, 34.0, 38.0], 0.5) - _percentile([10.0, 12.0, 14.0], 0.5)
+    )
+    assert rising.drift_ms > 0
+    # A flat run drifts ~0.
+    assert summarize([20.0, 20.0, 20.0, 20.0]).drift_ms == 0.0
+    # Order matters: a run that starts slow and SETTLES drifts negative.
+    assert summarize([40.0, 38.0, 12.0, 10.0]).drift_ms < 0
+    # Warmup is discarded before the trend is read.
+    assert summarize([999.0, 10.0, 12.0, 30.0, 34.0], warmup=1).drift_ms > 0
+    # Fewer than two kept samples: no trend.
+    assert summarize([5.0]).drift_ms == 0.0

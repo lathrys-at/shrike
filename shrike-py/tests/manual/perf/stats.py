@@ -17,7 +17,10 @@ from typing import Any
 @dataclass(frozen=True)
 class Distribution:
     """A latency distribution over the kept (post-warmup) samples, in
-    milliseconds. ``n`` is the kept-sample count, not the total run count."""
+    milliseconds. ``n`` is the kept-sample count, not the total run count.
+    ``samples_ms`` keeps the post-warmup timings in ITERATION order (the percentiles
+    are over the same set, sorted) so a *trend* across the run is recoverable — see
+    :attr:`drift_ms`."""
 
     n: int
     min_ms: float
@@ -26,10 +29,27 @@ class Distribution:
     p99_ms: float
     max_ms: float
     mean_ms: float
+    samples_ms: tuple[float, ...]
+
+    @property
+    def drift_ms(self) -> float:
+        """The within-run drift: the median of the run's SECOND half minus that of
+        its FIRST half, in iteration order. ~0 for a stable op; positive means the
+        op got slower AS THE RUN PROGRESSED — the index-fragmentation signal #938's
+        churn workload reads (flat with compaction, climbing without). 0 for < 2
+        kept samples."""
+        if len(self.samples_ms) < 2:
+            return 0.0
+        mid = len(self.samples_ms) // 2
+        first = sorted(self.samples_ms[:mid])
+        second = sorted(self.samples_ms[mid:])
+        return _percentile(second, 0.50) - _percentile(first, 0.50)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Distribution:
-        return cls(**{k: raw[k] for k in cls.__dataclass_fields__})
+        fields = {k: raw[k] for k in cls.__dataclass_fields__}
+        fields["samples_ms"] = tuple(fields["samples_ms"])
+        return cls(**fields)
 
 
 def _percentile(ordered: list[float], q: float) -> float:
@@ -74,4 +94,6 @@ def summarize(samples_ms: list[float], *, warmup: int = 0) -> Distribution:
         p99_ms=_percentile(ordered, 0.99),
         max_ms=ordered[-1],
         mean_ms=sum(ordered) / len(ordered),
+        # Iteration order preserved (NOT sorted) — drift_ms reads the trend.
+        samples_ms=tuple(kept),
     )

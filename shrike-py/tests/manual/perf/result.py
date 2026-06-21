@@ -199,6 +199,7 @@ _COLUMNS = (
     "p90 ms",
     "p99 ms",
     "max ms",
+    "p50 drift ms",
     "p50 (amortized) ms",
 )
 
@@ -237,7 +238,7 @@ def render_table(run: RunResult) -> str:
         f"# {sampling}",
         "",
         f"{'workload':<18}{'phase':<10}{'items':>8}"
-        f"{'p50 ms':>12}{'p90 ms':>12}{'p99 ms':>12}{'max ms':>12}"
+        f"{'p50 ms':>12}{'p90 ms':>12}{'p99 ms':>12}{'max ms':>12}{'p50 drift ms':>14}"
         f"{'p50 (amortized) ms':>20}",
     ]
     for r in run.results:
@@ -247,7 +248,7 @@ def render_table(run: RunResult) -> str:
             amortized = _amortized_p50(d, r.items)
             lines.append(
                 f"{name:<18}{phase:<10}{items:>8}{d.p50_ms:>12.3f}{d.p90_ms:>12.3f}"
-                f"{d.p99_ms:>12.3f}{d.max_ms:>12.3f}{amortized:>20}"
+                f"{d.p99_ms:>12.3f}{d.max_ms:>12.3f}{d.drift_ms:>14.3f}{amortized:>20}"
             )
     return "\n".join(lines)
 
@@ -274,6 +275,7 @@ def render_markdown_table(run: RunResult) -> str:
                 f"{d.p90_ms:.3f}",
                 f"{d.p99_ms:.3f}",
                 f"{d.max_ms:.3f}",
+                f"{d.drift_ms:.3f}",
                 _amortized_p50(d, r.items),
             ]
             lines.append(f"| {' | '.join(cells)} |")
