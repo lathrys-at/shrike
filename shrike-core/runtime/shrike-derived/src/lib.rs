@@ -446,6 +446,26 @@ impl DerivedEngine {
     const IDX_DDL: &'static str =
         "CREATE VIRTUAL TABLE IF NOT EXISTS idx USING fts5(txt, tokenize='trigram')";
 
+    /// FTS5 page size (bytes) for `idx`/`idx_shadow`, above the 4050 default. `pgsz`
+    /// sets the b-tree node size and governs only pages written AFTER it is set, so
+    /// a freshly-created or just-reset table adopts it wholesale. A larger page
+    /// packs more postings per node, so a trigram `MATCH`'s segment scan crosses
+    /// fewer page boundaries — fewer `fts5SegIterNextPage` steps and page-cache
+    /// fetches per query. A tuning probe: sweep a search workload across values and
+    /// keep the winner.
+    const IDX_PGSZ: i64 = 8192;
+
+    /// Set `pgsz` on an FTS5 table (`idx` or `idx_shadow`). Must run after the
+    /// table's DDL and before any rows are written, so the whole index uses it.
+    fn set_pgsz(conn: &Connection, table: &str) -> NativeResult<()> {
+        conn.execute(
+            &format!("INSERT INTO {table}({table}, rank) VALUES('pgsz', ?1)"),
+            [Self::IDX_PGSZ],
+        )
+        .map_err(db_err)?;
+        Ok(())
+    }
+
     /// A read-only view over `idx`'s vocabulary: `(term, doc, cnt)` per trigram,
     /// where `doc` is the document frequency. The fuzzy path reads it to prune the
     /// common (high-DF) trigrams that bloat the match set. fts5vocab resolves `idx`
@@ -455,6 +475,7 @@ impl DerivedEngine {
 
     fn create_tables(conn: &Connection) -> NativeResult<()> {
         conn.execute(Self::IDX_DDL, []).map_err(db_err)?;
+        Self::set_pgsz(conn, "idx")?;
         conn.execute(Self::IDX_VOCAB_DDL, []).map_err(db_err)?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS rowmap(\
@@ -878,6 +899,7 @@ impl DerivedEngine {
         )
         .map_err(db_err)?;
         conn.execute(Self::IDX_SHADOW_DDL, []).map_err(db_err)?;
+        Self::set_pgsz(&conn, "idx_shadow")?;
         conn.execute(
             "CREATE TABLE rowmap_shadow(\
              rowid INTEGER PRIMARY KEY, note_id INTEGER NOT NULL, \
@@ -2070,6 +2092,33 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, 2);
         assert_eq!(e.get_col_mod(), Some(2));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn idx_adopts_the_configured_pgsz_on_create_and_rebuild() {
+        // The pgsz probe must actually take, on BOTH index-creation paths — else a
+        // neutral benchmark can't tell an inert knob from one that doesn't help.
+        // FTS5 persists pgsz in its %_config shadow table; read it back.
+        fn pgsz(e: &DerivedEngine) -> i64 {
+            e.lock()
+                .query_row("SELECT v FROM idx_config WHERE k = 'pgsz'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        }
+        let (e, dir) = store();
+        // Fresh create_tables path.
+        assert_eq!(pgsz(&e), DerivedEngine::IDX_PGSZ);
+        // Rebuild path: idx_shadow is created with the same pgsz and renamed over
+        // idx, so the live index still carries it after the swap.
+        build_snapshot_live(
+            &e,
+            &[(1, "field".into(), "F".into(), "alpha beta".into())],
+            1,
+        )
+        .unwrap();
+        assert_eq!(pgsz(&e), DerivedEngine::IDX_PGSZ);
         std::fs::remove_dir_all(dir).ok();
     }
 
