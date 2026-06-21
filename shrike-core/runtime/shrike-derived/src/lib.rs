@@ -2636,9 +2636,8 @@ impl DerivedEngine {
 
     /// Accumulate one query's per-segment trigram overlap: how many of its pruned
     /// (rare) trigrams each indexed rowid shares, from the per-term posting sets
-    /// gathered by [`Self::fuzzy_term_rowids`] (rowid-only) or
-    /// [`Self::term_segments_batch`] (with provenance). Provenance-free, so it runs
-    /// before the survivors' `(note_id, source, ref)` is known.
+    /// gathered rowid-only by [`Self::fuzzy_term_rowids`]. Provenance-free, so it
+    /// runs before the survivors' `(note_id, source, ref)` is known.
     fn accumulate_overlap(
         pruned_terms: &[String],
         term_rowids: &std::collections::HashMap<String, Vec<i64>>,
@@ -2674,11 +2673,10 @@ impl DerivedEngine {
     /// rowid drives the deferred snippet read. Recall-safe: the cut is by overlap,
     /// never by rowid — every matched segment is ranked, unlike a bm25 `LIMIT` over
     /// the OR. A rowid present in `overlap` but ABSENT from `seg_meta` is dropped:
-    /// the JOIN read pre-filters scope/exclude so its `seg_meta` carries only kept
-    /// segments, and the unfiltered path's [`Self::seg_meta_for_rowids`] omits the
-    /// `exclude_sources` segments — so "absent" means "filtered out," and skipping
-    /// it makes a note rank by its best NON-excluded segment, exactly as the JOIN
-    /// path does by never counting the excluded ones.
+    /// [`Self::seg_meta_for_rowids`] omits the segments filtered out by
+    /// `exclude_sources` or an out-of-scope `note_id`, so "absent" means "filtered
+    /// out," and skipping it makes a note rank by its best surviving segment — the
+    /// same result a `source NOT IN` / `note_id IN` MATCH predicate would give.
     fn rank_overlap(
         overlap: &FxI64Map<usize>,
         seg_meta: &FxI64Map<(i64, String, String)>,
@@ -2718,19 +2716,6 @@ impl DerivedEngine {
                 (nid, source.clone(), r.clone(), rid)
             })
             .collect()
-    }
-
-    /// [`Self::accumulate_overlap`] then [`Self::rank_overlap`] against the inline
-    /// `seg_meta` of the filtered JOIN read — the scope/exclude path, where
-    /// provenance is read alongside the postings.
-    fn merge_overlap(
-        pruned_terms: &[String],
-        term_rowids: &std::collections::HashMap<String, Vec<i64>>,
-        seg_meta: &FxI64Map<(i64, String, String)>,
-        top_k: usize,
-    ) -> Vec<(i64, String, String, i64)> {
-        let overlap = Self::accumulate_overlap(pruned_terms, term_rowids);
-        Self::rank_overlap(&overlap, seg_meta, top_k)
     }
 
     /// Notes whose derived text literally contains `query` (case-insensitive),
@@ -2852,12 +2837,13 @@ impl DerivedEngine {
     ///
     /// Ranks by trigram OVERLAP without bm25: each query's rarest trigrams are read
     /// as individual posting lists (one MATCH per DISTINCT trigram — a trigram's
-    /// posting is identical for every query in the batch, since scope/exclude are
-    /// batch-wide), then merged per query into per-note overlap. The UNSCOPED case
-    /// (the common one) reads postings rowid-only ([`Self::fuzzy_term_rowids`]) and
-    /// hydrates `(note_id, source, ref)` for only the overlap candidates
-    /// ([`Self::seg_meta_for_rowids`]); a scope filter takes the JOIN path
-    /// ([`Self::term_segments_batch`] + [`Self::merge_overlap`]) instead. bm25's
+    /// posting is identical for every query in the batch), rowid-ONLY
+    /// ([`Self::fuzzy_term_rowids`]), then accumulated per query into per-note
+    /// overlap. Provenance is hydrated once for the overlap candidates
+    /// ([`Self::seg_meta_for_rowids`]), which also applies BOTH filters in Rust off
+    /// the parallel hot path: `exclude_sources` and the deck/tag SCOPE drop their
+    /// segments there, not as a `note_id IN (...)` MATCH predicate (which would make
+    /// SQLite build an ephemeral index — a temp btree on the pcache mutex). bm25's
     /// `ORDER BY rank` over the pruned `OR` was the search hotspot; raw posting reads
     /// skip it and the overlap cut is recall-safe (by overlap, never rowid). Snippets
     /// are read once for the surviving top-k ([`Self::fuzzy_snippets_batch`]), not for
@@ -2903,54 +2889,42 @@ impl DerivedEngine {
             return Ok(queries.iter().map(|_| Vec::new()).collect());
         }
         let distinct_terms_vec: Vec<&str> = distinct_terms.into_iter().collect();
-        // Merge per query into ranked survivors (note_id, source, ref, rowid). A
-        // SCOPE filter is pushed into the MATCH — the `note_id IN scope` predicate
-        // needs the rowmap JOIN, and for a tight scope SQL-side filtering beats
-        // scanning-then-dropping — so that path reads provenance inline. The
-        // unscoped case (the common one, including the always-present
-        // `exclude_sources` hidden-source list) reads postings rowid-ONLY — no
-        // per-posting JOIN, no string allocs over the full lists — then hydrates
-        // `(note_id, source, ref)` once for the candidate set (overlap >= the
-        // floor), applying `exclude_sources` in that batched read.
-        let survivors: Vec<Vec<(i64, String, String, i64)>> = if scope.is_some() {
-            let (term_rowids, seg_meta) =
-                Self::term_segments_batch(&conn, &distinct_terms_vec, scope, exclude_sources)?;
-            pruned
-                .iter()
-                .map(|p| {
-                    p.as_ref().map_or_else(Vec::new, |terms| {
-                        Self::merge_overlap(terms, &term_rowids, &seg_meta, top_k as usize)
-                    })
+        // Read each pruned trigram's posting rowid-ONLY (no per-posting JOIN, no
+        // string allocs over the full lists), accumulate per-query overlap, then
+        // hydrate `(note_id, source, ref)` once for the candidate set (overlap >= the
+        // floor). Both the `exclude_sources` hidden-source list and the deck/tag
+        // SCOPE drop their segments in that one batched hydration, in Rust — off the
+        // parallel hot path, where a `note_id IN scope` MATCH predicate would make
+        // SQLite build an ephemeral index over the set (a temp btree on the pcache
+        // mutex). rank_overlap skips a candidate absent from `seg_meta`, so a dropped
+        // segment never ranks.
+        let term_rowids = Self::fuzzy_term_rowids(&conn, &distinct_terms_vec)?;
+        let overlaps: Vec<FxI64Map<usize>> = pruned
+            .iter()
+            .map(|p| {
+                p.as_ref().map_or_else(FxI64Map::default, |terms| {
+                    Self::accumulate_overlap(terms, &term_rowids)
                 })
-                .collect()
-        } else {
-            let term_rowids = Self::fuzzy_term_rowids(&conn, &distinct_terms_vec)?;
-            let overlaps: Vec<FxI64Map<usize>> = pruned
-                .iter()
-                .map(|p| {
-                    p.as_ref().map_or_else(FxI64Map::default, |terms| {
-                        Self::accumulate_overlap(terms, &term_rowids)
-                    })
-                })
-                .collect();
-            let mut candidates: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
-            for ov in &overlaps {
-                for (&rid, &count) in ov {
-                    if count >= FUZZY_MIN_SHARED {
-                        candidates.insert(rid);
-                    }
+            })
+            .collect();
+        let mut candidates: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+        for ov in &overlaps {
+            for (&rid, &count) in ov {
+                if count >= FUZZY_MIN_SHARED {
+                    candidates.insert(rid);
                 }
             }
-            let seg_meta = Self::seg_meta_for_rowids(
-                &conn,
-                &candidates.into_iter().collect::<Vec<_>>(),
-                exclude_sources,
-            )?;
-            overlaps
-                .iter()
-                .map(|ov| Self::rank_overlap(ov, &seg_meta, top_k as usize))
-                .collect()
-        };
+        }
+        let seg_meta = Self::seg_meta_for_rowids(
+            &conn,
+            &candidates.into_iter().collect::<Vec<_>>(),
+            exclude_sources,
+            scope,
+        )?;
+        let survivors: Vec<Vec<(i64, String, String, i64)>> = overlaps
+            .iter()
+            .map(|ov| Self::rank_overlap(ov, &seg_meta, top_k as usize))
+            .collect();
         // Build snippets for the surviving rowids only, from text read by a plain
         // rowid lookup (no MATCH re-scan) and windowed in Rust around the query's
         // own rare trigrams.
@@ -2978,102 +2952,14 @@ impl DerivedEngine {
         Ok(out)
     }
 
-    /// For each of `terms` (already FTS5-safe trigrams), the indexed segments whose
-    /// text contains it: `term_rowids[term]` is the matching idx rowids, and
-    /// `seg_meta[rowid]` their `(note_id, source, ref)` provenance (owned once,
-    /// shared across queries). One MATCH per term — no rank, no text, no limit, just
-    /// the posting — sharing ONE connection and ONE scope clause across the set, like
-    /// [`Self::match_rows_batch`]. No `LIMIT`: the overlap ranker needs every match
-    /// to stay recall-safe; a rowid `LIMIT` here would silently drop high-rowid
-    /// (recently-added) high-overlap notes. Reads on the passed [`ReadPool`]
-    /// connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if resolving the scope or any term's MATCH query fails.
-    #[allow(clippy::type_complexity)]
-    fn term_segments_batch(
-        conn: &Connection,
-        terms: &[&str],
-        scope: Option<&[i64]>,
-        exclude_sources: &[&str],
-    ) -> NativeResult<(
-        std::collections::HashMap<String, Vec<i64>>,
-        FxI64Map<(i64, String, String)>,
-    )> {
-        let mut term_rowids: std::collections::HashMap<String, Vec<i64>> =
-            std::collections::HashMap::new();
-        let mut seg_meta: FxI64Map<(i64, String, String)> = FxI64Map::default();
-        if terms.is_empty() {
-            return Ok((term_rowids, seg_meta));
-        }
-        let span = tracing::debug_span!("derived.fuzzy_terms", n = terms.len());
-        let _enter = span.enter();
-        let scope_clause = Self::scope_clause(conn, scope)?;
-        let exclude_clause = if exclude_sources.is_empty() {
-            String::new()
-        } else {
-            let placeholders = (0..exclude_sources.len())
-                .map(|i| format!("?{}", i + 2))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("AND m.source NOT IN ({placeholders}) ")
-        };
-        let sql = format!(
-            "SELECT idx.rowid, m.note_id, m.source, m.ref \
-             FROM idx JOIN rowmap m ON m.rowid = idx.rowid \
-             WHERE idx MATCH ?1 {scope_clause}{exclude_clause}"
-        );
-        for term in terms {
-            let quoted = fts_quote(term);
-            let run =
-                || -> rusqlite::Result<Result<Vec<(i64, i64, String, String)>, NativeError>> {
-                    let mut params: Vec<&dyn rusqlite::ToSql> = vec![&quoted];
-                    params.extend(exclude_sources.iter().map(|s| s as &dyn rusqlite::ToSql));
-                    let mut stmt = conn.prepare_cached(&sql)?;
-                    let mut q = stmt.query(rusqlite::params_from_iter(params))?;
-                    let mut rows: Vec<(i64, i64, String, String)> = Vec::new();
-                    loop {
-                        let row = match q.next() {
-                            Ok(Some(r)) => r,
-                            Ok(None) => break,
-                            Err(e) if is_retryable(&e) => return Err(e),
-                            Err(e) => {
-                                return Ok(Err(NativeError::invalid_input(format!(
-                                    "fts5 match: {e}"
-                                ))))
-                            }
-                        };
-                        match (|| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))() {
-                            Ok(tuple) => rows.push(tuple),
-                            Err(e) if is_retryable(&e) => return Err(e),
-                            Err(e) => {
-                                return Ok(Err(NativeError::invalid_input(format!(
-                                    "fts5 match: {e}"
-                                ))))
-                            }
-                        }
-                    }
-                    Ok(Ok(rows))
-                };
-            let rows = with_busy_retry(run)??;
-            let mut rids = Vec::with_capacity(rows.len());
-            for (rowid, note_id, source, r) in rows {
-                rids.push(rowid);
-                seg_meta.entry(rowid).or_insert((note_id, source, r));
-            }
-            term_rowids.insert((*term).to_string(), rids);
-        }
-        Ok((term_rowids, seg_meta))
-    }
-
     /// Each term's matching idx rowids, rowid-ONLY — no `rowmap` JOIN, no
     /// provenance. FTS5 yields rowids straight off the posting list with no table
     /// access, the cheapest posting read; provenance is deferred to the overlap
-    /// candidates ([`Self::seg_meta_for_rowids`]). For the UNFILTERED fuzzy read
-    /// only: a scope/exclude filter needs `note_id`/`source` in the MATCH, so it
-    /// takes the JOIN path ([`Self::term_segments_batch`]). No `LIMIT`, for the same
-    /// recall reason as that path. Reads on the passed [`ReadPool`] connection.
+    /// candidates ([`Self::seg_meta_for_rowids`]), which also drops the
+    /// `exclude_sources` and out-of-scope segments — so the posting scan needs
+    /// neither `note_id` nor `source` and stays rowid-only for every fuzzy read,
+    /// scoped or not. No `LIMIT`: the overlap ranker needs every match to stay
+    /// recall-safe. Reads on the passed [`ReadPool`] connection.
     ///
     /// # Errors
     ///
@@ -3121,19 +3007,22 @@ impl DerivedEngine {
     }
 
     /// Provenance `(note_id, source, ref)` per idx rowid, for a set of rowids,
-    /// dropping any whose `source` is in `exclude_sources`. Hydrates the overlap
-    /// candidates the unfiltered fuzzy path deferred (it read postings rowid-only,
-    /// hidden sources included), applying the `exclude_sources` filter HERE rather
-    /// than in the per-posting scan. A dropped rowid is then absent from the
-    /// returned map, so [`Self::rank_overlap`] skips it — the same effect as the
-    /// JOIN path's `source NOT IN`, off the hot scan.
+    /// dropping any whose `source` is in `exclude_sources` or whose `note_id` is
+    /// outside `scope` (when a deck/tag scope is given). Hydrates the overlap
+    /// candidates the posting scan deferred (it read postings rowid-only, every
+    /// source and note included), applying BOTH filters HERE rather than in the
+    /// per-posting scan. A dropped rowid is then absent from the returned map, so
+    /// [`Self::rank_overlap`] skips it — the same effect a `source NOT IN` /
+    /// `note_id IN` MATCH predicate would have, off the hot scan.
     ///
-    /// The rowid set goes in as an INLINE integer `IN` list (the rowids are our own
-    /// `i64`s — no injection), NOT a staged temp table. That is load-bearing: a temp
-    /// table's btree pages bypass mmap (it maps only the main DB file), so they
+    /// The candidate rowids go in as an INLINE integer `IN` list (the rowids are our
+    /// own `i64`s — no injection), NOT a staged temp table; and the scope is dropped
+    /// in Rust, NOT as a `note_id IN (...)` predicate. Both choices keep this read on
+    /// mmap: a temp table's btree pages — or the ephemeral index SQLite builds for a
+    /// large `note_id IN` set — bypass mmap (it maps only the main DB file), so they
     /// fault through `pcache1`'s `STATIC_LRU` mutex and serialize the parallel fuzzy
-    /// chunks. `rowmap` lives in the mmap'd main file, so an inline `IN` seeks it
-    /// (rowid is its primary key) with no shared-cache mutex. Chunked so the SQL
+    /// chunks. `rowmap` lives in the mmap'd main file, so an inline rowid `IN` seeks
+    /// it (rowid is its primary key) with no shared-cache mutex. Chunked so the SQL
     /// text stays bounded. Reads on the passed [`ReadPool`] connection.
     ///
     /// # Errors
@@ -3143,9 +3032,12 @@ impl DerivedEngine {
         conn: &Connection,
         rowids: &[i64],
         exclude_sources: &[&str],
+        scope: Option<&[i64]>,
     ) -> NativeResult<FxI64Map<(i64, String, String)>> {
-        // Sized to the candidate set (minus any source-excluded rows) so the
-        // per-candidate inserts never grow-and-rehash the table.
+        let scope_set: Option<std::collections::HashSet<i64>> =
+            scope.map(|ids| ids.iter().copied().collect());
+        // Sized to the candidate set (minus any source-excluded or out-of-scope rows)
+        // so the per-candidate inserts never grow-and-rehash the table.
         let mut seg_meta: FxI64Map<(i64, String, String)> =
             std::collections::HashMap::with_capacity_and_hasher(rowids.len(), Default::default());
         for chunk in rowids.chunks(Self::INLINE_ID_MAX) {
@@ -3170,6 +3062,11 @@ impl DerivedEngine {
             for (rowid, note_id, source, r) in with_busy_retry(run)? {
                 if exclude_sources.contains(&source.as_str()) {
                     continue;
+                }
+                if let Some(set) = &scope_set {
+                    if !set.contains(&note_id) {
+                        continue;
+                    }
                 }
                 seg_meta.insert(rowid, (note_id, source, r));
             }
@@ -3389,13 +3286,15 @@ mod lexical_tests {
     }
 
     #[test]
-    fn fuzzy_unfiltered_fast_path_equals_the_scoped_join_path() {
-        // The deferred-provenance fast path (scope=None: postings read rowid-only,
-        // then note_id/source/ref hydrated for the candidate set) must return
-        // EXACTLY what the scope/exclude JOIN path returns. Scoping to every note id
-        // forces the JOIN path over identical data, so the two results — survivors,
-        // order, source/ref, AND snippet — must be equal. That equality is the
-        // recall-neutrality guarantee: deferring provenance changes nothing observed.
+    fn fuzzy_scope_is_a_rust_filter_equivalent_to_filtering_the_unscoped_results() {
+        // Scope is applied in Rust at provenance hydration (seg_meta drops out-of-scope
+        // note_ids), not as a `note_id IN` MATCH predicate. Two invariants: scoping to
+        // EVERY id is a no-op (equals the unscoped fast path exactly — survivors, order,
+        // source/ref, AND snippet), and scoping to a SUBSET returns exactly the unscoped
+        // results whose note is in scope, same ranking. The first is the recall-
+        // neutrality guarantee (deferred provenance + the Rust scope filter change
+        // nothing observed); the second proves the filter actually bites. top_k (10) is
+        // never hit here (<= 10 notes), so the subset equals the filtered unscoped slice.
         let dir = std::env::temp_dir().join(format!(
             "shrike-derived-fuzzyparity-{}-{}",
             std::process::id(),
@@ -3423,8 +3322,8 @@ mod lexical_tests {
             "wholly unrelated text".into(),
         ));
         // A hidden-source segment: the fast path reads its posting (rowid-only) but
-        // must drop it at hydration under `exclude_sources`, exactly as the JOIN
-        // path drops it in the MATCH. Both must agree with AND without the exclude.
+        // must drop it at hydration under `exclude_sources` — the same in-Rust filter
+        // as scope. Results must agree with AND without the exclude.
         rows.push((
             10,
             "vlm".into(),
@@ -3433,6 +3332,7 @@ mod lexical_tests {
         ));
         build_snapshot_live(&e, &rows, 1).unwrap();
         let all_ids: Vec<i64> = (1..=10).collect();
+        let subset: Vec<i64> = vec![2, 4, 6];
 
         for (q, exclude) in [
             ("mitochondira", &[][..]),      // typo, no exclude → vlm note present
@@ -3445,7 +3345,40 @@ mod lexical_tests {
             assert!(!unfiltered.is_empty(), "expected fuzzy hits for {q:?}");
             assert_eq!(
                 unfiltered, scoped_all,
-                "unfiltered fast path diverged from the scoped JOIN path for {q:?} exclude={exclude:?}"
+                "scope=all diverged from the unscoped fast path for {q:?} exclude={exclude:?}"
+            );
+            // A SUBSET scope returns exactly the unscoped results whose note is in
+            // scope, in the same order — the in-Rust filter, nothing else moved.
+            let scoped_subset = e.search_fuzzy(q, 10, Some(&subset), exclude).unwrap();
+            let expected: Vec<_> = unfiltered
+                .iter()
+                .filter(|m| subset.contains(&m.0))
+                .cloned()
+                .collect();
+            assert_eq!(
+                scoped_subset, expected,
+                "scope=subset was not the in-scope slice of unscoped for {q:?} exclude={exclude:?}"
+            );
+            // top_k is applied AFTER the scope filter: a subset scope with top_k below
+            // the in-scope match count returns the in-scope slice truncated — NOT the
+            // unscoped top_k then filtered. Guards against truncating before filtering.
+            assert!(
+                expected.len() >= 2,
+                "fixture must have >= 2 in-scope hits for {q:?}"
+            );
+            let scoped_top1 = e.search_fuzzy(q, 1, Some(&subset), exclude).unwrap();
+            assert_eq!(
+                scoped_top1,
+                expected[..1].to_vec(),
+                "scope+top_k was not the truncated in-scope slice for {q:?} exclude={exclude:?}"
+            );
+            // An empty scope (a deck/tag that matched no notes) drops everything — the
+            // same "match nothing" the SQL substring path applies for an empty scope.
+            assert!(
+                e.search_fuzzy(q, 10, Some(&[]), exclude)
+                    .unwrap()
+                    .is_empty(),
+                "empty scope must return no fuzzy hits for {q:?} exclude={exclude:?}"
             );
         }
         std::fs::remove_dir_all(dir).ok();
