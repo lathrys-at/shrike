@@ -2724,13 +2724,17 @@ impl DerivedEngine {
     /// A query too short to rank yields an empty result without reaching FTS5.
     ///
     /// Ranks by trigram OVERLAP without bm25: each query's rarest trigrams are read
-    /// as individual posting lists ([`Self::term_segments_batch`], one MATCH per
-    /// DISTINCT trigram — a trigram's posting is identical for every query in the
-    /// batch, since scope/exclude are batch-wide), then merged per query into
-    /// per-note overlap ([`Self::merge_overlap`]). bm25's `ORDER BY rank` over the
-    /// pruned `OR` was the search hotspot; six raw posting reads skip it and the
-    /// overlap cut is recall-safe (by overlap, never rowid). Snippets are read once
-    /// for the surviving top-k ([`Self::fuzzy_snippets_batch`]), not for every match.
+    /// as individual posting lists (one MATCH per DISTINCT trigram — a trigram's
+    /// posting is identical for every query in the batch, since scope/exclude are
+    /// batch-wide), then merged per query into per-note overlap. The UNSCOPED case
+    /// (the common one) reads postings rowid-only ([`Self::fuzzy_term_rowids`]) and
+    /// hydrates `(note_id, source, ref)` for only the overlap candidates
+    /// ([`Self::seg_meta_for_rowids`]); a scope filter takes the JOIN path
+    /// ([`Self::term_segments_batch`] + [`Self::merge_overlap`]) instead. bm25's
+    /// `ORDER BY rank` over the pruned `OR` was the search hotspot; raw posting reads
+    /// skip it and the overlap cut is recall-safe (by overlap, never rowid). Snippets
+    /// are read once for the surviving top-k ([`Self::fuzzy_snippets_batch`]), not for
+    /// every match.
     ///
     /// # Errors
     ///
