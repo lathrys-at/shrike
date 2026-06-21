@@ -608,7 +608,12 @@ fn read_notes_batch(
     note_data: &NoteData,
     ids: &[i64],
 ) -> FxI64Map<Candidate> {
-    let mut out: FxI64Map<Candidate> = FxI64Map::default();
+    // Sized to the id set (the upper bound on inserted candidates) so the batch
+    // hydration doesn't grow-and-rehash.
+    let mut out: FxI64Map<Candidate> = std::collections::HashMap::with_capacity_and_hasher(
+        ids.len(),
+        std::hash::BuildHasherDefault::default(),
+    );
     let mut need_fetch: Vec<i64> = Vec::new();
     for &nid in ids {
         if note_data.contains(nid) {
