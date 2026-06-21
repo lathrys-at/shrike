@@ -16,6 +16,7 @@ import shrike_native
 from tests.manual.perf.corpus import CorpusSpec, build_corpus
 from tests.manual.perf.driver import boot_from_profile, measure, measure_ingest, run_async
 from tests.manual.perf.workloads import (
+    ChurnWorkload,
     DeleteBatchWorkload,
     DeleteSeqWorkload,
     RebuildWorkload,
@@ -129,6 +130,17 @@ def test_reconcile_workload_recovers_out_of_band_drift(_driven, tmp_path):
     assert set(res.phases) == {"response", "settle", "total"}
 
 
+def test_churn_workload_searches_under_sustained_write_churn(_driven, tmp_path):
+    # prepare() upserts `count` and deletes the previous iteration's `count` (then
+    # settles) every iteration — the untimed churn that fragments the index; the
+    # timed run_one searches the bank. A read path, so response-only.
+    res = run_async(_measure(tmp_path, ChurnWorkload(count=4, corpus_size=24), repeats=2, warmup=1))
+    assert res.workload == "churn"
+    assert res.distribution.n == 2  # post-warmup repeats
+    assert set(res.phases) == {"response"}  # churn is untimed prepare; only the search is timed
+    assert res.items == 4  # the query bank (== count here, capped at 20)
+
+
 def test_ingest_workload_imports_a_cold_package(_driven, tmp_path):
     # measure_ingest exports the corpus to a package, then imports it into a fresh
     # empty collection per iteration (its own boot lifecycle, not a shared boot).
@@ -141,7 +153,7 @@ def test_ingest_workload_imports_a_cold_package(_driven, tmp_path):
 
 def test_build_workload_scales_ops_uniformly_excepting_rebuild() -> None:
     # --ops N is applied uniformly as each workload's per-iteration count.
-    for name in ("search-batch", "search-seq", "upsert-batch", "delete-seq", "reconcile"):
+    for name in ("search-batch", "search-seq", "upsert-batch", "delete-seq", "reconcile", "churn"):
         assert getattr(build_workload(name, ops=7), "_count") == 7  # noqa: B009
     # rebuild is the exception — an O(collection) pass with no per-op N.
     assert build_workload("rebuild", ops=7).name == "rebuild"

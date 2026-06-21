@@ -15,8 +15,11 @@ Each read/write op comes in two shapes that mirror the batching axis:
 - ``delete-{batch,seq}`` — one ``delete_notes`` call with N ids vs N calls of one
   id (one maintained delete op each).
 
-Plus ``rebuild`` (the O(collection) index rebuild) and ``reconcile`` (out-of-band
-drift recovery). A true *ingest* (cold import of a synthetic package) is measured
+Plus ``rebuild`` (the O(collection) index rebuild), ``reconcile`` (out-of-band
+drift recovery), and ``churn`` (sustained insert/delete/search — the steady-state
+regime that fragments the FTS5 index, which a build-then-search run never sees;
+its *response* p50 drift across the run is the index-maintenance signal #938 reads).
+A true *ingest* (cold import of a synthetic package) is measured
 by ``driver.measure_ingest`` — it owns its own boot lifecycle, so it isn't a
 ``Workload`` here. The heavier *sync* and OCR sweeps are tracked as their own
 issues.
@@ -337,6 +340,68 @@ class ReconcileWorkload:
         await booted.harness.kernel.settle()
 
 
+def _churn_note(iteration: int, j: int) -> NoteInput:
+    # Deterministic per (iteration, j), in its own deck/tag so churn never collides
+    # with the loaded corpus.
+    rng = random.Random((iteration << 22) ^ (j ^ 0xC40))
+    body = " ".join(choose(rng, 12))
+    return NoteInput(
+        deck="Perf::Churn",
+        note_type="Basic",
+        tags=["perf-churn"],
+        fields={"Front": f"churn {iteration}-{j}", "Back": body},
+    )
+
+
+class ChurnWorkload:
+    """Sustained mixed insert/delete/search — the steady-state regime index
+    maintenance exists for, and which a build-then-search benchmark cannot see.
+
+    Each iteration (UNTIMED ``prepare``) churns the FTS5 index: upsert ``count``
+    fresh notes through the maintained ``upsert_notes`` path, delete the PREVIOUS
+    iteration's ``count`` notes, then settle to quiescence. Across the run, inserts
+    add level-0 segments and deletes write delete-keys into new b-trees, so
+    fragmentation accumulates the way real use accumulates it — the live churned set
+    stays ~``count``, but the index does NOT, absent compaction. The TIMED
+    ``run_one`` then searches a fixed query bank, so the *response* p50 across the
+    run is the search-latency DRIFT as the index fragments: flat with the folded
+    merge (#938), climbing without it. Run the same boot with and without compaction
+    for the A/B — the divergence is the maintenance win."""
+
+    name = "churn"
+    mutates = True
+
+    def __init__(self, *, count: int = DEFAULT_OPS, corpus_size: int = 0) -> None:
+        self._count = count
+        self._topics = n_topics(corpus_size)
+        self._upserts: list[list[NoteInput]] = []
+        self._queries: list[str] = []
+        self._ids: list[list[int]] = []
+
+    async def setup(self, booted: Booted, iterations: int) -> None:
+        # Per-iteration churn notes (untimed text gen) + a fixed query bank sized to
+        # the corpus topics (like the search workloads) so the searches actually hit.
+        self._upserts = [[_churn_note(i, j) for j in range(self._count)] for i in range(iterations)]
+        rng = random.Random(0xC0FFEE)
+        self._queries = [_query(rng, self._topics) for _ in range(min(max(self._count, 1), 20))]
+        self._ids = [[] for _ in range(iterations)]
+
+    async def prepare(self, booted: Booted, iteration: int) -> None:
+        resp = await booted.call("upsert_notes", notes=self._upserts[iteration])
+        self._ids[iteration] = [r.id for r in resp.results if r.status in ("created", "updated")]
+        if iteration > 0 and self._ids[iteration - 1]:
+            await booted.call("delete_notes", ids=self._ids[iteration - 1])
+        # Drain so the inserts AND the delete-keys are committed to the index before
+        # the timed search — the fragmentation is real, not still pending.
+        await booted.harness.kernel.settle()
+
+    async def run_one(self, booted: Booted, iteration: int) -> int:
+        await booted.call(
+            "search_notes", queries=self._queries, ids=[], limit=20, tags=[], exclude_ids=[]
+        )
+        return len(self._queries)
+
+
 #: name → workload class.
 WORKLOADS = {
     w.name: w
@@ -349,6 +414,7 @@ WORKLOADS = {
         DeleteBatchWorkload,
         DeleteSeqWorkload,
         ReconcileWorkload,
+        ChurnWorkload,
     )
 }
 
