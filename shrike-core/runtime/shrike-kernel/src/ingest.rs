@@ -407,6 +407,11 @@ pub struct Ingestor {
     recognition_gate: RecognitionGate,
     tag_keys: Arc<TagKeyMap>,
     tag_refresh: Arc<TagRefresher>,
+    /// Debounced re-materialize of the derived store's per-write-stable snapshots
+    /// (the trigram-DF table the fuzzy prune reads) — poked when an `ingest_many`/
+    /// `remove` changed the index, so the snapshot tracks incremental writes
+    /// between rebuilds (which refresh it inline).
+    df_refresh: Arc<crate::derived_refresh::DerivedSnapshotRefresher>,
     /// `Arc`-wrapped so the derived watermark resolve+stamp can ride the same
     /// compute-pool hop as the derived write it certifies (a clone moves into the
     /// closure). The index floor stays resolved on the actor; both fields share
@@ -438,6 +443,7 @@ impl Ingestor {
         recognition_gate: RecognitionGate,
         tag_keys: Arc<TagKeyMap>,
         tag_refresh: Arc<TagRefresher>,
+        df_refresh: Arc<crate::derived_refresh::DerivedSnapshotRefresher>,
     ) -> Arc<Self> {
         Arc::new(Self {
             collection,
@@ -447,6 +453,7 @@ impl Ingestor {
             recognition_gate,
             tag_keys,
             tag_refresh,
+            df_refresh,
             floors: Arc::new(Mutex::new(WatermarkFloors::default())),
             drain_panics: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             outstanding: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -641,6 +648,7 @@ impl Ingestor {
             group_derived_rows(rows, &written)
         };
         let removals: Vec<i64> = to_remove.to_vec();
+        let had_derived_change = !batch.is_empty() || !removals.is_empty();
         let derived_ok = runtime::dispatch_compute(move || {
             Ok::<bool, NativeError>(apply_derived_writes(
                 &*derived,
@@ -653,6 +661,14 @@ impl Ingestor {
         })
         .await
         .unwrap_or(false);
+
+        // The trigram-DF snapshot the fuzzy prune reads is materialized at rebuild;
+        // an incremental field write/removal drifts it, so poke the debounced
+        // refresh to re-materialize once the batch settles. Best-effort (the prune
+        // tolerates a stale snapshot), so gate only on the write having succeeded.
+        if had_derived_change && derived_ok {
+            self.df_refresh.request();
+        }
 
         if let Some(v) =
             self.resolve_index(if index_ok { advance_to } else { floor_on_fail }, index_ok)
@@ -1480,6 +1496,9 @@ mod tests {
                 return Err(NativeError::internal("derived ingest failed (simulated)"));
             }
             self.inner.ingest_many(notes, source)
+        }
+        fn refresh_derived_snapshots(&self) -> NativeResult<()> {
+            self.inner.refresh_derived_snapshots()
         }
         fn remove(&self, ids: &[i64], source: Option<&str>) -> NativeResult<()> {
             self.record("remove");

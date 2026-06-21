@@ -1628,6 +1628,9 @@ impl shrike_store::DerivedStore for DerivedEngine {
     ) -> NativeResult<()> {
         Self::ingest_many(self, notes, source)
     }
+    fn refresh_derived_snapshots(&self) -> NativeResult<()> {
+        Self::refresh_trigram_df(self)
+    }
     fn remove(&self, note_ids: &[i64], source: Option<&str>) -> NativeResult<()> {
         Self::remove(self, note_ids, source)
     }
@@ -3806,6 +3809,58 @@ mod lexical_tests {
             snapshot, live,
             "trigram_df snapshot diverged from idx_vocab"
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn refresh_derived_snapshots_picks_up_incrementally_added_trigrams() {
+        // The #955 fix: a rebuild materializes trigram_df, but an incremental
+        // ingest_many adds a note whose NOVEL trigram the snapshot doesn't know (it
+        // is refreshed only at rebuild). refresh_derived_snapshots re-materializes
+        // from the live index, so the fuzzy prune sees the new trigram with no full
+        // rebuild — the debounced ingest-tail refresh's job, here driven directly.
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-derived-dfincr-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
+        build_snapshot_live(
+            &e,
+            &[(1, "field".into(), "Front".into(), "alpha beta".into())],
+            1,
+        )
+        .unwrap();
+        // Incremental write (NOT a rebuild) of a note carrying a novel trigram "zqw".
+        e.ingest_many(&[(2, vec![("Front".into(), "zqwx".into())])], "field")
+            .unwrap();
+        {
+            // Stale: the rebuild's snapshot predates the incremental write, so the
+            // new trigram is absent (DF 0) — the fuzzy prune would mis-rank it.
+            let conn = e.read_pool.checkout().unwrap();
+            assert_eq!(
+                DerivedEngine::trigram_dfs(&conn, &["zqw"])
+                    .unwrap()
+                    .get("zqw"),
+                None,
+                "the snapshot is stale before the refresh"
+            );
+        }
+        shrike_store::DerivedStore::refresh_derived_snapshots(&e).unwrap();
+        {
+            let conn = e.read_pool.checkout().unwrap();
+            assert_eq!(
+                DerivedEngine::trigram_dfs(&conn, &["zqw"])
+                    .unwrap()
+                    .get("zqw"),
+                Some(&1),
+                "refresh picks up the incrementally-added trigram"
+            );
+        }
         std::fs::remove_dir_all(dir).ok();
     }
 
