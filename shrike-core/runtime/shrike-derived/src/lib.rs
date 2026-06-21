@@ -67,12 +67,36 @@ pub const fn sqlite_bundled() -> bool {
     cfg!(feature = "bundled")
 }
 
+/// One-time, process-global SQLite tuning, applied before the first connection
+/// opens. Disabling memory-statistics bookkeeping removes the global mutex that
+/// `sqlite3_malloc`/`free` otherwise take on EVERY allocation: the pooled
+/// concurrent derived reads (FTS5 segment iteration allocates per page) serialize
+/// on that one lock, and a profile of the parallel search showed nearly all its
+/// time in SQLite lock/unlock. Called from every connection-open entry point so it
+/// runs before SQLite initializes for this crate; best-effort otherwise — a no-op
+/// (`SQLITE_MISUSE`) if something already initialized SQLite, recorded at DEBUG.
+fn configure_sqlite_perf() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        // SAFETY: `sqlite3_config` is the variadic C configuration API;
+        // `SQLITE_CONFIG_MEMSTATUS` consumes exactly one C int (the on/off flag),
+        // which is what is passed. Calling it before SQLite is initialized is the
+        // documented contract; the `Once` plus calling this ahead of every
+        // `Connection::open*` in this crate keeps it ahead of this build's init.
+        let rc = unsafe { rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 0) };
+        if rc != rusqlite::ffi::SQLITE_OK {
+            tracing::debug!(rc, "sqlite memstatus tuning skipped (already initialized)");
+        }
+    });
+}
+
 /// Whether the linked SQLite has FTS5 with the trigram tokenizer.
 ///
 /// Probed on a throwaway in-memory connection — the same check the stdlib
 /// engine's probe performs. Trivially true under the bundled default; genuinely
 /// load-bearing when linked against a platform SQLite.
 pub fn fts5_trigram_available() -> bool {
+    configure_sqlite_perf();
     let Ok(conn) = Connection::open_in_memory() else {
         return false;
     };
@@ -128,6 +152,7 @@ impl ReadPool {
     /// `PRAGMA query_only` was the alternative and is unusable: it rejects the
     /// `CREATE TEMP TABLE` the staging needs, failing as `readonly`.)
     fn open_read_conn(path: &str) -> NativeResult<Connection> {
+        configure_sqlite_perf();
         let conn = Connection::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -300,6 +325,7 @@ impl DerivedEngine {
     ///
     /// Returns an error if the database cannot be opened or its schema migrated.
     pub fn open(path: &str, schema_version: i64) -> NativeResult<Self> {
+        configure_sqlite_perf();
         let conn = Connection::open(path).map_err(db_err)?;
         // WAL + synchronous=NORMAL. Reads run on a separate connection pool
         // ([`ReadPool`]); WAL is what lets those pooled reads proceed
