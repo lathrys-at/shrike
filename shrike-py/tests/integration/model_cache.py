@@ -295,7 +295,7 @@ def cached_onnx_fp32_model_dir(fallback_dir: Path) -> Path:
 
 
 def cached_clip_model_dir(fallback_dir: Path) -> Path:
-    """The pinned small CLIP dir (int8 text+vision graphs, 512-dim shared space)."""
+    """The pinned small CLIP dir (q4 text+vision graphs, 512-dim shared space)."""
     return _cached_model_dir(fallback_dir, CLIP_MODEL_DIR_NAME, CLIP_MODEL_FILES)
 
 
