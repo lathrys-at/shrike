@@ -446,6 +446,25 @@ impl DerivedEngine {
     const IDX_DDL: &'static str =
         "CREATE VIRTUAL TABLE IF NOT EXISTS idx USING fts5(txt, tokenize='trigram')";
 
+    /// FTS5 `automerge` floor for `idx`/`idx_shadow`: below the default 4 so the
+    /// index merges its level-0 segments more aggressively, keeping a `MATCH`'s
+    /// segment count (hence its cost) lower under steady churn. The merge work is
+    /// the single writer's, fully off the pooled read path (#938), so the only
+    /// ceiling it costs against is ingest throughput. Persists in FTS5's `%_config`.
+    const AUTOMERGE_SEGMENTS: i64 = 2;
+
+    /// Set `automerge` on an FTS5 table (`idx` or `idx_shadow`). Idempotent — the
+    /// config row is upserted, so it applies to a freshly-created table and
+    /// re-asserts the floor on an existing store at every open.
+    fn set_automerge(conn: &Connection, table: &str) -> NativeResult<()> {
+        conn.execute(
+            &format!("INSERT INTO {table}({table}, rank) VALUES('automerge', ?1)"),
+            [Self::AUTOMERGE_SEGMENTS],
+        )
+        .map_err(db_err)?;
+        Ok(())
+    }
+
     /// A read-only view over `idx`'s vocabulary: `(term, doc, cnt)` per trigram,
     /// where `doc` is the document frequency. The fuzzy path reads it to prune the
     /// common (high-DF) trigrams that bloat the match set. fts5vocab resolves `idx`
@@ -455,6 +474,7 @@ impl DerivedEngine {
 
     fn create_tables(conn: &Connection) -> NativeResult<()> {
         conn.execute(Self::IDX_DDL, []).map_err(db_err)?;
+        Self::set_automerge(conn, "idx")?;
         conn.execute(Self::IDX_VOCAB_DDL, []).map_err(db_err)?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS rowmap(\
@@ -856,6 +876,13 @@ impl DerivedEngine {
             let chunk = chunk?;
             total += self.insert_field_chunk_to_shadow(&chunk)?;
         }
+        // Merge the shadow down to one segment BEFORE the swap. The chunk-per-
+        // transaction stream leaves it fragmented across many segments, and this is
+        // the cheapest place to compact it: on the shadow OFF the live tables (no
+        // recall window) and OUTSIDE the swap transaction (the swap stays short). So
+        // the index search hammers lands compact, not fragmented — the structural
+        // rung of #938, justified by the chunked-commit fact, not a benchmark.
+        self.optimize_shadow()?;
         // Atomic swap: prune dead-note rows, rename the shadow over the live
         // tables, stamp col_mod — all in ONE short transaction.
         self.swap_shadow_and_stamp(live_notes, col_mod)?;
@@ -872,6 +899,7 @@ impl DerivedEngine {
         )
         .map_err(db_err)?;
         conn.execute(Self::IDX_SHADOW_DDL, []).map_err(db_err)?;
+        Self::set_automerge(&conn, "idx_shadow")?;
         conn.execute(
             "CREATE TABLE rowmap_shadow(\
              rowid INTEGER PRIMARY KEY, note_id INTEGER NOT NULL, \
@@ -879,6 +907,18 @@ impl DerivedEngine {
             [],
         )
         .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Merge `idx_shadow` down to one segment (FTS5 `optimize`), on the write
+    /// connection. Run BEFORE the swap so a freshly-built index lands compact with
+    /// no recall window (the shadow is off the live tables). FTS5 `optimize` is
+    /// physical-only — rowids, content, and the idx↔rowmap pairing are preserved —
+    /// so the col_mod watermark and DF-based fuzzy ranking are untouched.
+    fn optimize_shadow(&self) -> NativeResult<()> {
+        let conn = self.lock();
+        conn.execute("INSERT INTO idx_shadow(idx_shadow) VALUES('optimize')", [])
+            .map_err(db_err)?;
         Ok(())
     }
 
