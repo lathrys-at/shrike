@@ -2873,9 +2873,13 @@ impl Kernel {
                     .await??
             };
 
-            // Phase 2 (compute, forked): the semantic + lexical discovery reads.
-            // Both `dispatch_compute` futures are scheduled eagerly, so they run
-            // concurrently on the pool regardless of await order.
+            // Phase 2 (compute, forked): the semantic + the two lexical discovery
+            // reads, each its own `dispatch_compute` job. All futures are scheduled
+            // eagerly, so they run concurrently on the pool regardless of await
+            // order. The substring and fuzzy reads are split (rather than one
+            // `search_lexical` job that runs them in sequence) so each checks out
+            // its OWN derived read connection and they run in parallel under WAL —
+            // the derived reads dominate the latency, so this unstripes them.
             let sem_fut = {
                 let engine = Arc::clone(&engine);
                 let vectors = vectors.clone();
@@ -2888,16 +2892,30 @@ impl Kernel {
                     }
                 })
             };
-            let lex_fut = {
+            let substr_fut = {
+                let derived = Arc::clone(&derived);
                 let sources = sources.clone();
                 let lex_scope = lex_scope.clone();
                 let args = args.clone();
                 crate::runtime::dispatch_compute(move || {
-                    actions::search_lexical(&*derived, &sources, lex_scope.as_deref(), &args)
+                    actions::search_substring_part(&*derived, &sources, lex_scope.as_deref(), &args)
                 })
             };
+            let fuzzy_fut = {
+                let derived = Arc::clone(&derived);
+                let sources = sources.clone();
+                let lex_scope = lex_scope.clone();
+                let args = args.clone();
+                crate::runtime::dispatch_compute(move || {
+                    actions::search_fuzzy_part(&*derived, &sources, lex_scope.as_deref(), &args)
+                })
+            };
+            // Collect by NAME, not completion order — the assembly's RRF position
+            // and exact-tier insertion order are deterministic regardless of which
+            // read finished first.
             let sem_by_source = sem_fut.await?;
-            let (substr_batch, fuzzy_batch) = lex_fut.await?;
+            let substr_batch = substr_fut.await?;
+            let fuzzy_batch = fuzzy_fut.await?;
             let discovery = actions::Discovery {
                 sem_by_source,
                 substr_batch,

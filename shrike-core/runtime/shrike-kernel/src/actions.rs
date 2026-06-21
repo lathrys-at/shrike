@@ -1297,44 +1297,87 @@ pub(crate) fn search_semantic(
     index.search_by_modality(vectors, fetch_k, Some(&note_spaces))
 }
 
-/// The lexical DISCOVERY reads: the batched substring + fuzzy FTS5 queries over
-/// every QUERY source, in source order. No `core`. `lex_scope` is the
-/// pre-computed deck/tag scope; each batch locks the derived connection, stages
-/// the scope id set, and compiles its statement ONCE for the whole set. Empty
-/// results when there are no query sources.
+/// The query texts (in source order) and the hidden-source exclusion list shared
+/// by both lexical reads. Borrows from `sources`/`args` — no allocation beyond the
+/// two `&str` vectors.
+fn lexical_query_inputs<'a>(
+    sources: &'a [SearchSource],
+    args: &'a SearchArgs,
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let query_texts = sources
+        .iter()
+        .filter(|s| s.is_query)
+        .map(|s| s.text.as_str())
+        .collect();
+    let hidden = args
+        .hidden_lexical_sources
+        .iter()
+        .map(String::as_str)
+        .collect();
+    (query_texts, hidden)
+}
+
+/// The substring half of the lexical DISCOVERY read: the batched substring FTS5
+/// query over every QUERY source, in source order. One entry per query source; a
+/// `None` means "the store couldn't serve this query" → the per-source fallback in
+/// the assembly. Empty when there are no query sources.
+///
+/// Split out from [`search_lexical`] as an independent leaf so [`crate::Kernel::
+/// search_fused`] can fork it onto the compute pool ALONGSIDE [`search_fuzzy_part`]
+/// — each checks out its own derived read connection, so the two run concurrently
+/// instead of taking turns. The over-fetch is `top_k + |distinct exclude|`, so the
+/// post-filter still has `top_k` survivors after the excluded ids drop out.
 ///
 /// A REAL derived-read failure (e.g. a SQLITE_BUSY outliving the retry) surfaces
 /// here as an `Err` and must never become a silent field-text fallback — OCR/ASR
-/// text lives only in the derived store and the field scan can't serve it. `Ok`
-/// carries one entry per query source; a `None` substring entry means "the store
-/// couldn't serve this query" → the per-source fallback in the assembly.
+/// text lives only in the derived store and the field scan can't serve it.
+pub(crate) fn search_substring_part(
+    derived: &dyn DerivedStore,
+    sources: &[SearchSource],
+    lex_scope: Option<&[i64]>,
+    args: &SearchArgs,
+) -> NativeResult<Vec<Option<Vec<LexicalRow>>>> {
+    let (query_texts, hidden) = lexical_query_inputs(sources, args);
+    if query_texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let exclude: HashSet<i64> = args.exclude.iter().copied().collect();
+    derived.search_substring_batch(
+        &query_texts,
+        (args.top_k + exclude.len()) as i64,
+        lex_scope,
+        &hidden,
+    )
+}
+
+/// The fuzzy half of the lexical DISCOVERY read — the forkable counterpart to
+/// [`search_substring_part`] (see it for the fork rationale). One overlap-ranked
+/// entry per query source, in source order; empty when there are no query sources.
+pub(crate) fn search_fuzzy_part(
+    derived: &dyn DerivedStore,
+    sources: &[SearchSource],
+    lex_scope: Option<&[i64]>,
+    args: &SearchArgs,
+) -> NativeResult<Vec<Vec<LexicalRow>>> {
+    let (query_texts, hidden) = lexical_query_inputs(sources, args);
+    if query_texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    derived.search_fuzzy_batch(&query_texts, args.top_k as i64, lex_scope, &hidden)
+}
+
+/// The lexical DISCOVERY reads (substring + fuzzy), sequentially on the caller's
+/// thread — the sync composition the binding `search_notes` path uses.
+/// [`crate::Kernel::search_fused`] forks the two halves instead (see
+/// [`search_substring_part`]).
 pub(crate) fn search_lexical(
     derived: &dyn DerivedStore,
     sources: &[SearchSource],
     lex_scope: Option<&[i64]>,
     args: &SearchArgs,
 ) -> NativeResult<LexicalBatches> {
-    let exclude: HashSet<i64> = args.exclude.iter().copied().collect();
-    let query_texts: Vec<&str> = sources
-        .iter()
-        .filter(|s| s.is_query)
-        .map(|s| s.text.as_str())
-        .collect();
-    if query_texts.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    let hidden: Vec<&str> = args
-        .hidden_lexical_sources
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let sub = derived.search_substring_batch(
-        &query_texts,
-        (args.top_k + exclude.len()) as i64,
-        lex_scope,
-        &hidden,
-    )?;
-    let fz = derived.search_fuzzy_batch(&query_texts, args.top_k as i64, lex_scope, &hidden)?;
+    let sub = search_substring_part(derived, sources, lex_scope, args)?;
+    let fz = search_fuzzy_part(derived, sources, lex_scope, args)?;
     Ok((sub, fz))
 }
 
