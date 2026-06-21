@@ -447,15 +447,27 @@ impl DerivedEngine {
         "CREATE VIRTUAL TABLE IF NOT EXISTS idx USING fts5(txt, tokenize='trigram')";
 
     /// A read-only view over `idx`'s vocabulary: `(term, doc, cnt)` per trigram,
-    /// where `doc` is the document frequency. The fuzzy path reads it to prune the
-    /// common (high-DF) trigrams that bloat the match set. fts5vocab resolves `idx`
-    /// by name at query time, so it survives the rebuild's drop-and-rename of `idx`.
+    /// where `doc` is the document frequency. fts5vocab resolves `idx` by name at
+    /// query time, so it survives the rebuild's drop-and-rename of `idx`. It
+    /// computes `doc` by walking each term's doclist, so the fuzzy prune reads DF
+    /// from the materialized `trigram_df` snapshot instead; this view is the SOURCE
+    /// of that snapshot (see [`Self::refresh_trigram_df`]).
     const IDX_VOCAB_DDL: &'static str =
         "CREATE VIRTUAL TABLE IF NOT EXISTS idx_vocab USING fts5vocab('idx', 'row')";
+
+    /// Materialized trigram document frequency: a plain table snapshot of
+    /// `idx_vocab`'s `(term, doc)`, refreshed at the rebuild tail
+    /// ([`Self::refresh_trigram_df`]). The fuzzy prune reads DF from HERE — a
+    /// primary-key lookup on the mmap'd main file — rather than re-counting doclists
+    /// through fts5vocab on every query. A plain table (not a view), so a `term IN
+    /// (…)`/`term = ?` lookup is a real index seek, not a vocabulary scan.
+    const TRIGRAM_DF_DDL: &'static str =
+        "CREATE TABLE IF NOT EXISTS trigram_df(term TEXT PRIMARY KEY, df INTEGER NOT NULL)";
 
     fn create_tables(conn: &Connection) -> NativeResult<()> {
         conn.execute(Self::IDX_DDL, []).map_err(db_err)?;
         conn.execute(Self::IDX_VOCAB_DDL, []).map_err(db_err)?;
+        conn.execute(Self::TRIGRAM_DF_DDL, []).map_err(db_err)?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS rowmap(\
              rowid INTEGER PRIMARY KEY, note_id INTEGER NOT NULL, \
@@ -865,7 +877,42 @@ impl DerivedEngine {
         // Atomic swap: prune dead-note rows, rename the shadow over the live
         // tables, stamp col_mod — all in ONE short transaction.
         self.swap_shadow_and_stamp(live_notes, col_mod)?;
+        // Re-materialize the DF snapshot the fuzzy prune reads. Synchronous, so a
+        // finished rebuild leaves it fresh; best-effort, because a stale snapshot
+        // only degrades the prune (which tolerates drift), never correctness — it
+        // must not fail an otherwise-successful rebuild.
+        if let Err(e) = self.refresh_trigram_df() {
+            tracing::warn!(
+                error = %e,
+                "trigram_df refresh failed; fuzzy prune will use a stale DF snapshot"
+            );
+        }
         Ok(total)
+    }
+
+    /// Re-materialize [`Self::TRIGRAM_DF_DDL`]'s `trigram_df` from the live index's
+    /// `idx_vocab`. fts5vocab computes `doc` by walking each term's doclist, so doing
+    /// it once here lets the fuzzy prune read DF as a cheap primary-key lookup
+    /// instead of re-counting doclists per query. Its own short transaction, so a
+    /// concurrent reader sees the prior snapshot until it commits — never an empty
+    /// table. DF only orders trigrams for the prune, which tolerates drift (a stale
+    /// snapshot shifts WHICH trigrams a query scans, not whether a match counts), so
+    /// between rebuilds the snapshot may lag the live index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vocabulary read or the table rewrite fails.
+    fn refresh_trigram_df(&self) -> NativeResult<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(db_err)?;
+        tx.execute("DELETE FROM trigram_df", []).map_err(db_err)?;
+        tx.execute(
+            "INSERT INTO trigram_df(term, df) SELECT term, doc FROM idx_vocab",
+            [],
+        )
+        .map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
+        Ok(())
     }
 
     /// Drop any leftover shadow tables (a prior aborted rebuild) and create
@@ -1512,38 +1559,36 @@ impl DerivedEngine {
         Ok(out)
     }
 
-    /// Document frequency (number of indexed rows containing the term) for each of
-    /// `terms`, from the `idx_vocab` view — the fuzzy path reads it to prune common
-    /// trigrams. A term absent from the result is absent from the index (DF 0). The
-    /// `term IN (…)` lookup is a pushed-down seek (not a vocab scan); chunked under
-    /// the inline-parameter cap. Reads on the passed [`ReadPool`] connection.
+    /// Document frequency for each of `terms`, from the materialized `trigram_df`
+    /// snapshot — the fuzzy path reads it to prune common trigrams. A term absent
+    /// from the result is absent from the SNAPSHOT (treated as DF 0, sorting last in
+    /// the prune); see [`Self::refresh_trigram_df`] for the freshness contract.
+    /// Per-term `term = ?` primary-key seek on the plain table (mmap-served, one
+    /// cached statement), NOT a doclist count through fts5vocab. Reads on the passed
+    /// [`ReadPool`] connection.
     ///
     /// # Errors
     ///
-    /// Returns an error if the vocabulary lookup fails.
+    /// Returns an error if the lookup fails.
     fn trigram_dfs(
         conn: &Connection,
         terms: &[&str],
     ) -> NativeResult<std::collections::HashMap<String, i64>> {
-        let mut out: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         if terms.is_empty() {
-            return Ok(out);
+            return Ok(std::collections::HashMap::new());
         }
-        for chunk in terms.chunks(Self::INLINE_ID_MAX) {
-            let marks = vec!["?"; chunk.len()].join(",");
-            let sql = format!("SELECT term, doc FROM idx_vocab WHERE term IN ({marks})");
-            let run = || -> rusqlite::Result<std::collections::HashMap<String, i64>> {
-                let mut stmt = conn.prepare_cached(&sql)?;
-                let mut q = stmt.query(rusqlite::params_from_iter(chunk.iter()))?;
-                let mut m = std::collections::HashMap::new();
-                while let Some(r) = q.next()? {
-                    m.insert(r.get::<_, String>(0)?, r.get::<_, i64>(1)?);
+        let run = || -> rusqlite::Result<std::collections::HashMap<String, i64>> {
+            let mut stmt = conn.prepare_cached("SELECT df FROM trigram_df WHERE term = ?1")?;
+            let mut m = std::collections::HashMap::new();
+            for &term in terms {
+                let mut q = stmt.query([term])?;
+                if let Some(r) = q.next()? {
+                    m.insert(term.to_string(), r.get::<_, i64>(0)?);
                 }
-                Ok(m)
-            };
-            out.extend(with_busy_retry(run)?);
-        }
-        Ok(out)
+            }
+            Ok(m)
+        };
+        with_busy_retry(run)
     }
 }
 
@@ -3641,6 +3686,68 @@ mod lexical_tests {
         assert_eq!(df.get("abc"), Some(&2), "'abc' is in both docs");
         assert_eq!(df.get("xyz"), Some(&1), "'xyz' is in one doc");
         assert_eq!(df.get("qqq"), None, "absent trigram has no row (DF 0)");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn trigram_df_snapshot_equals_live_vocab_after_build() {
+        // The materialized DF the fuzzy prune reads must equal what fts5vocab would
+        // compute live — so on a freshly-built index the prune picks the SAME rare
+        // trigrams and fuzzy results are identical to the always-fresh-vocab path.
+        // (Staleness between rebuilds is by design; this pins the fresh case.)
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-derived-dfsnap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
+        build_snapshot_live(
+            &e,
+            &[
+                (
+                    1,
+                    "field".into(),
+                    "Front".into(),
+                    "the quick brown fox".into(),
+                ),
+                (
+                    2,
+                    "field".into(),
+                    "Front".into(),
+                    "the lazy brown dog".into(),
+                ),
+                (
+                    3,
+                    "field".into(),
+                    "Front".into(),
+                    "quick quick quick".into(),
+                ),
+            ],
+            1,
+        )
+        .unwrap();
+        let conn = e.read_pool.checkout().unwrap();
+        let collect = |sql: &str| -> std::collections::BTreeMap<String, i64> {
+            let mut stmt = conn.prepare(sql).unwrap();
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let live = collect("SELECT term, doc FROM idx_vocab");
+        let snapshot = collect("SELECT term, df FROM trigram_df");
+        assert!(
+            !snapshot.is_empty(),
+            "the build must materialize trigram_df"
+        );
+        assert_eq!(
+            snapshot, live,
+            "trigram_df snapshot diverged from idx_vocab"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
