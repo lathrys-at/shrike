@@ -66,7 +66,7 @@ class DrivenRuntime:
         (nothing has touched the runtime yet). The seam is set-once, so a reused
         process where it was already installed still reports ``True`` and
         :meth:`start` is idempotent either way."""
-        self._driven = bool(shrike_native.init_driven_runtime())
+        self._driven = bool(shrike_native.init_driven_runtime(self._compute_threads))
 
     def start(self) -> None:
         """Spawn the committed N + 2 driver threads, each parked in its native

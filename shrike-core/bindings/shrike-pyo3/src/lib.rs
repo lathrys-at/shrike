@@ -229,7 +229,7 @@ fn decode_media_b64(py: Python<'_>, data: String) -> PyResult<Vec<u8>> {
 /// set-once), `False` only if the runtime fails to build.
 #[cfg(feature = "anki-core")]
 #[pyfunction]
-fn init_driven_runtime(py: Python<'_>) -> PyResult<bool> {
+fn init_driven_runtime(py: Python<'_>, compute_workers: usize) -> PyResult<bool> {
     py.detach(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -239,6 +239,9 @@ fn init_driven_runtime(py: Python<'_>) -> PyResult<bool> {
         // Err carrying the runtime back; the seam is set-once, so the first
         // install stands. `is_driven` reports whether that install was driven.
         let _ = shrike_kernel::init_driven_runtime(runtime);
+        // Record the harness's committed compute-pool width so the kernel can fan
+        // parallel work (the chunked lexical reads) across exactly that many workers.
+        shrike_kernel::set_compute_width(compute_workers);
         Ok(shrike_kernel::is_driven())
     })
     .map_err(to_py_err)

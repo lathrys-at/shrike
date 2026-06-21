@@ -1317,67 +1317,72 @@ fn lexical_query_inputs<'a>(
     (query_texts, hidden)
 }
 
-/// The substring half of the lexical DISCOVERY read: the batched substring FTS5
-/// query over every QUERY source, in source order. One entry per query source; a
-/// `None` means "the store couldn't serve this query" → the per-source fallback in
-/// the assembly. Empty when there are no query sources.
+/// The substring lexical read over a slice of query texts (already extracted from
+/// the query sources). One entry per query text, in order; a `None` means "the
+/// store couldn't serve this query" → the per-source fallback in the assembly.
+/// Empty input yields an empty result.
 ///
-/// Split out from [`search_lexical`] as an independent leaf so [`crate::Kernel::
-/// search_fused`] can fork it onto the compute pool ALONGSIDE [`search_fuzzy_part`]
-/// — each checks out its own derived read connection, so the two run concurrently
-/// instead of taking turns. The over-fetch is `top_k + |distinct exclude|`, so the
-/// post-filter still has `top_k` survivors after the excluded ids drop out.
-///
-/// A REAL derived-read failure (e.g. a SQLITE_BUSY outliving the retry) surfaces
-/// here as an `Err` and must never become a silent field-text fallback — OCR/ASR
-/// text lives only in the derived store and the field scan can't serve it.
-pub(crate) fn search_substring_part(
+/// [`crate::Kernel::search_fused`] dispatches one of these per query-batch CHUNK
+/// so the per-query substring reads spread across the compute pool (each chunk
+/// checks out its own derived read connection); the sync [`search_lexical`] path
+/// calls it once over the whole batch. The over-fetch is `top_k + |distinct
+/// exclude|`, so the post-filter still has `top_k` survivors after the excluded
+/// ids drop out. A REAL derived-read failure surfaces as `Err` and must never
+/// become a silent field-text fallback — OCR/ASR text lives only in the derived
+/// store and the field scan can't serve it.
+pub(crate) fn search_substring_chunk(
     derived: &dyn DerivedStore,
-    sources: &[SearchSource],
+    query_texts: &[&str],
+    hidden: &[&str],
     lex_scope: Option<&[i64]>,
     args: &SearchArgs,
 ) -> NativeResult<Vec<Option<Vec<LexicalRow>>>> {
-    let (query_texts, hidden) = lexical_query_inputs(sources, args);
     if query_texts.is_empty() {
         return Ok(Vec::new());
     }
     let exclude: HashSet<i64> = args.exclude.iter().copied().collect();
     derived.search_substring_batch(
-        &query_texts,
+        query_texts,
         (args.top_k + exclude.len()) as i64,
         lex_scope,
-        &hidden,
+        hidden,
     )
 }
 
-/// The fuzzy half of the lexical DISCOVERY read — the forkable counterpart to
-/// [`search_substring_part`] (see it for the fork rationale). One overlap-ranked
-/// entry per query source, in source order; empty when there are no query sources.
-pub(crate) fn search_fuzzy_part(
+/// The fuzzy lexical read over a slice of query texts — the overlap-ranked
+/// counterpart to [`search_substring_chunk`] (see it for the chunking rationale).
+/// One entry per query text, in order; empty input yields an empty result.
+///
+/// Chunking trades a little of `search_fuzzy_batch`'s cross-query trigram-posting
+/// sharing (a trigram shared across chunks is read once per chunk) for the
+/// per-query parallelism — for a bank of distinct queries the pruned trigrams are
+/// mostly query-specific, so the lost sharing is small.
+pub(crate) fn search_fuzzy_chunk(
     derived: &dyn DerivedStore,
-    sources: &[SearchSource],
+    query_texts: &[&str],
+    hidden: &[&str],
     lex_scope: Option<&[i64]>,
     args: &SearchArgs,
 ) -> NativeResult<Vec<Vec<LexicalRow>>> {
-    let (query_texts, hidden) = lexical_query_inputs(sources, args);
     if query_texts.is_empty() {
         return Ok(Vec::new());
     }
-    derived.search_fuzzy_batch(&query_texts, args.top_k as i64, lex_scope, &hidden)
+    derived.search_fuzzy_batch(query_texts, args.top_k as i64, lex_scope, hidden)
 }
 
-/// The lexical DISCOVERY reads (substring + fuzzy), sequentially on the caller's
-/// thread — the sync composition the binding `search_notes` path uses.
-/// [`crate::Kernel::search_fused`] forks the two halves instead (see
-/// [`search_substring_part`]).
+/// The lexical DISCOVERY reads (substring + fuzzy), sequentially over the whole
+/// query batch on the caller's thread — the sync composition the binding
+/// `search_notes` path uses. [`crate::Kernel::search_fused`] instead chunks each
+/// read across the compute pool (see [`search_substring_chunk`]).
 pub(crate) fn search_lexical(
     derived: &dyn DerivedStore,
     sources: &[SearchSource],
     lex_scope: Option<&[i64]>,
     args: &SearchArgs,
 ) -> NativeResult<LexicalBatches> {
-    let sub = search_substring_part(derived, sources, lex_scope, args)?;
-    let fz = search_fuzzy_part(derived, sources, lex_scope, args)?;
+    let (query_texts, hidden) = lexical_query_inputs(sources, args);
+    let sub = search_substring_chunk(derived, &query_texts, &hidden, lex_scope, args)?;
+    let fz = search_fuzzy_chunk(derived, &query_texts, &hidden, lex_scope, args)?;
     Ok((sub, fz))
 }
 
