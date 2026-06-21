@@ -393,7 +393,6 @@ pub fn substring_info(content: Option<&NoteContent>, text: &str) -> Option<Subst
     let fields = content?;
     for (name, value) in fields {
         let value = shrike_derived::nfc(value);
-        let chars: Vec<char> = value.chars().collect();
         let lowered: Vec<char> = value.to_lowercase().chars().collect();
         let idx = match find_subsequence(&lowered, &needle) {
             Some(i) => i,
@@ -401,10 +400,14 @@ pub fn substring_info(content: Option<&NoteContent>, text: &str) -> Option<Subst
         };
         matched.push(name.clone());
         if snippet.is_none() {
+            // Original-case chars, built lazily: only a MATCHING field needs them
+            // (to slice the snippet), so a non-matching field — the common case in
+            // the exact loop, where most candidates are semantic/fuzzy — skips this
+            // allocation. Derived from the SAME normalized `value` as `lowered`, so a
+            // length-changing lowercasing drifts both identically and `idx` aligns.
+            let chars: Vec<char> = value.chars().collect();
             let start = idx.saturating_sub(30);
             let end = (idx + needle.len() + 30).min(chars.len());
-            // `chars` and `lowered` derive from the SAME normalized value, so a
-            // length-changing lowercasing drifts both identically and indices align.
             let end = end.min(chars.len());
             let mut frag: String = chars[start.min(chars.len())..end].iter().collect();
             if start > 0 {
