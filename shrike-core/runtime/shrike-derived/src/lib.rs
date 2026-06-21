@@ -2618,7 +2618,19 @@ impl DerivedEngine {
         pruned_terms: &[String],
         term_rowids: &std::collections::HashMap<String, Vec<i64>>,
     ) -> FxI64Map<usize> {
-        let mut overlap: FxI64Map<usize> = FxI64Map::default();
+        // Preallocate to the sum of the rare trigrams' posting lengths — the upper
+        // bound on distinct rowids (a rowid shared across trigrams just over-counts
+        // the bound). Building from empty otherwise grows-and-rehashes the table
+        // repeatedly (the `reserve_rehash` frame in the profile); one sized
+        // allocation skips all of it. The over-allocation is transient — the map is
+        // dropped at the end of the query.
+        let cap: usize = pruned_terms
+            .iter()
+            .filter_map(|t| term_rowids.get(t))
+            .map(Vec::len)
+            .sum();
+        let mut overlap: FxI64Map<usize> =
+            std::collections::HashMap::with_capacity_and_hasher(cap, Default::default());
         for term in pruned_terms {
             if let Some(rowids) = term_rowids.get(term) {
                 for &rid in rowids {
@@ -2644,12 +2656,14 @@ impl DerivedEngine {
     /// path does by never counting the excluded ones.
     fn rank_overlap(
         overlap: &FxI64Map<usize>,
-        seg_meta: &std::collections::HashMap<i64, (i64, String, String)>,
+        seg_meta: &FxI64Map<(i64, String, String)>,
         top_k: usize,
     ) -> Vec<(i64, String, String, i64)> {
         // Best segment per note: highest overlap, lowest rowid as the deterministic
-        // tie-break (so the chosen snippet segment is stable run to run).
-        let mut best: FxI64Map<(usize, i64)> = FxI64Map::default();
+        // tie-break (so the chosen snippet segment is stable run to run). Sized to
+        // `overlap` (the upper bound on distinct notes) so it never rehashes.
+        let mut best: FxI64Map<(usize, i64)> =
+            std::collections::HashMap::with_capacity_and_hasher(overlap.len(), Default::default());
         for (&rid, &count) in overlap {
             if count < FUZZY_MIN_SHARED {
                 continue;
@@ -2687,7 +2701,7 @@ impl DerivedEngine {
     fn merge_overlap(
         pruned_terms: &[String],
         term_rowids: &std::collections::HashMap<String, Vec<i64>>,
-        seg_meta: &std::collections::HashMap<i64, (i64, String, String)>,
+        seg_meta: &FxI64Map<(i64, String, String)>,
         top_k: usize,
     ) -> Vec<(i64, String, String, i64)> {
         let overlap = Self::accumulate_overlap(pruned_terms, term_rowids);
@@ -2960,12 +2974,11 @@ impl DerivedEngine {
         exclude_sources: &[&str],
     ) -> NativeResult<(
         std::collections::HashMap<String, Vec<i64>>,
-        std::collections::HashMap<i64, (i64, String, String)>,
+        FxI64Map<(i64, String, String)>,
     )> {
         let mut term_rowids: std::collections::HashMap<String, Vec<i64>> =
             std::collections::HashMap::new();
-        let mut seg_meta: std::collections::HashMap<i64, (i64, String, String)> =
-            std::collections::HashMap::new();
+        let mut seg_meta: FxI64Map<(i64, String, String)> = FxI64Map::default();
         if terms.is_empty() {
             return Ok((term_rowids, seg_meta));
         }
@@ -3112,9 +3125,11 @@ impl DerivedEngine {
         conn: &Connection,
         rowids: &[i64],
         exclude_sources: &[&str],
-    ) -> NativeResult<std::collections::HashMap<i64, (i64, String, String)>> {
-        let mut seg_meta: std::collections::HashMap<i64, (i64, String, String)> =
-            std::collections::HashMap::new();
+    ) -> NativeResult<FxI64Map<(i64, String, String)>> {
+        // Sized to the candidate set (minus any source-excluded rows) so the
+        // per-candidate inserts never grow-and-rehash the table.
+        let mut seg_meta: FxI64Map<(i64, String, String)> =
+            std::collections::HashMap::with_capacity_and_hasher(rowids.len(), Default::default());
         for chunk in rowids.chunks(Self::INLINE_ID_MAX) {
             let id_list = chunk
                 .iter()
