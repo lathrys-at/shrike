@@ -238,9 +238,9 @@ mod tests {
 // availability, the image activation floor, the index size for the
 // over-fetch clamp) is injected per call until the kernel internalizes it.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
-use shrike_derived::MIN_TRIGRAM;
+use shrike_derived::{FxI64Map, MIN_TRIGRAM};
 use shrike_schemas::{
     FuzzyMatch, Note, SearchMatch, SearchResultGroup, SignalContribution, SubstringInfo,
 };
@@ -556,14 +556,14 @@ impl Candidate {
 /// Insertion-ordered candidate cache: Python dict iteration order is part of
 /// the exact ranking's contract, so the order log rides along.
 struct NoteData {
-    map: HashMap<i64, Candidate>,
+    map: FxI64Map<Candidate>,
     order: Vec<i64>,
 }
 
 impl NoteData {
     fn new() -> Self {
         Self {
-            map: HashMap::new(),
+            map: FxI64Map::default(),
             order: Vec::new(),
         }
     }
@@ -604,11 +604,11 @@ fn in_scope(note: &Note, deck: Option<&str>, tags: &[String]) -> bool {
 /// `Note`; a missing/unreadable id is simply absent (skipped per note).
 fn read_notes_batch(
     core: &dyn Collection,
-    prefetch: &HashMap<i64, Note>,
+    prefetch: &FxI64Map<Note>,
     note_data: &NoteData,
     ids: &[i64],
-) -> HashMap<i64, Candidate> {
-    let mut out: HashMap<i64, Candidate> = HashMap::new();
+) -> FxI64Map<Candidate> {
+    let mut out: FxI64Map<Candidate> = FxI64Map::default();
     let mut need_fetch: Vec<i64> = Vec::new();
     for &nid in ids {
         if note_data.contains(nid) {
@@ -707,7 +707,7 @@ fn sigmoid(x: f64) -> f64 {
 /// it cleared) is unchanged — so a genuine cross-modal find (above-floor by
 /// construction) is preserved, while an ∅-gold ranking whose best is sub-floor
 /// is emptied.
-fn apply_image_floor(ranking: &mut Vec<i64>, score: &mut HashMap<i64, f64>, floor: Option<f64>) {
+fn apply_image_floor(ranking: &mut Vec<i64>, score: &mut FxI64Map<f64>, floor: Option<f64>) {
     let Some(floor) = floor else {
         return;
     };
@@ -724,7 +724,7 @@ struct SearchCtx<'a> {
     core: &'a dyn Collection,
     /// Cross-source prefetched notes (built once before the per-source loop), so
     /// hydration is a clone, not a per-source `note_dicts`. See [`read_notes_batch`].
-    prefetch: &'a HashMap<i64, Note>,
+    prefetch: &'a FxI64Map<Note>,
     exclude: &'a HashSet<i64>,
     args: &'a SearchArgs,
 }
@@ -760,7 +760,7 @@ fn rank_modality(
     ctx: SearchCtx,
     slice: ModalitySlice,
     note_data: &mut NoteData,
-    sem_score: &mut HashMap<i64, f64>,
+    sem_score: &mut FxI64Map<f64>,
     thresholded: bool,
 ) -> Vec<i64> {
     let SearchCtx {
@@ -921,14 +921,14 @@ fn collect_substring_candidates(
 /// [`FuzzyMatch`] directly — no intermediate tuple to misread.
 struct FuzzyRanking {
     ranking: Vec<i64>,
-    evidence: HashMap<i64, FuzzyMatch>,
+    evidence: FxI64Map<FuzzyMatch>,
 }
 
 impl FuzzyRanking {
     fn empty() -> Self {
         Self {
             ranking: Vec::new(),
-            evidence: HashMap::new(),
+            evidence: FxI64Map::default(),
         }
     }
 }
@@ -1008,7 +1008,7 @@ struct CrossSpaceContribution {
 struct AdmittedSpace {
     signal: String,
     ranking: Vec<i64>,
-    space_score: HashMap<i64, f64>,
+    space_score: FxI64Map<f64>,
     weight: f64,
 }
 
@@ -1039,7 +1039,7 @@ struct AdmittedSpace {
 fn fuse_cross_spaces(
     input: CrossSpaceInput,
     note_data: &mut NoteData,
-    sem_score: &mut HashMap<i64, f64>,
+    sem_score: &mut FxI64Map<f64>,
 ) -> CrossSpaceContribution {
     let CrossSpaceInput {
         ctx,
@@ -1098,7 +1098,7 @@ fn fuse_cross_spaces(
         if slice.keys.is_empty() {
             continue;
         }
-        let mut space_score: HashMap<i64, f64> = HashMap::new();
+        let mut space_score: FxI64Map<f64> = FxI64Map::default();
         let mut ranking_space_image = rank_modality(ctx, slice, note_data, &mut space_score, false);
         if ranking_space_image.is_empty() {
             continue;
@@ -1474,7 +1474,7 @@ pub(crate) fn search_assemble(
     // ids are never looked up, so drop them; ids not known until the loop
     // (tag members, secondary cross-space image hits) hydrate via
     // `read_notes_batch`'s per-source fallback.
-    let prefetch: HashMap<i64, Note> = {
+    let prefetch: FxI64Map<Note> = {
         let mut cand_ids: HashSet<i64> = HashSet::new();
         for hits in &sem_by_source {
             for (keys, _) in hits.values() {
@@ -1489,7 +1489,7 @@ pub(crate) fn search_assemble(
         }
         cand_ids.retain(|nid| !exclude.contains(nid));
         if cand_ids.is_empty() {
-            HashMap::new()
+            FxI64Map::default()
         } else {
             let ids: Vec<i64> = cand_ids.into_iter().collect();
             match core.note_dicts(&ids, true) {
@@ -1499,7 +1499,7 @@ pub(crate) fn search_assemble(
                     .collect(),
                 Err(e) => {
                     tracing::debug!(error = ?e, "search: cross-source prefetch failed; per-source fallback");
-                    HashMap::new()
+                    FxI64Map::default()
                 }
             }
         }
@@ -1537,7 +1537,7 @@ pub(crate) fn search_assemble(
         // flooring image hits is the activation gate's job below).
         let empty = ModalityHits::new();
         let modality_hits = sem_by_source.get(i).unwrap_or(&empty);
-        let mut sem_score: HashMap<i64, f64> = HashMap::new();
+        let mut sem_score: FxI64Map<f64> = FxI64Map::default();
         let ranking_text = rank_modality(
             ctx,
             modality_slice(modality_hits, "text"),
@@ -1547,7 +1547,7 @@ pub(crate) fn search_assemble(
         );
         // Image modality into a scratch score first: the gate is judged on the
         // best hit that SURVIVES exclusion + scope, not the raw rank-1.
-        let mut image_score: HashMap<i64, f64> = HashMap::new();
+        let mut image_score: FxI64Map<f64> = FxI64Map::default();
         let mut ranking_image = rank_modality(
             ctx,
             modality_slice(modality_hits, "image"),
@@ -1576,7 +1576,7 @@ pub(crate) fn search_assemble(
                     crate::tag_centroids::TAG_RANK_CAP,
                 );
                 let synth: Vec<f32> = (0..member_ids.len()).map(|r| r as f32 * 1e-4).collect();
-                let mut scratch: HashMap<i64, f64> = HashMap::new();
+                let mut scratch: FxI64Map<f64> = FxI64Map::default();
                 ranking_tag = rank_modality(
                     ctx,
                     ModalitySlice {

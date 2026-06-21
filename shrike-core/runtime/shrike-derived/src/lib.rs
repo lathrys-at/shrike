@@ -2505,15 +2505,14 @@ pub const FUZZY_MIN_SHARED: usize = 2;
 /// has only a handful of trigrams, all kept). A perf/recall dial.
 pub const FUZZY_MAX_TRIGRAMS: usize = 6;
 
-/// A fast non-cryptographic hasher for the fuzzy overlap maps, keyed on `i64`
-/// rowids/note-ids. `std`'s default is SipHash — DoS-resistant, but slow on small
-/// integer keys; these maps are internal (keys are our own index rowids, never
+/// A fast non-cryptographic hasher for the search path's `i64`-keyed maps (rowids,
+/// note-ids). `std`'s default is SipHash — DoS-resistant, but slow on small integer
+/// keys; these maps are internal (keys are our own index rowids/note-ids, never
 /// adversarial input), so the FxHash rotate-xor-multiply is the right trade. The
-/// overlap accumulation touches one map entry per posting across the rare trigrams,
-/// so the per-op hash cost shows up directly in the search profile. Same logic,
-/// faster keys.
+/// hash cost shows up directly in the search profile (the fuzzy overlap maps here,
+/// the kernel's RRF score maps), so it is shared. Same logic, faster keys.
 #[derive(Default)]
-struct FxI64Hasher(u64);
+pub struct FxI64Hasher(u64);
 
 impl FxI64Hasher {
     const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
@@ -2545,8 +2544,10 @@ impl std::hash::Hasher for FxI64Hasher {
     }
 }
 
-/// `HashMap` keyed on `i64` with [`FxI64Hasher`] — the overlap/best maps' type.
-type FxI64Map<V> = std::collections::HashMap<i64, V, std::hash::BuildHasherDefault<FxI64Hasher>>;
+/// `HashMap` keyed on `i64` with [`FxI64Hasher`] — the search path's integer-keyed
+/// map type (fuzzy overlap here, RRF score maps in the kernel).
+pub type FxI64Map<V> =
+    std::collections::HashMap<i64, V, std::hash::BuildHasherDefault<FxI64Hasher>>;
 
 pub use shrike_store::LexicalRow;
 
