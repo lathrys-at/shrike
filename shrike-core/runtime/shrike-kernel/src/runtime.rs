@@ -110,6 +110,30 @@ impl DrivenPools {
 
 static DRIVEN: OnceLock<DrivenPools> = OnceLock::new();
 
+/// The committed `drive_compute` worker count, recorded by the harness at boot so
+/// [`compute_width`] can size parallel fan-out to the real pool width. 0 until set.
+static COMPUTE_WIDTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Record the committed compute-pool width — the number of [`drive_compute`]
+/// threads the harness parks. The harness knows this number; the kernel reads it
+/// via [`compute_width`] to fan work out across exactly that many workers.
+pub fn set_compute_width(workers: usize) {
+    COMPUTE_WIDTH.store(workers, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The compute-pool width for sizing parallel fan-out: the committed
+/// [`drive_compute`] worker count ([`set_compute_width`]), or a machine estimate
+/// (`available_parallelism`) when the harness never set it (the C ABI, a direct
+/// embed, a test). Never 0.
+pub fn compute_width() -> usize {
+    match COMPUTE_WIDTH.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
+        n => n,
+    }
+}
+
 thread_local! {
     /// Set while a [`drive_collection`]/[`drive_compute`] job runs, so the dispatch
     /// helpers can assert the leaf-invariant (a pool job must never enqueue-and-
