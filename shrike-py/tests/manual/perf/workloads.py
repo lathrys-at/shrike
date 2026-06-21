@@ -10,6 +10,9 @@ Each read/write op comes in two shapes that mirror the batching axis:
 
 - ``search-{batch,seq}`` — one ``search_notes`` call with N queries (one batched
   query-embed) vs N calls of one query (N embeds).
+- ``search-scoped-{batch,seq}`` — the same two, but each call deck-scoped; the
+  delta from the unscoped twin is the scope cost (the ``find_notes`` id-set
+  resolution + the FTS5 push-down the unscoped path skips).
 - ``upsert-{batch,seq}`` — one ``upsert_notes`` call with N notes (one
   transaction) vs N calls of one note (one journal fsync each).
 - ``delete-{batch,seq}`` — one ``delete_notes`` call with N ids vs N calls of one
@@ -124,6 +127,70 @@ class SearchSeqWorkload(_SearchWorkload):
     async def run_one(self, booted: Booted, iteration: int) -> int:
         for q in self._batches[iteration]:
             await self._search(booted, [q])
+        return self._count
+
+
+class _ScopedSearchWorkload(_SearchWorkload):
+    """A deck-SCOPED variant of the search workloads: every call is restricted to
+    one deck — the realistic "search within the deck I'm reviewing" shape. The
+    scope makes the kernel resolve the deck to a note-id set per call (a
+    collection-actor ``find_notes`` the unscoped path skips) and push it into the
+    lexical MATCH query, so the delta from the unscoped ``search-*`` twin is the
+    scope cost. Each iteration reviews ONE deck and draws its queries from THAT
+    deck's topic (so they hit inside the scope); the deck cycles across iterations,
+    repeating once iterations exceed the deck count — the warm-cache regime a
+    scope-memoization A/B reads."""
+
+    def _deck(self, iteration: int) -> str:
+        return f"Perf::Deck {iteration % self._topics:03d}"
+
+    async def setup(self, booted: Booted, iterations: int) -> None:
+        # Each iteration's queries are drawn from THAT iteration's deck topic (fixed
+        # per iteration, unlike the unscoped twin's random-topic draw), so a scoped
+        # call's queries actually land inside the deck it's scoped to. Untimed.
+        rng = random.Random(0x5C09ED)
+        self._batches = []
+        for iteration in range(iterations):
+            topic = iteration % self._topics
+            self._batches.append(
+                [" ".join(choose(rng, rng.randint(1, 4), topic)) for _ in range(self._count)]
+            )
+
+    async def _search_scoped(self, booted: Booted, queries: list[str], deck: str) -> None:
+        await booted.call(
+            "search_notes",
+            queries=queries,
+            ids=[],
+            limit=self._limit,
+            tags=[],
+            exclude_ids=[],
+            deck=deck,
+        )
+
+
+class SearchScopedBatchWorkload(_ScopedSearchWorkload):
+    """One deck-scoped ``search_notes`` call carrying all ``count`` queries — the
+    scoped twin of ``search-batch`` (one ``find_notes`` scope resolution per call)."""
+
+    name = "search-scoped-batch"
+
+    async def run_one(self, booted: Booted, iteration: int) -> int:
+        await self._search_scoped(booted, self._batches[iteration], self._deck(iteration))
+        return self._count
+
+
+class SearchScopedSeqWorkload(_ScopedSearchWorkload):
+    """``count`` deck-scoped ``search_notes`` calls of one query each, all scoped to
+    the iteration's deck — the scoped twin of ``search-seq``. One ``find_notes``
+    scope resolution PER call, so it amplifies the per-search scope cost (and, with
+    a scope cache, the within-iteration warm-cache hit)."""
+
+    name = "search-scoped-seq"
+
+    async def run_one(self, booted: Booted, iteration: int) -> int:
+        deck = self._deck(iteration)
+        for q in self._batches[iteration]:
+            await self._search_scoped(booted, [q], deck)
         return self._count
 
 
@@ -409,6 +476,8 @@ WORKLOADS = {
     for w in (
         SearchBatchWorkload,
         SearchSeqWorkload,
+        SearchScopedBatchWorkload,
+        SearchScopedSeqWorkload,
         RebuildWorkload,
         UpsertBatchWorkload,
         UpsertSeqWorkload,

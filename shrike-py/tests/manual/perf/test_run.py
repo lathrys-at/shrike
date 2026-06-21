@@ -22,6 +22,8 @@ from tests.manual.perf.workloads import (
     RebuildWorkload,
     ReconcileWorkload,
     SearchBatchWorkload,
+    SearchScopedBatchWorkload,
+    SearchScopedSeqWorkload,
     SearchSeqWorkload,
     UpsertBatchWorkload,
     UpsertSeqWorkload,
@@ -79,6 +81,27 @@ def test_search_seq_issues_one_call_per_query(_driven, tmp_path):
     assert res.workload == "search-seq"
     assert res.distribution.n == 2
     assert res.items == 4  # one query per call, count calls -> count queries
+
+
+def test_search_scoped_batch_runs_scoped_to_a_deck(_driven, tmp_path):
+    # The 24-note corpus yields one deck (Perf::Deck 000); the scoped call resolves
+    # it and filters in-scope — a read path, response-only, like the unscoped twin.
+    res = run_async(
+        _measure(tmp_path, SearchScopedBatchWorkload(count=4, limit=5), repeats=2, warmup=1)
+    )
+    assert res.workload == "search-scoped-batch"
+    assert res.distribution.n == 2
+    assert set(res.phases) == {"response"}
+    assert res.items == 4
+
+
+def test_search_scoped_seq_issues_one_scoped_call_per_query(_driven, tmp_path):
+    res = run_async(
+        _measure(tmp_path, SearchScopedSeqWorkload(count=4, limit=5), repeats=2, warmup=0)
+    )
+    assert res.workload == "search-scoped-seq"
+    assert res.distribution.n == 2
+    assert res.items == 4  # one scoped query per call, count calls -> count queries
 
 
 def test_rebuild_workload_runs(_driven, tmp_path):
@@ -153,7 +176,16 @@ def test_ingest_workload_imports_a_cold_package(_driven, tmp_path):
 
 def test_build_workload_scales_ops_uniformly_excepting_rebuild() -> None:
     # --ops N is applied uniformly as each workload's per-iteration count.
-    for name in ("search-batch", "search-seq", "upsert-batch", "delete-seq", "reconcile", "churn"):
+    for name in (
+        "search-batch",
+        "search-seq",
+        "search-scoped-batch",
+        "search-scoped-seq",
+        "upsert-batch",
+        "delete-seq",
+        "reconcile",
+        "churn",
+    ):
         assert getattr(build_workload(name, ops=7), "_count") == 7  # noqa: B009
     # rebuild is the exception — an O(collection) pass with no per-op N.
     assert build_workload("rebuild", ops=7).name == "rebuild"
