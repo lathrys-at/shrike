@@ -15,10 +15,11 @@
 //! because every write rides ONE connection's `last_insert_rowid()` under
 //! [`DerivedEngine::lock`]. Reads run on a separate pool of connections under
 //! WAL, so the fanned lexical reads (substring ∥ fuzzy) run concurrently rather
-//! than taking turns on one mutexed connection. A pool connection only ever runs
-//! SELECTs (plus its own per-connection TEMP scope staging) and never writes, so
-//! it never touches `last_insert_rowid()` — the write↔rowmap pairing invariant
-//! is owned wholly by the single write connection and is untouched by the pool.
+//! than taking turns on one mutexed connection. A pool connection is opened
+//! `OPEN_READ_ONLY`, so SQLite ENFORCES that it only ever runs SELECTs (plus its
+//! own per-connection TEMP scope staging) and never writes: it cannot touch
+//! `last_insert_rowid()`, so the write↔rowmap pairing invariant is owned wholly
+//! by the single write connection and is untouched by the pool.
 //!
 //! MATCH-expression building, trigram filtering, and the state machine stay
 //! facade-side; this crate is storage + queries only. Pure Rust — no pyo3.
@@ -92,7 +93,7 @@ pub struct DerivedEngine {
     read_pool: ReadPool,
 }
 
-/// A pool of read-only-by-discipline connections to the derived store, so the
+/// A pool of read-only (`OPEN_READ_ONLY`) connections to the derived store, so the
 /// fanned lexical reads (substring ∥ fuzzy) run on distinct connections rather
 /// than serializing on one mutexed handle. Connections are opened on demand and
 /// returned on [`ReadGuard`] drop; the pool self-bounds at the live read
@@ -117,14 +118,23 @@ impl ReadPool {
 
     /// Open a read connection against the sidecar.
     ///
-    /// READ-WRITE (not `OPEN_READ_ONLY`): a WAL reader takes `-shm` read locks,
-    /// which a true read-only connection cannot. Read-only is held by DISCIPLINE
-    /// — only the audited read helpers ever receive a pool connection, and they
-    /// run SELECTs plus their own TEMP scope staging. `PRAGMA query_only` is
-    /// deliberately NOT set: it rejects the `CREATE TEMP TABLE` / `INSERT` the
-    /// large-scope staging needs (a temp write fails as `readonly` under it).
+    /// `SQLITE_OPEN_READ_ONLY` ENFORCES the read-only contract: SQLite rejects any
+    /// write to the main database on a pool connection, so the WRITE invariant (the
+    /// idx↔rowmap pairing rides the single write connection's `last_insert_rowid()`)
+    /// holds structurally, not just by discipline. It still permits the read path's
+    /// TEMP scope staging — `temp` is a separate, always-writable database — and it
+    /// reads the WAL store via the `-shm` the write connection created at open. Not
+    /// `OPEN_CREATE`: a read connection must never conjure a missing sidecar. (Note
+    /// `PRAGMA query_only` was the alternative and is unusable: it rejects the
+    /// `CREATE TEMP TABLE` the staging needs, failing as `readonly`.)
     fn open_read_conn(path: &str) -> NativeResult<Connection> {
-        let conn = Connection::open(path).map_err(db_err)?;
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(db_err)?;
         // Match the write connection's wait budget: a read overlapping the
         // single writer's commit waits the lock out rather than taking an
         // instant SQLITE_BUSY (with_busy_retry is the belt past this).
@@ -206,6 +216,49 @@ fn is_busy(e: &rusqlite::Error) -> bool {
     )
 }
 
+/// True for a `SQLITE_SCHEMA` fault, which on the read path is the transient a
+/// POOL read hits while a rebuild's atomic shadow-swap is committing on the write
+/// connection (`DROP TABLE idx; DROP TABLE rowmap; ALTER idx_shadow RENAME TO idx;
+/// ALTER rowmap_shadow RENAME TO rowmap`, all in ONE transaction —
+/// [`DerivedEngine::swap_shadow_and_stamp`]).
+///
+/// The swap is atomic for ROW VISIBILITY — an already-open statement sees the
+/// whole old index or the whole new one, and the table is never *committed-absent*
+/// (so no `no such table`). But the commit bumps the schema cookie, so a FRESH
+/// statement on a *separate* pool connection must re-prepare, and constructing the
+/// FTS5 `idx` vtable against the changing schema can fail — surfaced as
+/// `SQLITE_SCHEMA` ("vtable constructor failed: idx"). The singular read path is
+/// immune: it shares the write mutex with the swap, so it never overlaps it and
+/// its own connection's schema cache is the one the swap updated. Only the pooled
+/// reads race it, which is why this is needed.
+///
+/// Matched BY CODE ([`ErrorCode::SchemaChanged`]) — robust and version-stable,
+/// unlike a message substring. A genuine query error (a bad MATCH, a missing
+/// column) carries the disjoint generic `SQLITE_ERROR` code, so it is NOT retried
+/// — it still surfaces immediately. `SQLITE_SCHEMA` is inherently transient (the
+/// schema is settling); a retry resolves against the settled new index. A
+/// *persistent* `SQLITE_SCHEMA` (schema thrashing forever — it cannot happen from
+/// a momentary swap) would exhaust the retries and surface as `unavailable`.
+fn is_transient_swap_fault(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::SchemaChanged,
+                ..
+            },
+            _,
+        )
+    )
+}
+
+/// Whether a failed read should be retried: a transient lock-contention busy
+/// ([`is_busy`]) OR a transient rebuild-swap-window fault ([`is_transient_swap_fault`]).
+/// Both are absorbed by [`with_busy_retry`] / the read helpers' retry arms.
+fn is_retryable(e: &rusqlite::Error) -> bool {
+    is_busy(e) || is_transient_swap_fault(e)
+}
+
 /// How many extra times a read retries past a transient busy before surfacing
 /// it. The connection's `busy_timeout` (5s) absorbs the common lock-acquisition
 /// wait; this is the belt for a busy that surfaces despite it (e.g. a snapshot
@@ -222,7 +275,7 @@ fn with_busy_retry<T>(mut read: impl FnMut() -> rusqlite::Result<T>) -> NativeRe
     loop {
         match read() {
             Ok(v) => return Ok(v),
-            Err(e) if is_busy(&e) && attempt < BUSY_RETRIES => {
+            Err(e) if is_retryable(&e) && attempt < BUSY_RETRIES => {
                 attempt += 1;
                 std::thread::sleep(std::time::Duration::from_millis(10 * attempt as u64));
             }
@@ -873,7 +926,12 @@ impl DerivedEngine {
     /// over the live `idx`/`rowmap`, and stamp `col_mod` LAST. SQLite renames an
     /// FTS5 table cleanly; the whole thing is one transaction, so a reader sees
     /// the complete old index until commit and the complete new one after — never
-    /// a partial. A crash before this leaves the live tables + old col_mod intact.
+    /// a partial. That atomicity is for ROW VISIBILITY: the commit bumps the schema
+    /// cookie, so a *fresh* statement on a separate pool connection that re-prepares
+    /// and reconstructs the FTS5 `idx` vtable against the changing schema can
+    /// transiently fail as `SQLITE_SCHEMA`; that is absorbed by the read path's
+    /// retry ([`is_transient_swap_fault`]), not surfaced to callers.
+    /// A crash before this leaves the live tables + old col_mod intact.
     /// `live_notes` is the authoritative set: a note can be live yet have no field
     /// rows, and its recognition rows must survive.
     fn swap_shadow_and_stamp(&self, live_notes: &[i64], col_mod: i64) -> NativeResult<()> {
@@ -1249,7 +1307,7 @@ impl DerivedEngine {
                 let row = match q.next() {
                     Ok(Some(r)) => r,
                     Ok(None) => break,
-                    Err(e) if is_busy(&e) => return Err(e), // retried
+                    Err(e) if is_retryable(&e) => return Err(e), // retried
                     Err(e) => {
                         return Ok(Err(NativeError::invalid_input(format!("fts5 match: {e}"))))
                     }
@@ -1264,7 +1322,7 @@ impl DerivedEngine {
                     ))
                 })() {
                     Ok(tuple) => rows.push(tuple),
-                    Err(e) if is_busy(&e) => return Err(e),
+                    Err(e) if is_retryable(&e) => return Err(e),
                     Err(e) => {
                         return Ok(Err(NativeError::invalid_input(format!("fts5 match: {e}"))))
                     }
@@ -1352,7 +1410,7 @@ impl DerivedEngine {
                     let row = match q.next() {
                         Ok(Some(r)) => r,
                         Ok(None) => break,
-                        Err(e) if is_busy(&e) => return Err(e), // retried
+                        Err(e) if is_retryable(&e) => return Err(e), // retried
                         Err(e) => {
                             return Ok(Err(NativeError::invalid_input(format!("fts5 match: {e}"))))
                         }
@@ -1367,7 +1425,7 @@ impl DerivedEngine {
                         ))
                     })() {
                         Ok(tuple) => rows.push(tuple),
-                        Err(e) if is_busy(&e) => return Err(e),
+                        Err(e) if is_retryable(&e) => return Err(e),
                         Err(e) => {
                             return Ok(Err(NativeError::invalid_input(format!("fts5 match: {e}"))))
                         }
@@ -1647,6 +1705,61 @@ mod tests {
         .unwrap_err();
         assert_eq!(calls.get(), 1, "a non-busy error is not retried");
         assert_eq!(err.kind(), shrike_error::ErrorKind::Unavailable); // db_err maps all to unavailable
+    }
+
+    fn sqlite_err(code: i32, msg: &str) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), Some(msg.to_string()))
+    }
+
+    #[test]
+    fn is_retryable_covers_schema_change_but_not_genuine_errors() {
+        use rusqlite::ffi;
+        // The rebuild shadow-swap, committing on the write connection, bumps the
+        // schema cookie, so a FRESH statement on a separate pool connection that
+        // re-prepares + reconstructs the FTS5 vtable transiently fails as
+        // SQLITE_SCHEMA ("vtable constructor failed: idx"). It MUST be retried —
+        // else a valid search racing a rebuild fails outright (the High this guards).
+        // Matched BY CODE: the message is incidental.
+        assert!(is_retryable(&sqlite_err(
+            ffi::SQLITE_SCHEMA,
+            "vtable constructor failed: idx"
+        )));
+        assert!(is_retryable(&sqlite_err(
+            ffi::SQLITE_SCHEMA,
+            "database schema has changed"
+        )));
+        // Busy/locked stay retryable (unchanged from before this fix).
+        assert!(is_retryable(&sqlite_err(
+            ffi::SQLITE_BUSY,
+            "database is locked"
+        )));
+        assert!(is_retryable(&sqlite_err(
+            ffi::SQLITE_LOCKED,
+            "database table is locked"
+        )));
+
+        // A GENUINE error must NOT be retried — masking it would hide a real fault
+        // and add a retry-budget latency tail. Genuine query errors carry the
+        // generic SQLITE_ERROR code, DISJOINT from SQLITE_SCHEMA — even a message
+        // that *looks* swap-related does not retry (the predicate keys on code, not
+        // text), so the old brittle message-match can't misfire.
+        assert!(!is_retryable(&sqlite_err(
+            ffi::SQLITE_ERROR,
+            "near \"slect\": syntax error"
+        )));
+        assert!(!is_retryable(&sqlite_err(
+            ffi::SQLITE_ERROR,
+            "no such column: idx"
+        )));
+        assert!(!is_retryable(&sqlite_err(
+            ffi::SQLITE_ERROR,
+            "no such table: idx" // SQLITE_ERROR, not SCHEMA — a real missing table is permanent
+        )));
+        assert!(!is_retryable(&sqlite_err(
+            ffi::SQLITE_CONSTRAINT,
+            "UNIQUE constraint failed: idx.x"
+        )));
+        assert!(!is_retryable(&rusqlite::Error::InvalidQuery));
     }
 
     #[test]
@@ -2662,7 +2775,7 @@ impl DerivedEngine {
                         let row = match q.next() {
                             Ok(Some(r)) => r,
                             Ok(None) => break,
-                            Err(e) if is_busy(&e) => return Err(e),
+                            Err(e) if is_retryable(&e) => return Err(e),
                             Err(e) => {
                                 return Ok(Err(NativeError::invalid_input(format!(
                                     "fts5 match: {e}"
@@ -2671,7 +2784,7 @@ impl DerivedEngine {
                         };
                         match (|| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))() {
                             Ok(tuple) => rows.push(tuple),
-                            Err(e) if is_busy(&e) => return Err(e),
+                            Err(e) if is_retryable(&e) => return Err(e),
                             Err(e) => {
                                 return Ok(Err(NativeError::invalid_input(format!(
                                     "fts5 match: {e}"
@@ -2739,7 +2852,7 @@ impl DerivedEngine {
                     let row = match q.next() {
                         Ok(Some(r)) => r,
                         Ok(None) => break,
-                        Err(e) if is_busy(&e) => return Err(e),
+                        Err(e) if is_retryable(&e) => return Err(e),
                         Err(e) => {
                             return Ok(Err(NativeError::invalid_input(format!("fts5 text: {e}"))))
                         }
@@ -2751,7 +2864,7 @@ impl DerivedEngine {
                             }
                         }
                         Ok((_, None)) => {}
-                        Err(e) if is_busy(&e) => return Err(e),
+                        Err(e) if is_retryable(&e) => return Err(e),
                         Err(e) => {
                             return Ok(Err(NativeError::invalid_input(format!("fts5 text: {e}"))))
                         }
@@ -3471,6 +3584,115 @@ mod hardening_tests {
             h.join().unwrap();
         }
         writer.join().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn rebuild_swap_window_must_not_surface_invalid_input_for_a_valid_read() {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(8100);
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-swaprace-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shrike.db");
+        let e = std::sync::Arc::new(DerivedEngine::open(path.to_str().unwrap(), 1).unwrap());
+        let seed: Vec<(i64, String, String, String)> = (1..=20)
+            .map(|n| {
+                (
+                    n,
+                    "field".into(),
+                    "F".into(),
+                    format!("mitochondria note {n}"),
+                )
+            })
+            .collect();
+        build_snapshot_live(&e, &seed, 1).unwrap();
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // CPU burners starve the scheduler so a reader is pre-empted INSIDE the
+        // FTS5 vtable constructor during the swap — the contention the parallel
+        // suite creates. Without this the window is too narrow to observe.
+        let ncpu = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let mut burners = Vec::new();
+        for _ in 0..(ncpu * 2) {
+            let stop = std::sync::Arc::clone(&stop);
+            burners.push(std::thread::spawn(move || {
+                let mut x: u64 = 1;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    for _ in 0..50_000 {
+                        x = x.wrapping_mul(2654435761).wrapping_add(1);
+                    }
+                    std::hint::black_box(x);
+                }
+            }));
+        }
+
+        let rebuilder = {
+            let e = std::sync::Arc::clone(&e);
+            let stop = std::sync::Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut gen = 2i64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let rows: Vec<(i64, String, String, String)> = (1..=20)
+                        .map(|n| {
+                            (
+                                n,
+                                "field".into(),
+                                "F".into(),
+                                format!("mitochondria note {n} gen {gen}"),
+                            )
+                        })
+                        .collect();
+                    build_snapshot_live(&e, &rows, gen).unwrap();
+                    gen += 1;
+                }
+            })
+        };
+
+        let hit = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let e = std::sync::Arc::clone(&e);
+            let hit = std::sync::Arc::clone(&hit);
+            let stop = std::sync::Arc::clone(&stop);
+            handles.push(std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Err(err) = e.search_fuzzy_batch(&["mitochondria"], 50, None, &[]) {
+                        hit.lock()
+                            .unwrap()
+                            .push(format!("fuzzy kind={:?}: {err}", err.kind()));
+                    }
+                    if let Err(err) = e.search_substring_batch(&["mitochondria"], 50, None, &[]) {
+                        hit.lock()
+                            .unwrap()
+                            .push(format!("substring kind={:?}: {err}", err.kind()));
+                    }
+                }
+            }));
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+        rebuilder.join().unwrap();
+        for b in burners {
+            b.join().unwrap();
+        }
+
+        let errs = hit.lock().unwrap();
+        assert!(
+            errs.is_empty(),
+            "a valid lexical read concurrent with a rebuild surfaced {} error(s):\n{}",
+            errs.len(),
+            errs.iter().take(5).cloned().collect::<Vec<_>>().join("\n")
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
