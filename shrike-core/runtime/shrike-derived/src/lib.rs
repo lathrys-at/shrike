@@ -2547,9 +2547,12 @@ impl DerivedEngine {
     /// note-id-asc, capped at `top_k`. Returns `(note_id, source, ref, rowid)`; the
     /// rowid drives the deferred snippet read. Recall-safe: the cut is by overlap,
     /// never by rowid — every matched segment is ranked, unlike a bm25 `LIMIT` over
-    /// the OR. `seg_meta` must cover every rowid whose overlap reaches the floor:
-    /// the JOIN read populates it inline; the unfiltered path fetches it for the
-    /// candidate set up front ([`Self::seg_meta_for_rowids`]).
+    /// the OR. A rowid present in `overlap` but ABSENT from `seg_meta` is dropped:
+    /// the JOIN read pre-filters scope/exclude so its `seg_meta` carries only kept
+    /// segments, and the unfiltered path's [`Self::seg_meta_for_rowids`] omits the
+    /// `exclude_sources` segments — so "absent" means "filtered out," and skipping
+    /// it makes a note rank by its best NON-excluded segment, exactly as the JOIN
+    /// path does by never counting the excluded ones.
     fn rank_overlap(
         overlap: &std::collections::HashMap<i64, usize>,
         seg_meta: &std::collections::HashMap<i64, (i64, String, String)>,
@@ -2563,7 +2566,10 @@ impl DerivedEngine {
             if count < FUZZY_MIN_SHARED {
                 continue;
             }
-            let nid = seg_meta[&rid].0;
+            let nid = match seg_meta.get(&rid) {
+                Some((nid, _, _)) => *nid,
+                None => continue, // source-excluded segment — not a candidate
+            };
             let better = match best.get(&nid) {
                 None => true,
                 Some(&(bc, br)) => count > bc || (count == bc && rid < br),
@@ -2767,14 +2773,15 @@ impl DerivedEngine {
         }
         let distinct_terms_vec: Vec<&str> = distinct_terms.into_iter().collect();
         // Merge per query into ranked survivors (note_id, source, ref, rowid). A
-        // scope/exclude filter is pushed into the MATCH, which needs the rowmap
-        // JOIN, so it reads provenance inline. The unfiltered case (the common one)
-        // reads postings rowid-ONLY — no per-posting JOIN, no string allocs over
-        // the full lists — and hydrates `(note_id, source, ref)` once, for only the
-        // candidate set (overlap >= the floor) the ranker will actually consider.
-        let survivors: Vec<Vec<(i64, String, String, i64)>> = if scope.is_some()
-            || !exclude_sources.is_empty()
-        {
+        // SCOPE filter is pushed into the MATCH — the `note_id IN scope` predicate
+        // needs the rowmap JOIN, and for a tight scope SQL-side filtering beats
+        // scanning-then-dropping — so that path reads provenance inline. The
+        // unscoped case (the common one, including the always-present
+        // `exclude_sources` hidden-source list) reads postings rowid-ONLY — no
+        // per-posting JOIN, no string allocs over the full lists — then hydrates
+        // `(note_id, source, ref)` once for the candidate set (overlap >= the
+        // floor), applying `exclude_sources` in that batched read.
+        let survivors: Vec<Vec<(i64, String, String, i64)>> = if scope.is_some() {
             let (term_rowids, seg_meta) =
                 Self::term_segments_batch(&conn, &distinct_terms_vec, scope, exclude_sources)?;
             pruned
@@ -2804,8 +2811,11 @@ impl DerivedEngine {
                     }
                 }
             }
-            let seg_meta =
-                Self::seg_meta_for_rowids(&conn, &candidates.into_iter().collect::<Vec<_>>())?;
+            let seg_meta = Self::seg_meta_for_rowids(
+                &conn,
+                &candidates.into_iter().collect::<Vec<_>>(),
+                exclude_sources,
+            )?;
             overlaps
                 .iter()
                 .map(|ov| Self::rank_overlap(ov, &seg_meta, top_k as usize))
@@ -2989,11 +2999,14 @@ impl DerivedEngine {
     }
 
     /// Provenance `(note_id, source, ref)` per idx rowid, for a set of rowids, in
-    /// ONE batched `rowmap` read. Hydrates the overlap candidates the unfiltered
-    /// fuzzy path deferred (it read postings rowid-only). `rowmap.rowid` is the
-    /// primary key, so this is a batched PK lookup over the (small) candidate set,
-    /// not a per-posting JOIN over the full posting lists. Reads on the passed
-    /// [`ReadPool`] connection.
+    /// ONE batched `rowmap` read, dropping any whose `source` is in
+    /// `exclude_sources`. Hydrates the overlap candidates the unfiltered fuzzy path
+    /// deferred (it read postings rowid-only, hidden sources included), applying the
+    /// `exclude_sources` filter HERE rather than in the per-posting scan. A dropped
+    /// rowid is then absent from the returned map, so [`Self::rank_overlap`] skips
+    /// it — the same effect as the JOIN path's `source NOT IN`, off the hot scan.
+    /// `rowmap.rowid` is the primary key, so this is a batched PK lookup over the
+    /// (small) candidate set. Reads on the passed [`ReadPool`] connection.
     ///
     /// # Errors
     ///
@@ -3001,6 +3014,7 @@ impl DerivedEngine {
     fn seg_meta_for_rowids(
         conn: &Connection,
         rowids: &[i64],
+        exclude_sources: &[&str],
     ) -> NativeResult<std::collections::HashMap<i64, (i64, String, String)>> {
         let mut seg_meta: std::collections::HashMap<i64, (i64, String, String)> =
             std::collections::HashMap::new();
@@ -3008,13 +3022,27 @@ impl DerivedEngine {
             return Ok(seg_meta);
         }
         Self::stage_id_set(conn, "shrike_seg_rowids", rowids)?;
+        let exclude_clause = if exclude_sources.is_empty() {
+            String::new()
+        } else {
+            let marks = (0..exclude_sources.len())
+                .map(|i| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("WHERE m.source NOT IN ({marks}) ")
+        };
+        let sql = format!(
+            "SELECT m.rowid, m.note_id, m.source, m.ref FROM rowmap m \
+             JOIN temp.shrike_seg_rowids s ON s.id = m.rowid {exclude_clause}"
+        );
         let run = || -> rusqlite::Result<Vec<(i64, i64, String, String)>> {
-            let mut stmt = conn.prepare_cached(
-                "SELECT m.rowid, m.note_id, m.source, m.ref FROM rowmap m \
-                 JOIN temp.shrike_seg_rowids s ON s.id = m.rowid",
-            )?;
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> = exclude_sources
+                .iter()
+                .map(|s| s as &dyn rusqlite::ToSql)
+                .collect();
             let rows = stmt
-                .query_map([], |row| {
+                .query_map(rusqlite::params_from_iter(params), |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -3271,16 +3299,30 @@ mod lexical_tests {
             "Front".into(),
             "wholly unrelated text".into(),
         ));
+        // A hidden-source segment: the fast path reads its posting (rowid-only) but
+        // must drop it at hydration under `exclude_sources`, exactly as the JOIN
+        // path drops it in the MATCH. Both must agree with AND without the exclude.
+        rows.push((
+            10,
+            "vlm".into(),
+            "Image".into(),
+            "mitochondria powerhouse described".into(),
+        ));
         build_snapshot_live(&e, &rows, 1).unwrap();
-        let all_ids: Vec<i64> = (1..=9).collect();
+        let all_ids: Vec<i64> = (1..=10).collect();
 
-        for q in ["mitochondira", "powerhuse cell", "mitochondria powerhouse"] {
-            let unfiltered = e.search_fuzzy(q, 10, None, &[]).unwrap();
-            let scoped_all = e.search_fuzzy(q, 10, Some(&all_ids), &[]).unwrap();
+        for (q, exclude) in [
+            ("mitochondira", &[][..]),      // typo, no exclude → vlm note present
+            ("mitochondira", &["vlm"][..]), // typo, exclude vlm → vlm note dropped
+            ("mitochondria powerhouse", &["vlm"][..]),
+            ("powerhuse cell", &[][..]),
+        ] {
+            let unfiltered = e.search_fuzzy(q, 10, None, exclude).unwrap();
+            let scoped_all = e.search_fuzzy(q, 10, Some(&all_ids), exclude).unwrap();
             assert!(!unfiltered.is_empty(), "expected fuzzy hits for {q:?}");
             assert_eq!(
                 unfiltered, scoped_all,
-                "unfiltered fast path diverged from the scoped JOIN path for {q:?}"
+                "unfiltered fast path diverged from the scoped JOIN path for {q:?} exclude={exclude:?}"
             );
         }
         std::fs::remove_dir_all(dir).ok();
