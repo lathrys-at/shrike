@@ -35,9 +35,9 @@ class Distribution:
     def drift_ms(self) -> float:
         """The within-run drift: the median of the run's SECOND half minus that of
         its FIRST half, in iteration order. ~0 for a stable op; positive means the
-        op got slower AS THE RUN PROGRESSED — the index-fragmentation signal #938's
-        churn workload reads (flat with compaction, climbing without). 0 for < 2
-        kept samples."""
+        op got slower AS THE RUN PROGRESSED — the index-fragmentation signal the
+        churn workload reads (flat when the index stays compact, climbing as it
+        fragments). 0 for < 2 kept samples."""
         if len(self.samples_ms) < 2:
             return 0.0
         mid = len(self.samples_ms) // 2

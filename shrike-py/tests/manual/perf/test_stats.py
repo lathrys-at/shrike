@@ -53,8 +53,7 @@ def test_distribution_round_trips_through_dict():
 def test_drift_reads_the_within_run_trend_in_iteration_order():
     # A rising run (each later iteration slower) drifts POSITIVE: the second-half
     # median sits above the first-half median. The order-blind percentiles can't
-    # show this — drift is the index-fragmentation signal #938's churn workload
-    # reads.
+    # show this — drift is the index-fragmentation signal the churn workload reads.
     rising = summarize([10.0, 12.0, 14.0, 30.0, 34.0, 38.0])
     assert rising.drift_ms == pytest.approx(
         _percentile([30.0, 34.0, 38.0], 0.5) - _percentile([10.0, 12.0, 14.0], 0.5)

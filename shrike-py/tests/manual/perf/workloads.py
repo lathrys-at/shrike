@@ -18,7 +18,8 @@ Each read/write op comes in two shapes that mirror the batching axis:
 Plus ``rebuild`` (the O(collection) index rebuild), ``reconcile`` (out-of-band
 drift recovery), and ``churn`` (sustained insert/delete/search — the steady-state
 regime that fragments the FTS5 index, which a build-then-search run never sees;
-its *response* p50 drift across the run is the index-maintenance signal #938 reads).
+its *response* p50 drift across the run is the index-maintenance signal — it climbs
+if the index fragments under churn).
 A true *ingest* (cold import of a synthetic package) is measured
 by ``driver.measure_ingest`` — it owns its own boot lifecycle, so it isn't a
 ``Workload`` here. The heavier *sync* and OCR sweeps are tracked as their own
@@ -364,9 +365,9 @@ class ChurnWorkload:
     fragmentation accumulates the way real use accumulates it — the live churned set
     stays ~``count``, but the index does NOT, absent compaction. The TIMED
     ``run_one`` then searches a fixed query bank, so the *response* p50 across the
-    run is the search-latency DRIFT as the index fragments: flat with the folded
-    merge (#938), climbing without it. Run the same boot with and without compaction
-    for the A/B — the divergence is the maintenance win."""
+    run is the search-latency DRIFT as the index fragments: flat when the index is
+    kept compact, climbing as it fragments. Run the same boot with and without
+    compaction for the A/B — the divergence is the maintenance win."""
 
     name = "churn"
     mutates = True
