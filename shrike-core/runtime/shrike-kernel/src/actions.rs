@@ -1297,44 +1297,92 @@ pub(crate) fn search_semantic(
     index.search_by_modality(vectors, fetch_k, Some(&note_spaces))
 }
 
-/// The lexical DISCOVERY reads: the batched substring + fuzzy FTS5 queries over
-/// every QUERY source, in source order. No `core`. `lex_scope` is the
-/// pre-computed deck/tag scope; each batch locks the derived connection, stages
-/// the scope id set, and compiles its statement ONCE for the whole set. Empty
-/// results when there are no query sources.
+/// The query texts (in source order) and the hidden-source exclusion list shared
+/// by both lexical reads. Borrows from `sources`/`args` — no allocation beyond the
+/// two `&str` vectors.
+fn lexical_query_inputs<'a>(
+    sources: &'a [SearchSource],
+    args: &'a SearchArgs,
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let query_texts = sources
+        .iter()
+        .filter(|s| s.is_query)
+        .map(|s| s.text.as_str())
+        .collect();
+    let hidden = args
+        .hidden_lexical_sources
+        .iter()
+        .map(String::as_str)
+        .collect();
+    (query_texts, hidden)
+}
+
+/// The substring lexical read over a slice of query texts (already extracted from
+/// the query sources). One entry per query text, in order; a `None` means "the
+/// store couldn't serve this query" → the per-source fallback in the assembly.
+/// Empty input yields an empty result.
 ///
-/// A REAL derived-read failure (e.g. a SQLITE_BUSY outliving the retry) surfaces
-/// here as an `Err` and must never become a silent field-text fallback — OCR/ASR
-/// text lives only in the derived store and the field scan can't serve it. `Ok`
-/// carries one entry per query source; a `None` substring entry means "the store
-/// couldn't serve this query" → the per-source fallback in the assembly.
+/// [`crate::Kernel::search_fused`] dispatches one of these per query-batch CHUNK
+/// so the per-query substring reads spread across the compute pool (each chunk
+/// checks out its own derived read connection); the sync [`search_lexical`] path
+/// calls it once over the whole batch. The over-fetch is `top_k + |distinct
+/// exclude|`, so the post-filter still has `top_k` survivors after the excluded
+/// ids drop out. A REAL derived-read failure surfaces as `Err` and must never
+/// become a silent field-text fallback — OCR/ASR text lives only in the derived
+/// store and the field scan can't serve it.
+pub(crate) fn search_substring_chunk(
+    derived: &dyn DerivedStore,
+    query_texts: &[&str],
+    hidden: &[&str],
+    lex_scope: Option<&[i64]>,
+    args: &SearchArgs,
+) -> NativeResult<Vec<Option<Vec<LexicalRow>>>> {
+    if query_texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let exclude: HashSet<i64> = args.exclude.iter().copied().collect();
+    derived.search_substring_batch(
+        query_texts,
+        (args.top_k + exclude.len()) as i64,
+        lex_scope,
+        hidden,
+    )
+}
+
+/// The fuzzy lexical read over a slice of query texts — the overlap-ranked
+/// counterpart to [`search_substring_chunk`] (see it for the chunking rationale).
+/// One entry per query text, in order; empty input yields an empty result.
+///
+/// Chunking trades a little of `search_fuzzy_batch`'s cross-query trigram-posting
+/// sharing (a trigram shared across chunks is read once per chunk) for the
+/// per-query parallelism — for a bank of distinct queries the pruned trigrams are
+/// mostly query-specific, so the lost sharing is small.
+pub(crate) fn search_fuzzy_chunk(
+    derived: &dyn DerivedStore,
+    query_texts: &[&str],
+    hidden: &[&str],
+    lex_scope: Option<&[i64]>,
+    args: &SearchArgs,
+) -> NativeResult<Vec<Vec<LexicalRow>>> {
+    if query_texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    derived.search_fuzzy_batch(query_texts, args.top_k as i64, lex_scope, hidden)
+}
+
+/// The lexical DISCOVERY reads (substring + fuzzy), sequentially over the whole
+/// query batch on the caller's thread — the sync composition the binding
+/// `search_notes` path uses. [`crate::Kernel::search_fused`] instead chunks each
+/// read across the compute pool (see [`search_substring_chunk`]).
 pub(crate) fn search_lexical(
     derived: &dyn DerivedStore,
     sources: &[SearchSource],
     lex_scope: Option<&[i64]>,
     args: &SearchArgs,
 ) -> NativeResult<LexicalBatches> {
-    let exclude: HashSet<i64> = args.exclude.iter().copied().collect();
-    let query_texts: Vec<&str> = sources
-        .iter()
-        .filter(|s| s.is_query)
-        .map(|s| s.text.as_str())
-        .collect();
-    if query_texts.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    let hidden: Vec<&str> = args
-        .hidden_lexical_sources
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let sub = derived.search_substring_batch(
-        &query_texts,
-        (args.top_k + exclude.len()) as i64,
-        lex_scope,
-        &hidden,
-    )?;
-    let fz = derived.search_fuzzy_batch(&query_texts, args.top_k as i64, lex_scope, &hidden)?;
+    let (query_texts, hidden) = lexical_query_inputs(sources, args);
+    let sub = search_substring_chunk(derived, &query_texts, &hidden, lex_scope, args)?;
+    let fz = search_fuzzy_chunk(derived, &query_texts, &hidden, lex_scope, args)?;
     Ok((sub, fz))
 }
 
@@ -1735,6 +1783,66 @@ mod search_tests {
     fn at_distance(d: f32) -> Vec<f32> {
         let sim = 1.0 - d;
         vec![sim, (1.0 - sim * sim).max(0.0).sqrt()]
+    }
+
+    #[test]
+    fn chunked_lexical_matches_whole_batch_at_every_width() {
+        // `search_fused` splits the query batch into ~compute_width chunks per read
+        // and reassembles BY INDEX. The chunked result must equal the whole-batch
+        // `search_lexical` at EVERY width — the recall/ranking gate: chunking
+        // changes only how the reads are batched, never the results.
+        let (dir, core) = temp_collection();
+        let notes: Vec<shrike_schemas::NoteInput> = serde_json::from_str(
+            r#"[
+              {"note_type": "Basic", "deck": "D",
+               "fields": {"Front": "the mitochondria is the powerhouse of the cell", "Back": "b"}},
+              {"note_type": "Basic", "deck": "D",
+               "fields": {"Front": "the krebs cycle in the mitochondria", "Back": "b"}},
+              {"note_type": "Basic", "deck": "D",
+               "fields": {"Front": "mitochondrial dna replication", "Back": "b"}}
+            ]"#,
+        )
+        .unwrap();
+        core.upsert_notes(&notes, shrike_collection::DuplicatePolicy::Error, false)
+            .unwrap();
+        let e = derived_for(&core, &dir);
+
+        // exact hits, a transposition typo (fuzzy), a no-match, and singletons.
+        let bank = [
+            "mitochondria",
+            "mitochondira",
+            "krebs",
+            "zzznope",
+            "powerhouse",
+            "cell",
+            "dna",
+        ];
+        let sources: Vec<SearchSource> = bank.iter().map(|t| query(t)).collect();
+        let a = args(5);
+        let scope: Option<&[i64]> = None;
+        let (whole_sub, whole_fz) = search_lexical(&e, &sources, scope, &a).unwrap();
+
+        for width in [1usize, 2, 3, 4, 8, 16] {
+            // Mirror search_fused's chunking exactly: chunk_size = div_ceil(width),
+            // contiguous ranges, in-order concat.
+            let (qt, hidden) = lexical_query_inputs(&sources, &a);
+            let chunk_size = qt.len().div_ceil(width.max(1)).max(1);
+            let (mut sub, mut fz) = (Vec::new(), Vec::new());
+            let mut start = 0;
+            while start < qt.len() {
+                let end = (start + chunk_size).min(qt.len());
+                sub.extend(
+                    search_substring_chunk(&e, &qt[start..end], &hidden, scope, &a).unwrap(),
+                );
+                fz.extend(search_fuzzy_chunk(&e, &qt[start..end], &hidden, scope, &a).unwrap());
+                start = end;
+            }
+            assert_eq!(
+                sub, whole_sub,
+                "substring chunked@width={width} != whole batch"
+            );
+            assert_eq!(fz, whole_fz, "fuzzy chunked@width={width} != whole batch");
+        }
     }
 
     #[test]

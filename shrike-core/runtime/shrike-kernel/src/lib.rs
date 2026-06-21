@@ -56,8 +56,8 @@ use shrike_store::{DerivedStore, VectorIndex};
 pub mod runtime;
 pub use runtime::{
     block_on, drive_collection, drive_compute, drive_io, drive_io_until_shutdown,
-    init_driven_runtime, is_driven, shutdown_driven_pools, spawn_op, submit_blocking,
-    submit_compute,
+    init_driven_runtime, is_driven, set_compute_width, shutdown_driven_pools, spawn_op,
+    submit_blocking, submit_compute,
 };
 
 // The multi-engine routing key: re-exported so the pyo3 binding maps
@@ -2873,9 +2873,17 @@ impl Kernel {
                     .await??
             };
 
-            // Phase 2 (compute, forked): the semantic + lexical discovery reads.
-            // Both `dispatch_compute` futures are scheduled eagerly, so they run
-            // concurrently on the pool regardless of await order.
+            // Phase 2 (compute): the semantic read as ONE job (the per-modality
+            // USearch lookups are fast — not worth subdividing), and the two
+            // lexical reads CHUNKED across the compute pool. `search-batch` carries
+            // the whole query bank in one call, so a single substring (or fuzzy)
+            // job would grind every query serially on one thread while the rest of
+            // the pool idles. Splitting the query batch into ~`compute_width` chunks
+            // per read spreads the per-query work across the workers (each chunk
+            // checks out its own derived read connection, concurrent under WAL).
+            // All jobs are scheduled eagerly and run concurrently; results are
+            // collected BY INDEX (chunk then source order), never completion order,
+            // so RRF position and the exact-tier insertion order stay deterministic.
             let sem_fut = {
                 let engine = Arc::clone(&engine);
                 let vectors = vectors.clone();
@@ -2888,16 +2896,76 @@ impl Kernel {
                     }
                 })
             };
-            let lex_fut = {
-                let sources = sources.clone();
-                let lex_scope = lex_scope.clone();
-                let args = args.clone();
-                crate::runtime::dispatch_compute(move || {
-                    actions::search_lexical(&*derived, &sources, lex_scope.as_deref(), &args)
+            // One owned query text per query source (in source order), chunked
+            // across the pool. The hidden set, scope, and args are shared by Arc so
+            // a chunk job clones a pointer, not the (potentially large) data.
+            let query_texts: Vec<String> = sources
+                .iter()
+                .filter(|s| s.is_query)
+                .map(|s| s.text.clone())
+                .collect();
+            let hidden = Arc::new(args.hidden_lexical_sources.clone());
+            let lex_scope = Arc::new(lex_scope);
+            let lex_args = Arc::new(args.clone());
+            let chunk_size = query_texts
+                .len()
+                .div_ceil(crate::runtime::compute_width().max(1))
+                .max(1);
+            let chunk_ranges: Vec<(usize, usize)> = (0..query_texts.len())
+                .step_by(chunk_size)
+                .map(|start| (start, (start + chunk_size).min(query_texts.len())))
+                .collect();
+            let substr_futs: Vec<_> = chunk_ranges
+                .iter()
+                .map(|&(s, e)| {
+                    let chunk = query_texts[s..e].to_vec();
+                    let derived = Arc::clone(&derived);
+                    let hidden = Arc::clone(&hidden);
+                    let lex_scope = Arc::clone(&lex_scope);
+                    let args = Arc::clone(&lex_args);
+                    crate::runtime::dispatch_compute(move || {
+                        let qt: Vec<&str> = chunk.iter().map(String::as_str).collect();
+                        let hid: Vec<&str> = hidden.iter().map(String::as_str).collect();
+                        actions::search_substring_chunk(
+                            &*derived,
+                            &qt,
+                            &hid,
+                            lex_scope.as_deref(),
+                            &args,
+                        )
+                    })
                 })
-            };
+                .collect();
+            let fuzzy_futs: Vec<_> = chunk_ranges
+                .iter()
+                .map(|&(s, e)| {
+                    let chunk = query_texts[s..e].to_vec();
+                    let derived = Arc::clone(&derived);
+                    let hidden = Arc::clone(&hidden);
+                    let lex_scope = Arc::clone(&lex_scope);
+                    let args = Arc::clone(&lex_args);
+                    crate::runtime::dispatch_compute(move || {
+                        let qt: Vec<&str> = chunk.iter().map(String::as_str).collect();
+                        let hid: Vec<&str> = hidden.iter().map(String::as_str).collect();
+                        actions::search_fuzzy_chunk(
+                            &*derived,
+                            &qt,
+                            &hid,
+                            lex_scope.as_deref(),
+                            &args,
+                        )
+                    })
+                })
+                .collect();
             let sem_by_source = sem_fut.await?;
-            let (substr_batch, fuzzy_batch) = lex_fut.await?;
+            let mut substr_batch = Vec::with_capacity(query_texts.len());
+            for fut in substr_futs {
+                substr_batch.extend(fut.await?);
+            }
+            let mut fuzzy_batch = Vec::with_capacity(query_texts.len());
+            for fut in fuzzy_futs {
+                fuzzy_batch.extend(fut.await?);
+            }
             let discovery = actions::Discovery {
                 sem_by_source,
                 substr_batch,

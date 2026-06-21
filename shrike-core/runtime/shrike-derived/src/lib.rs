@@ -58,6 +58,11 @@ pub fn nfc(text: &str) -> Cow<'_, str> {
 /// part of the pinned engine behaviour).
 const SNIPPET_TOKENS: i64 = 12;
 
+/// Per-connection memory-map ceiling. 1 GiB covers the derived store at every
+/// standard scale (≤50k notes) and stays well under the platform `mmap_size` cap
+/// (~2 GiB on 64-bit), so the whole store maps and reads bypass the page cache.
+const MMAP_SIZE_BYTES: i64 = 1024 * 1024 * 1024;
+
 pub use shrike_store::MatchRow;
 
 /// Whether this build statically links rusqlite's bundled SQLite.
@@ -67,12 +72,41 @@ pub const fn sqlite_bundled() -> bool {
     cfg!(feature = "bundled")
 }
 
+/// One-time, process-global SQLite tuning. MUST run before the first connection
+/// opens (i.e. before SQLite initializes), so a host calls it at startup
+/// ([`shrike_native`'s module init]) and every connection-open entry point below
+/// calls it too, behind a `Once`, for hosts that don't (the C ABI, a standalone
+/// embed, tests).
+///
+/// Disables memory-statistics bookkeeping: with it on (the bundled default), every
+/// `sqlite3_malloc`/`free` takes the global `SQLITE_MUTEX_STATIC_MEM` mutex to
+/// update stats. FTS5 segment iteration allocates per page, so pooled concurrent
+/// reads serialize on that one lock — a profile of the parallel search showed
+/// nearly all its time in SQLite lock/unlock. We never read the stats, so this is
+/// behaviour-transparent. Best-effort: a no-op (`SQLITE_MISUSE`) if a connection
+/// already opened, recorded at DEBUG.
+pub fn configure_sqlite_perf() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        // SAFETY: `sqlite3_config` is the variadic C configuration API;
+        // `SQLITE_CONFIG_MEMSTATUS` consumes exactly one C int (the on/off flag),
+        // which is what is passed. Calling it before SQLite is initialized is the
+        // documented contract.
+        let rc =
+            unsafe { rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 0) };
+        if rc != rusqlite::ffi::SQLITE_OK {
+            tracing::debug!(rc, "sqlite memstatus tuning skipped (already initialized)");
+        }
+    });
+}
+
 /// Whether the linked SQLite has FTS5 with the trigram tokenizer.
 ///
 /// Probed on a throwaway in-memory connection — the same check the stdlib
 /// engine's probe performs. Trivially true under the bundled default; genuinely
 /// load-bearing when linked against a platform SQLite.
 pub fn fts5_trigram_available() -> bool {
+    configure_sqlite_perf();
     let Ok(conn) = Connection::open_in_memory() else {
         return false;
     };
@@ -128,6 +162,7 @@ impl ReadPool {
     /// `PRAGMA query_only` was the alternative and is unusable: it rejects the
     /// `CREATE TEMP TABLE` the staging needs, failing as `readonly`.)
     fn open_read_conn(path: &str) -> NativeResult<Connection> {
+        configure_sqlite_perf();
         let conn = Connection::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -139,6 +174,13 @@ impl ReadPool {
         // single writer's commit waits the lock out rather than taking an
         // instant SQLITE_BUSY (with_busy_retry is the belt past this).
         conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(db_err)?;
+        // Memory-mapped reads serve pages straight from the mapped file, bypassing
+        // the page cache entirely — so FTS5 segment reads skip both the global
+        // page-cache mutex (the bundled SQLite forces ONE shared cache group across
+        // all connections) and the per-page buffer malloc. That is the bulk of the
+        // lock traffic the pooled concurrent readers otherwise serialize on.
+        conn.pragma_update(None, "mmap_size", MMAP_SIZE_BYTES)
             .map_err(db_err)?;
         Ok(conn)
     }
@@ -300,6 +342,7 @@ impl DerivedEngine {
     ///
     /// Returns an error if the database cannot be opened or its schema migrated.
     pub fn open(path: &str, schema_version: i64) -> NativeResult<Self> {
+        configure_sqlite_perf();
         let conn = Connection::open(path).map_err(db_err)?;
         // WAL + synchronous=NORMAL. Reads run on a separate connection pool
         // ([`ReadPool`]); WAL is what lets those pooled reads proceed
@@ -326,6 +369,11 @@ impl DerivedEngine {
         // write transaction gets an instant SQLITE_BUSY instead of waiting out a
         // brief lock. (The pool's read connections set the same timeout.)
         conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(db_err)?;
+        // Memory-mapped reads (see [`MMAP_SIZE_BYTES`] / the read pool): serves the
+        // write connection's own singular reads from the map, bypassing the page
+        // cache. Writes still ride the WAL — mmap is a read path.
+        conn.pragma_update(None, "mmap_size", MMAP_SIZE_BYTES)
             .map_err(db_err)?;
 
         conn.execute(
@@ -1008,7 +1056,15 @@ impl DerivedEngine {
             [col_mod],
         )
         .map_err(db_err)?;
-        tx.commit().map_err(db_err)
+        tx.commit().map_err(db_err)?;
+        // Fold the WAL into the main file so the freshly-rebuilt index sits where
+        // memory-mapped reads can serve it (mmap sees only the main file, never WAL
+        // frames). Best-effort: a TRUNCATE checkpoint can return BUSY against a
+        // concurrent reader, in which case the next writer / the autocheckpoint
+        // cadence folds it in — a miss here only delays the mmap benefit. (The
+        // steady-state checkpoint cadence is the index-maintenance issue, #938.)
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        Ok(())
     }
 
     /// A free-form meta value (e.g. the recognizer fingerprint).

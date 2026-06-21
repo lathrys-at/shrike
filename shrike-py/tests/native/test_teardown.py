@@ -57,7 +57,7 @@ def spawn_drivers():
     # finalization — exactly the GIL-state-abort window the finalization gate
     # guards, which is the property under test. The clean-shutdown pin still
     # joins explicitly (a daemon joins fine once the pools close).
-    assert shrike_native.init_driven_runtime()
+    assert shrike_native.init_driven_runtime(2)
     io = threading.Thread(target=shrike_native.drive_io, name="shrike-io", daemon=True)
     io.start()
     shrike_native.runtime_probe()
