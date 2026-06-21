@@ -3057,8 +3057,10 @@ impl Kernel {
         // A sleeping coalesced tag refresh has nothing to read once the
         // collection actor drains — abort it next.
         self.tag_refresh.shutdown();
-        // Likewise the debounced derived-snapshot refresh: a late re-materialize
-        // would read the derived store as the collection closes under it.
+        // Likewise disarm the debounced derived-snapshot refresh — orderly teardown
+        // of the maintenance coordinators (the ingest drain has already joined, so
+        // no further write pokes it). A refresh mid-flight on the compute pool
+        // finishes harmlessly against its own still-live derived Arc.
         self.df_refresh.shutdown();
         let result = self.collection.close().await;
         self.collection.shutdown().await;

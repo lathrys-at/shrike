@@ -6,11 +6,19 @@
 //!
 //! The workload is infrequent writes in discrete batches then long read-heavy
 //! quiet, so the job uses a RE-ARMING debounce (not the immediate coalesce-loop the
-//! tag refresh uses): a write re-arms the timer, so a whole batch of `ingest_many`
-//! calls collapses into ONE refresh once it settles — never one per call, and never
-//! a refresh mid-batch (the recompute walks every trigram's doclist, so firing it
-//! before the batch is done is wasted work). A stale snapshot only mis-ranks which
-//! trigrams the prune scans, never whether a match counts, so the lag is benign.
+//! tag refresh uses): a write re-arms the timer, so a whole batch of writes
+//! collapses into ONE refresh once it settles — never one per call, never a refresh
+//! mid-batch (the recompute walks every trigram's doclist, so firing it before the
+//! batch is done is wasted work). A burst cap bounds the staleness when a write
+//! stream never quiesces (the re-arming delay would otherwise starve the refresh).
+//!
+//! The lag has a RECALL cost, not merely a ranking one: a trigram written since the
+//! snapshot reads as DF 0, sorts last in the prune, and can be truncated away, so a
+//! fuzzy match whose overlap is dominated by such just-written trigrams can be
+//! DROPPED until the refresh catches up. It is a BOUNDED window (this refresh + the
+//! next rebuild both close it), and the batch-then-quiet workload searches AFTER the
+//! batch settles — but it is not "never recall." See the doc on
+//! `DerivedEngine::refresh_trigram_df`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +32,12 @@ use crate::maintenance::Maintenance;
 const REFRESH_DELAY: Duration = Duration::from_secs(2);
 /// Pace between coalesced re-runs if a write lands while a refresh is executing.
 const REFRESH_WINDOW: Duration = Duration::from_secs(2);
+/// Burst cap: refresh immediately once this many writes accumulate without one, so a
+/// never-quiescing sub-`REFRESH_DELAY` write stream can't starve the re-arming
+/// debounce indefinitely. High enough that a normal batch quiesces (the delay fires)
+/// well before reaching it; a mid-stream refresh past the cap is merely a slightly-
+/// early, harmless re-materialize.
+const REFRESH_BURST_THRESHOLD: u64 = 4096;
 
 /// A coalescing, debounced refresher for the derived store's cached snapshots.
 pub struct DerivedSnapshotRefresher {
@@ -32,9 +46,10 @@ pub struct DerivedSnapshotRefresher {
 
 impl DerivedSnapshotRefresher {
     /// Build a refresher over `derived`. The refresh runs on the compute pool (a
-    /// blocking SQLite rewrite, O(distinct trigrams)), and is best-effort: a stale
-    /// snapshot only degrades the fuzzy prune (which tolerates drift), never
-    /// correctness, so a failure is logged, not surfaced to the op it rides on.
+    /// blocking SQLite rewrite, O(distinct trigrams)) and is best-effort: a failure
+    /// leaves a stale snapshot — which degrades prune quality and reopens the bounded
+    /// recall window (see the module doc), but never fails the op it rides on — so it
+    /// is logged, not surfaced.
     pub fn new(derived: Arc<dyn DerivedStore>) -> Arc<Self> {
         let job = Maintenance::new(
             Box::new(move || {
@@ -51,7 +66,7 @@ impl DerivedSnapshotRefresher {
             }),
             REFRESH_DELAY,
             REFRESH_WINDOW,
-            0,
+            REFRESH_BURST_THRESHOLD,
         );
         Arc::new(Self { job })
     }
@@ -62,8 +77,10 @@ impl DerivedSnapshotRefresher {
         self.job.request();
     }
 
-    /// Abort any armed/in-flight refresh (kernel close): the collection actor is
-    /// about to drain and a late refresh has nothing to read.
+    /// Disarm the debounce on kernel close — orderly shutdown of the maintenance
+    /// coordinators, so no new refresh is scheduled as the kernel tears down. (A
+    /// refresh already mid-flight on the compute pool finishes harmlessly: it holds
+    /// its own `Arc<dyn DerivedStore>`, which `collection.close()` does not close.)
     pub fn shutdown(&self) {
         self.job.shutdown();
     }

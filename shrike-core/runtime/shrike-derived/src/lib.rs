@@ -879,9 +879,10 @@ impl DerivedEngine {
         // tables, stamp col_mod — all in ONE short transaction.
         self.swap_shadow_and_stamp(live_notes, col_mod)?;
         // Re-materialize the DF snapshot the fuzzy prune reads. Synchronous, so a
-        // finished rebuild leaves it fresh; best-effort, because a stale snapshot
-        // only degrades the prune (which tolerates drift), never correctness — it
-        // must not fail an otherwise-successful rebuild.
+        // finished rebuild leaves it fresh; best-effort, because a refresh failure
+        // costs only prune quality and a bounded recall window (see the
+        // refresh_trigram_df doc), never the index — it must not fail an
+        // otherwise-successful rebuild.
         if let Err(e) = self.refresh_trigram_df() {
             tracing::warn!(
                 error = %e,
@@ -896,9 +897,14 @@ impl DerivedEngine {
     /// it once here lets the fuzzy prune read DF as a cheap primary-key lookup
     /// instead of re-counting doclists per query. Its own short transaction, so a
     /// concurrent reader sees the prior snapshot until it commits — never an empty
-    /// table. DF only orders trigrams for the prune, which tolerates drift (a stale
-    /// snapshot shifts WHICH trigrams a query scans, not whether a match counts), so
-    /// between rebuilds the snapshot may lag the live index.
+    /// table. Between rebuilds the snapshot may lag the live index, and that lag has
+    /// a RECALL cost, not merely a ranking one: the prune sorts absent (DF-0)
+    /// trigrams last and truncates, so a trigram written since the snapshot reads as
+    /// absent — a fuzzy match whose overlap is dominated by such just-written
+    /// trigrams can fall below the floor and be DROPPED until a refresh catches up.
+    /// It is a BOUNDED window (the debounced ingest-tail refresh and the next
+    /// rebuild both close it), not a permanent loss; outside that window the lag
+    /// only mis-orders which trigrams the prune scans.
     ///
     /// # Errors
     ///

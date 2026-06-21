@@ -663,9 +663,10 @@ impl Ingestor {
         .unwrap_or(false);
 
         // The trigram-DF snapshot the fuzzy prune reads is materialized at rebuild;
-        // an incremental field write/removal drifts it, so poke the debounced
-        // refresh to re-materialize once the batch settles. Best-effort (the prune
-        // tolerates a stale snapshot), so gate only on the write having succeeded.
+        // an incremental field write/removal drifts it, so poke the debounced refresh
+        // to re-materialize once the batch settles. Best-effort: the snapshot lagging
+        // degrades the prune (a bounded recall window, see refresh_trigram_df), not
+        // the index — so gate only on the write having succeeded.
         if had_derived_change && derived_ok {
             self.df_refresh.request();
         }
@@ -888,6 +889,13 @@ impl Ingestor {
         self.flush_durable_off_actor().await;
         if self.tag_keys.any_member_of(&written) {
             self.tag_refresh.request();
+        }
+        // Recognized text (OCR/ASR) lands in the same `idx` the fuzzy prune ranks
+        // on, so refresh the DF snapshot off this tail too — the field-write tail's
+        // poke does not cover the recognition path, and a recognition write never
+        // advances col.mod, so no drift rebuild would refresh it either.
+        if !write.touched.is_empty() {
+            self.df_refresh.request();
         }
         Ok(())
     }
