@@ -1969,6 +1969,9 @@ mod search_tests {
         ) -> NativeResult<()> {
             self.inner.ingest_many(notes, source)
         }
+        fn refresh_derived_snapshots(&self) -> NativeResult<()> {
+            self.inner.refresh_derived_snapshots()
+        }
         fn remove(&self, ids: &[i64], source: Option<&str>) -> NativeResult<()> {
             self.inner.remove(ids, source)
         }

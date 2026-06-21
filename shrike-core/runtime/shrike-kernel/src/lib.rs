@@ -28,6 +28,7 @@
 )]
 
 pub mod actions;
+mod derived_refresh;
 pub mod embed_set;
 pub mod fusion;
 pub mod index_orchestrator;
@@ -327,6 +328,11 @@ pub struct Kernel {
     /// write bursts; boot/rebuild paths refresh synchronously.
     tag_keys: Arc<tag_centroids::TagKeyMap>,
     tag_refresh: Arc<tag_centroids::TagRefresher>,
+    /// Debounced re-materialize of the derived store's per-write-stable snapshots
+    /// (the trigram-DF table the fuzzy prune reads). Rebuilds refresh it inline; the
+    /// ingest drain pokes this to keep it fresh across incremental writes. Held here
+    /// to abort it on close, alongside the other maintenance coordinators.
+    df_refresh: Arc<derived_refresh::DerivedSnapshotRefresher>,
     /// The recognition services (the second registry slot):
     /// OCR/ASR/describe engines the harness attaches at runtime, exactly like
     /// the embed slot — but **keyed by purpose** so OCR, ASR, and VLM
@@ -619,6 +625,7 @@ impl Kernel {
             index_set.primary_saver(),
             Arc::clone(&embed),
         );
+        let df_refresh = derived_refresh::DerivedSnapshotRefresher::new(Arc::clone(&derived));
         let recognition_gate = recognize::RecognitionGate::default();
         // The single writer over the shared sub-stores; the kernel keeps the
         // same Arcs for its concurrent read paths (search/status). All
@@ -631,6 +638,7 @@ impl Kernel {
             recognition_gate.clone(),
             Arc::clone(&tag_keys),
             Arc::clone(&tag_refresh),
+            Arc::clone(&df_refresh),
         );
         let ingest = ingest::spawn(ingestor);
         Ok(Self {
@@ -640,6 +648,7 @@ impl Kernel {
             embed,
             tag_keys,
             tag_refresh,
+            df_refresh,
             recognize: RwLock::new(BTreeMap::new()),
             recognition_gate,
             slow_recognition: Arc::new(tokio::sync::Semaphore::new(SLOW_RECOGNITION_CONCURRENCY)),
@@ -3048,6 +3057,11 @@ impl Kernel {
         // A sleeping coalesced tag refresh has nothing to read once the
         // collection actor drains — abort it next.
         self.tag_refresh.shutdown();
+        // Likewise disarm the debounced derived-snapshot refresh — orderly teardown
+        // of the maintenance coordinators (the ingest drain has already joined, so
+        // no further write pokes it). A refresh mid-flight on the compute pool
+        // finishes harmlessly against its own still-live derived Arc.
+        self.df_refresh.shutdown();
         let result = self.collection.close().await;
         self.collection.shutdown().await;
         result

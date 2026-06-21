@@ -224,6 +224,16 @@ pub trait DerivedStore: Send + Sync {
     /// Returns an error if the backing store rejects the batch transaction.
     fn ingest_many(&self, notes: &[(i64, Vec<(String, String)>)], source: &str)
         -> NativeResult<()>;
+    /// Re-materialize any per-write-stable derived snapshot the read path caches —
+    /// currently the trigram document-frequency table the fuzzy prune ranks on. A
+    /// full (re)build refreshes it inline; this is the incremental-write companion,
+    /// meant to be called (debounced) after a write batch settles so the snapshot
+    /// tracks `ingest_many`/`remove` between rebuilds. Idempotent; cheap to over-call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot rewrite fails.
+    fn refresh_derived_snapshots(&self) -> NativeResult<()>;
     /// Drop rows by note — all sources, or one.
     ///
     /// # Errors
