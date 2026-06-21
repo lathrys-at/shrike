@@ -1514,9 +1514,14 @@ impl DerivedEngine {
 
     /// Document frequency (number of indexed rows containing the term) for each of
     /// `terms`, from the `idx_vocab` view — the fuzzy path reads it to prune common
-    /// trigrams. A term absent from the result is absent from the index (DF 0). The
-    /// `term IN (…)` lookup is a pushed-down seek (not a vocab scan); chunked under
-    /// the inline-parameter cap. Reads on the passed [`ReadPool`] connection.
+    /// trigrams. A term absent from the result is absent from the index (DF 0).
+    ///
+    /// Per-term `term = ?` EQ seek, NOT `term IN (…)`. fts5vocab honours an equality
+    /// on `term` by seeking the index to that trigram and reading its doclist size
+    /// in one step; a `term IN (…)` form is NOT pushed to the vtable as per-value
+    /// seeks — it SCANS the whole trigram vocabulary and filters, which dominated
+    /// the fuzzy profile. One prepared statement, reused across the query's handful
+    /// of trigrams. Reads on the passed [`ReadPool`] connection.
     ///
     /// # Errors
     ///
@@ -1525,25 +1530,21 @@ impl DerivedEngine {
         conn: &Connection,
         terms: &[&str],
     ) -> NativeResult<std::collections::HashMap<String, i64>> {
-        let mut out: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         if terms.is_empty() {
-            return Ok(out);
+            return Ok(std::collections::HashMap::new());
         }
-        for chunk in terms.chunks(Self::INLINE_ID_MAX) {
-            let marks = vec!["?"; chunk.len()].join(",");
-            let sql = format!("SELECT term, doc FROM idx_vocab WHERE term IN ({marks})");
-            let run = || -> rusqlite::Result<std::collections::HashMap<String, i64>> {
-                let mut stmt = conn.prepare_cached(&sql)?;
-                let mut q = stmt.query(rusqlite::params_from_iter(chunk.iter()))?;
-                let mut m = std::collections::HashMap::new();
-                while let Some(r) = q.next()? {
-                    m.insert(r.get::<_, String>(0)?, r.get::<_, i64>(1)?);
+        let run = || -> rusqlite::Result<std::collections::HashMap<String, i64>> {
+            let mut stmt = conn.prepare_cached("SELECT doc FROM idx_vocab WHERE term = ?1")?;
+            let mut m = std::collections::HashMap::new();
+            for &term in terms {
+                let mut q = stmt.query([term])?;
+                if let Some(r) = q.next()? {
+                    m.insert(term.to_string(), r.get::<_, i64>(0)?);
                 }
-                Ok(m)
-            };
-            out.extend(with_busy_retry(run)?);
-        }
-        Ok(out)
+            }
+            Ok(m)
+        };
+        with_busy_retry(run)
     }
 }
 
