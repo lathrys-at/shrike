@@ -2520,21 +2520,15 @@ impl DerivedEngine {
         by_df.into_iter().cloned().collect()
     }
 
-    /// Rank one query's fuzzy candidates by trigram OVERLAP, from the per-term
-    /// posting sets gathered by [`Self::term_segments_batch`]. A segment's overlap
-    /// is how many of the query's pruned (rare) trigrams matched it; a note's
-    /// overlap is its best segment's. Keep notes sharing at least
-    /// [`FUZZY_MIN_SHARED`] pruned trigrams, one (best-overlap, lowest-rowid)
-    /// segment per note, ordered overlap-desc then note-id-asc, capped at `top_k`.
-    /// Returns `(note_id, source, ref, rowid)`; the rowid drives the deferred
-    /// snippet read. Recall-safe: the cut is by overlap, never by rowid — every
-    /// matched segment is ranked, unlike a bm25 `LIMIT` over the OR.
-    fn merge_overlap(
+    /// Accumulate one query's per-segment trigram overlap: how many of its pruned
+    /// (rare) trigrams each indexed rowid shares, from the per-term posting sets
+    /// gathered by [`Self::fuzzy_term_rowids`] (rowid-only) or
+    /// [`Self::term_segments_batch`] (with provenance). Provenance-free, so it runs
+    /// before the survivors' `(note_id, source, ref)` is known.
+    fn accumulate_overlap(
         pruned_terms: &[String],
         term_rowids: &std::collections::HashMap<String, Vec<i64>>,
-        seg_meta: &std::collections::HashMap<i64, (i64, String, String)>,
-        top_k: usize,
-    ) -> Vec<(i64, String, String, i64)> {
+    ) -> std::collections::HashMap<i64, usize> {
         let mut overlap: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
         for term in pruned_terms {
             if let Some(rowids) = term_rowids.get(term) {
@@ -2543,11 +2537,29 @@ impl DerivedEngine {
                 }
             }
         }
+        overlap
+    }
+
+    /// Rank one query's accumulated overlap into its survivors. A segment's overlap
+    /// is how many pruned trigrams matched it; a note's overlap is its best
+    /// segment's. Keep notes sharing at least [`FUZZY_MIN_SHARED`] pruned trigrams,
+    /// one (best-overlap, lowest-rowid) segment per note, ordered overlap-desc then
+    /// note-id-asc, capped at `top_k`. Returns `(note_id, source, ref, rowid)`; the
+    /// rowid drives the deferred snippet read. Recall-safe: the cut is by overlap,
+    /// never by rowid — every matched segment is ranked, unlike a bm25 `LIMIT` over
+    /// the OR. `seg_meta` must cover every rowid whose overlap reaches the floor:
+    /// the JOIN read populates it inline; the unfiltered path fetches it for the
+    /// candidate set up front ([`Self::seg_meta_for_rowids`]).
+    fn rank_overlap(
+        overlap: &std::collections::HashMap<i64, usize>,
+        seg_meta: &std::collections::HashMap<i64, (i64, String, String)>,
+        top_k: usize,
+    ) -> Vec<(i64, String, String, i64)> {
         // Best segment per note: highest overlap, lowest rowid as the deterministic
         // tie-break (so the chosen snippet segment is stable run to run).
         let mut best: std::collections::HashMap<i64, (usize, i64)> =
             std::collections::HashMap::new();
-        for (&rid, &count) in &overlap {
+        for (&rid, &count) in overlap {
             if count < FUZZY_MIN_SHARED {
                 continue;
             }
@@ -2573,6 +2585,19 @@ impl DerivedEngine {
                 (nid, source.clone(), r.clone(), rid)
             })
             .collect()
+    }
+
+    /// [`Self::accumulate_overlap`] then [`Self::rank_overlap`] against the inline
+    /// `seg_meta` of the filtered JOIN read — the scope/exclude path, where
+    /// provenance is read alongside the postings.
+    fn merge_overlap(
+        pruned_terms: &[String],
+        term_rowids: &std::collections::HashMap<String, Vec<i64>>,
+        seg_meta: &std::collections::HashMap<i64, (i64, String, String)>,
+        top_k: usize,
+    ) -> Vec<(i64, String, String, i64)> {
+        let overlap = Self::accumulate_overlap(pruned_terms, term_rowids);
+        Self::rank_overlap(&overlap, seg_meta, top_k)
     }
 
     /// Notes whose derived text literally contains `query` (case-insensitive),
@@ -2740,21 +2765,52 @@ impl DerivedEngine {
         if distinct_terms.is_empty() {
             return Ok(queries.iter().map(|_| Vec::new()).collect());
         }
-        let (term_rowids, seg_meta) = Self::term_segments_batch(
-            &conn,
-            &distinct_terms.into_iter().collect::<Vec<_>>(),
-            scope,
-            exclude_sources,
-        )?;
-        // Merge per query into ranked survivors (note_id, source, ref, rowid).
-        let survivors: Vec<Vec<(i64, String, String, i64)>> = pruned
-            .iter()
-            .map(|p| {
-                p.as_ref().map_or_else(Vec::new, |terms| {
-                    Self::merge_overlap(terms, &term_rowids, &seg_meta, top_k as usize)
+        let distinct_terms_vec: Vec<&str> = distinct_terms.into_iter().collect();
+        // Merge per query into ranked survivors (note_id, source, ref, rowid). A
+        // scope/exclude filter is pushed into the MATCH, which needs the rowmap
+        // JOIN, so it reads provenance inline. The unfiltered case (the common one)
+        // reads postings rowid-ONLY — no per-posting JOIN, no string allocs over
+        // the full lists — and hydrates `(note_id, source, ref)` once, for only the
+        // candidate set (overlap >= the floor) the ranker will actually consider.
+        let survivors: Vec<Vec<(i64, String, String, i64)>> = if scope.is_some()
+            || !exclude_sources.is_empty()
+        {
+            let (term_rowids, seg_meta) =
+                Self::term_segments_batch(&conn, &distinct_terms_vec, scope, exclude_sources)?;
+            pruned
+                .iter()
+                .map(|p| {
+                    p.as_ref().map_or_else(Vec::new, |terms| {
+                        Self::merge_overlap(terms, &term_rowids, &seg_meta, top_k as usize)
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        } else {
+            let term_rowids = Self::fuzzy_term_rowids(&conn, &distinct_terms_vec)?;
+            let overlaps: Vec<std::collections::HashMap<i64, usize>> = pruned
+                .iter()
+                .map(|p| {
+                    p.as_ref()
+                        .map_or_else(std::collections::HashMap::new, |terms| {
+                            Self::accumulate_overlap(terms, &term_rowids)
+                        })
+                })
+                .collect();
+            let mut candidates: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+            for ov in &overlaps {
+                for (&rid, &count) in ov {
+                    if count >= FUZZY_MIN_SHARED {
+                        candidates.insert(rid);
+                    }
+                }
+            }
+            let seg_meta =
+                Self::seg_meta_for_rowids(&conn, &candidates.into_iter().collect::<Vec<_>>())?;
+            overlaps
+                .iter()
+                .map(|ov| Self::rank_overlap(ov, &seg_meta, top_k as usize))
+                .collect()
+        };
         // Build snippets for the surviving rowids only, from text read by a plain
         // rowid lookup (no MATCH re-scan) and windowed in Rust around the query's
         // own rare trigrams.
@@ -2877,6 +2933,97 @@ impl DerivedEngine {
             term_rowids.insert((*term).to_string(), rids);
         }
         Ok((term_rowids, seg_meta))
+    }
+
+    /// Each term's matching idx rowids, rowid-ONLY — no `rowmap` JOIN, no
+    /// provenance. FTS5 yields rowids straight off the posting list with no table
+    /// access, the cheapest posting read; provenance is deferred to the overlap
+    /// candidates ([`Self::seg_meta_for_rowids`]). For the UNFILTERED fuzzy read
+    /// only: a scope/exclude filter needs `note_id`/`source` in the MATCH, so it
+    /// takes the JOIN path ([`Self::term_segments_batch`]). No `LIMIT`, for the same
+    /// recall reason as that path. Reads on the passed [`ReadPool`] connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any term's MATCH query fails.
+    fn fuzzy_term_rowids(
+        conn: &Connection,
+        terms: &[&str],
+    ) -> NativeResult<std::collections::HashMap<String, Vec<i64>>> {
+        let mut term_rowids: std::collections::HashMap<String, Vec<i64>> =
+            std::collections::HashMap::new();
+        if terms.is_empty() {
+            return Ok(term_rowids);
+        }
+        let span = tracing::debug_span!("derived.fuzzy_terms", n = terms.len());
+        let _enter = span.enter();
+        for term in terms {
+            let quoted = fts_quote(term);
+            let run = || -> rusqlite::Result<Result<Vec<i64>, NativeError>> {
+                let mut stmt = conn.prepare_cached("SELECT rowid FROM idx WHERE idx MATCH ?1")?;
+                let mut q = stmt.query([&quoted])?;
+                let mut rids: Vec<i64> = Vec::new();
+                loop {
+                    let row = match q.next() {
+                        Ok(Some(r)) => r,
+                        Ok(None) => break,
+                        Err(e) if is_retryable(&e) => return Err(e),
+                        Err(e) => {
+                            return Ok(Err(NativeError::invalid_input(format!("fts5 match: {e}"))))
+                        }
+                    };
+                    match row.get(0) {
+                        Ok(rid) => rids.push(rid),
+                        Err(e) if is_retryable(&e) => return Err(e),
+                        Err(e) => {
+                            return Ok(Err(NativeError::invalid_input(format!("fts5 match: {e}"))))
+                        }
+                    }
+                }
+                Ok(Ok(rids))
+            };
+            let rids = with_busy_retry(run)??;
+            term_rowids.insert((*term).to_string(), rids);
+        }
+        Ok(term_rowids)
+    }
+
+    /// Provenance `(note_id, source, ref)` per idx rowid, for a set of rowids, in
+    /// ONE batched `rowmap` read. Hydrates the overlap candidates the unfiltered
+    /// fuzzy path deferred (it read postings rowid-only). `rowmap.rowid` is the
+    /// primary key, so this is a batched PK lookup over the (small) candidate set,
+    /// not a per-posting JOIN over the full posting lists. Reads on the passed
+    /// [`ReadPool`] connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if staging the rowid set or the read fails.
+    fn seg_meta_for_rowids(
+        conn: &Connection,
+        rowids: &[i64],
+    ) -> NativeResult<std::collections::HashMap<i64, (i64, String, String)>> {
+        let mut seg_meta: std::collections::HashMap<i64, (i64, String, String)> =
+            std::collections::HashMap::new();
+        if rowids.is_empty() {
+            return Ok(seg_meta);
+        }
+        Self::stage_id_set(conn, "shrike_seg_rowids", rowids)?;
+        let run = || -> rusqlite::Result<Vec<(i64, i64, String, String)>> {
+            let mut stmt = conn.prepare_cached(
+                "SELECT m.rowid, m.note_id, m.source, m.ref FROM rowmap m \
+                 JOIN temp.shrike_seg_rowids s ON s.id = m.rowid",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        };
+        for (rowid, note_id, source, r) in with_busy_retry(run)? {
+            seg_meta.insert(rowid, (note_id, source, r));
+        }
+        Ok(seg_meta)
     }
 
     /// One snippet per surviving rowid, per query. `jobs[i]` is `(pruned_terms,
@@ -3088,6 +3235,55 @@ mod lexical_tests {
             6,
             "all overlap>=2 notes surface, none rowid-dropped"
         );
+    }
+
+    #[test]
+    fn fuzzy_unfiltered_fast_path_equals_the_scoped_join_path() {
+        // The deferred-provenance fast path (scope=None: postings read rowid-only,
+        // then note_id/source/ref hydrated for the candidate set) must return
+        // EXACTLY what the scope/exclude JOIN path returns. Scoping to every note id
+        // forces the JOIN path over identical data, so the two results — survivors,
+        // order, source/ref, AND snippet — must be equal. That equality is the
+        // recall-neutrality guarantee: deferring provenance changes nothing observed.
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-derived-fuzzyparity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
+        let mut rows: Vec<(i64, String, String, String)> = (1..=8)
+            .map(|n| {
+                (
+                    n,
+                    "field".into(),
+                    "Front".into(),
+                    format!("mitochondria powerhouse cell {n}"),
+                )
+            })
+            .collect();
+        rows.push((
+            9,
+            "field".into(),
+            "Front".into(),
+            "wholly unrelated text".into(),
+        ));
+        build_snapshot_live(&e, &rows, 1).unwrap();
+        let all_ids: Vec<i64> = (1..=9).collect();
+
+        for q in ["mitochondira", "powerhuse cell", "mitochondria powerhouse"] {
+            let unfiltered = e.search_fuzzy(q, 10, None, &[]).unwrap();
+            let scoped_all = e.search_fuzzy(q, 10, Some(&all_ids), &[]).unwrap();
+            assert!(!unfiltered.is_empty(), "expected fuzzy hits for {q:?}");
+            assert_eq!(
+                unfiltered, scoped_all,
+                "unfiltered fast path diverged from the scoped JOIN path for {q:?}"
+            );
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
