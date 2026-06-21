@@ -226,18 +226,19 @@ http_file(
 # same pure-ViT model the int8 fixture used (so the solid-colour retrieval contract
 # holds, unlike a hybrid-conv small model), at roughly half the bytes. Only the two
 # graphs change precision; the tokenizer + preprocessor_config are byte-identical to
-# the int8 export, so their pins are unchanged. The q4 graph sha256s are harvested
-# from CI's no-checksum fetch (HF egress is unavailable in the dev sandbox) and MUST
-# be present + correct before merge.
+# the int8 export, so their pins are unchanged. q4 is weight-only quant, so it batches
+# (the probe finds it batch-safe), unlike the dynamic-int8 export which ran serially.
 http_file(
     name = "model_clip_text_onnx",
     downloaded_file_path = "text_model_q4.onnx",
+    sha256 = "e4ccd15d806b8af841a036884b42034535d58e04c52df00f56e73f72d3c166d5",
     urls = ["https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model_q4.onnx"],
 )
 
 http_file(
     name = "model_clip_vision_onnx",
     downloaded_file_path = "vision_model_q4.onnx",
+    sha256 = "0769eb1d2f6f68927bbfa6e5330df4c4c3c112f89cd43eae28baafa9e6bd34b4",
     urls = ["https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_q4.onnx"],
 )
 

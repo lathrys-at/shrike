@@ -84,10 +84,12 @@ class TestClipModel:
         # The encoders actually run (distinct inputs → distinct vectors).
         assert not np.allclose(tvecs[0], tvecs[1])
 
-    def test_quantized_clip_is_serial(self, be: ClipBackend) -> None:
-        # The quantized graphs are batch-variant (dynamic quantization), so the probe forces serial.
-        assert be._safe_batch == 1
-        assert be.health()["batch"] == "serial"
+    def test_q4_clip_batches(self, be: ClipBackend) -> None:
+        # q4 is weight-only quant (activations stay fp), so batched ≈ serial and the
+        # probe finds it batch-safe → it batches (a dynamic-int8 export would be
+        # batch-variant and run serially instead).
+        assert be._safe_batch >= 2
+        assert be.health()["batch"] == "batched"
 
     def test_health(self, be: ClipBackend) -> None:
         h = be.health()

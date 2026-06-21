@@ -160,7 +160,9 @@ def cases() -> list[BackendCase]:
             fingerprint_prefixes=("clip-rs:",),
             make=_make_clip,
             restart_exact=True,
-            batch_exact=True,
+            # q4 is weight-only quant: the probe finds it batch-safe (it batches), but
+            # batched vs serial is tolerance-equal, not byte-equal — so not batch_exact.
+            batch_exact=False,
             marks=(requires_clip, requires_shrike_native),
         ),
         BackendCase(
