@@ -974,7 +974,7 @@ class ShrikeClient:
         self._autostarted = True
 
         if self.wait_until_ready() is None and proc.poll() is not None:
-            daemon.cleanup_state()
+            daemon.cleanup_state(sd)
             raise ServerStartError(
                 f"Server process exited with code {proc.returncode}. "
                 f"Check the log in {spec.log_dir}."
