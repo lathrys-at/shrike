@@ -434,6 +434,7 @@ impl DerivedEngine {
             "DROP TABLE IF EXISTS rowmap",
             "DROP TABLE IF EXISTS segments",
             "DROP TABLE IF EXISTS gated",
+            "DROP TABLE IF EXISTS trigram_df",
             "DELETE FROM meta WHERE key='col_mod'",
         ] {
             conn.execute(sql, []).map_err(db_err)?;
