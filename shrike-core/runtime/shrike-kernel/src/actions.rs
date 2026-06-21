@@ -1786,6 +1786,66 @@ mod search_tests {
     }
 
     #[test]
+    fn chunked_lexical_matches_whole_batch_at_every_width() {
+        // `search_fused` splits the query batch into ~compute_width chunks per read
+        // and reassembles BY INDEX. The chunked result must equal the whole-batch
+        // `search_lexical` at EVERY width — the recall/ranking gate: chunking
+        // changes only how the reads are batched, never the results.
+        let (dir, core) = temp_collection();
+        let notes: Vec<shrike_schemas::NoteInput> = serde_json::from_str(
+            r#"[
+              {"note_type": "Basic", "deck": "D",
+               "fields": {"Front": "the mitochondria is the powerhouse of the cell", "Back": "b"}},
+              {"note_type": "Basic", "deck": "D",
+               "fields": {"Front": "the krebs cycle in the mitochondria", "Back": "b"}},
+              {"note_type": "Basic", "deck": "D",
+               "fields": {"Front": "mitochondrial dna replication", "Back": "b"}}
+            ]"#,
+        )
+        .unwrap();
+        core.upsert_notes(&notes, shrike_collection::DuplicatePolicy::Error, false)
+            .unwrap();
+        let e = derived_for(&core, &dir);
+
+        // exact hits, a transposition typo (fuzzy), a no-match, and singletons.
+        let bank = [
+            "mitochondria",
+            "mitochondira",
+            "krebs",
+            "zzznope",
+            "powerhouse",
+            "cell",
+            "dna",
+        ];
+        let sources: Vec<SearchSource> = bank.iter().map(|t| query(t)).collect();
+        let a = args(5);
+        let scope: Option<&[i64]> = None;
+        let (whole_sub, whole_fz) = search_lexical(&e, &sources, scope, &a).unwrap();
+
+        for width in [1usize, 2, 3, 4, 8, 16] {
+            // Mirror search_fused's chunking exactly: chunk_size = div_ceil(width),
+            // contiguous ranges, in-order concat.
+            let (qt, hidden) = lexical_query_inputs(&sources, &a);
+            let chunk_size = qt.len().div_ceil(width.max(1)).max(1);
+            let (mut sub, mut fz) = (Vec::new(), Vec::new());
+            let mut start = 0;
+            while start < qt.len() {
+                let end = (start + chunk_size).min(qt.len());
+                sub.extend(
+                    search_substring_chunk(&e, &qt[start..end], &hidden, scope, &a).unwrap(),
+                );
+                fz.extend(search_fuzzy_chunk(&e, &qt[start..end], &hidden, scope, &a).unwrap());
+                start = end;
+            }
+            assert_eq!(
+                sub, whole_sub,
+                "substring chunked@width={width} != whole batch"
+            );
+            assert_eq!(fz, whole_fz, "fuzzy chunked@width={width} != whole batch");
+        }
+    }
+
+    #[test]
     fn scoped_lexical_search_serves_from_the_store() {
         // A deck-scoped literal/fuzzy search rides the FTS5 store with the scope
         // id set pushed into the query — exact recall inside the scope, zero

@@ -648,6 +648,11 @@ pub mod testing {
                     .expect("the fixture current_thread runtime builds"),
             )
             .unwrap_or_else(|_| panic!("the test process owns the driven runtime seam"));
+            // Mirror production: record the committed pool width so search_fused
+            // fans the lexical reads out across exactly the workers parked below
+            // (the chunk count is sized to compute_width). Without this, tests
+            // would chunk at available_parallelism() — a different count than prod.
+            set_compute_width(COMPUTE_THREADS);
 
             spawn("shrike-io", || {
                 let _ = drive_io_until_shutdown();
