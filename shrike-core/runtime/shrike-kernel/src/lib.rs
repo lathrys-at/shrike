@@ -2907,10 +2907,15 @@ impl Kernel {
             let hidden = Arc::new(args.hidden_lexical_sources.clone());
             let lex_scope = Arc::new(lex_scope);
             let lex_args = Arc::new(args.clone());
+            // A floor on the chunk size: each pooled read contends on SQLite's
+            // global allocator / page-cache mutexes, so over-fine chunks add more
+            // concurrent readers fighting those locks than they save in work. The
+            // floor caps the reader count (e.g. 20 queries → 4 chunks, not 6).
+            const MIN_LEXICAL_CHUNK: usize = 5;
             let chunk_size = query_texts
                 .len()
                 .div_ceil(crate::runtime::compute_width().max(1))
-                .max(1);
+                .max(MIN_LEXICAL_CHUNK);
             let chunk_ranges: Vec<(usize, usize)> = (0..query_texts.len())
                 .step_by(chunk_size)
                 .map(|start| (start, (start + chunk_size).min(query_texts.len())))

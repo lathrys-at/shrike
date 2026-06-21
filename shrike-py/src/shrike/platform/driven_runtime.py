@@ -29,7 +29,7 @@ logger = logging.getLogger("shrike.server")
 # unreasonable number of parked threads (they are cheap when idle, but the
 # committed-pool model wants a predictable count).
 MIN_COMPUTE_THREADS = 2
-MAX_COMPUTE_THREADS = 8
+MAX_COMPUTE_THREADS = 4
 
 # How long to wait for each committed thread to return after the pools are
 # closed. The kernel is quiesced before shutdown, so the join is normally
