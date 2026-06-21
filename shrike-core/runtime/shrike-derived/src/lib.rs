@@ -611,6 +611,38 @@ impl DerivedEngine {
         }
     }
 
+    /// The `AND m.note_id IN (...)` scope filter for a deck/tag-scoped read: inline
+    /// integer literals at or below [`Self::INLINE_ID_MAX`], a staged TEMP-table
+    /// subquery above it.
+    ///
+    /// Inlining (not staging) is load-bearing on the PARALLEL read path: a temp
+    /// table's btree pages bypass mmap (which maps only the main DB file), so they
+    /// fault through `pcache1`'s `STATIC_LRU` mutex and serialize the parallel
+    /// substring/fuzzy chunks. The ids are our own `i64`s (no injection surface), so
+    /// they go straight into the SQL; the inline form costs a statement-cache entry
+    /// per distinct scope (vs. one stable entry for the staged form), far cheaper
+    /// than the mutex it avoids. Only a scope past the inline ceiling stages a temp
+    /// set, where the parser's expression-list cap would otherwise bite.
+    fn scope_clause(conn: &Connection, scope: Option<&[i64]>) -> NativeResult<String> {
+        match scope {
+            Some(ids) if !ids.is_empty() => {
+                if ids.len() <= Self::INLINE_ID_MAX {
+                    let csv = ids
+                        .iter()
+                        .map(|i| i.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    Ok(format!("AND m.note_id IN ({csv}) "))
+                } else {
+                    Self::stage_id_set(conn, "shrike_scope_ids", ids)?;
+                    Ok("AND m.note_id IN (SELECT id FROM temp.shrike_scope_ids) ".to_string())
+                }
+            }
+            Some(_) => Ok("AND 0 ".to_string()), // an empty scope matches nothing
+            None => Ok(String::new()),
+        }
+    }
+
     fn delete_rows(conn: &Connection, note_ids: &[i64], source: Option<&str>) -> NativeResult<()> {
         if note_ids.is_empty() {
             return Ok(());
@@ -1376,26 +1408,7 @@ impl DerivedEngine {
         let _enter = span.enter();
         let conn = self.lock();
         let txt_col = if with_text { "idx.txt" } else { "NULL" };
-        // Small scopes inline as literals (i64s — no injection surface);
-        // large ones are staged in a TEMP table, since SQLite's parser caps
-        // long expression lists.
-        let scope_clause = match scope {
-            Some(ids) if !ids.is_empty() => {
-                if ids.len() <= Self::INLINE_ID_MAX {
-                    let csv = ids
-                        .iter()
-                        .map(|i| i.to_string())
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    format!("AND m.note_id IN ({csv}) ")
-                } else {
-                    Self::stage_id_set(&conn, "shrike_scope_ids", ids)?;
-                    "AND m.note_id IN (SELECT id FROM temp.shrike_scope_ids) ".to_string()
-                }
-            }
-            Some(_) => "AND 0 ".to_string(), // an empty scope matches nothing
-            None => String::new(),
-        };
+        let scope_clause = Self::scope_clause(&conn, scope)?;
         // Hidden-source exclusion: a VectorOnly recognition source is dropped
         // BEFORE ranking/limiting, so its rows never surface on a lexical query
         // yet stay stored for provenance + reconcile. Bound as positional params
@@ -1462,24 +1475,23 @@ impl DerivedEngine {
     }
 
     /// [`Self::match_rows`] over many MATCH expressions on `conn`, sharing ONE
-    /// scope staging and ONE compiled statement (through the connection's
-    /// statement cache) across the whole batch. The fused-search lexical reads
-    /// call this once for all query strings rather than re-staging the scope and
-    /// recompiling the statement per query. Returns one row vector per
-    /// expression, in `exprs` order.
+    /// compiled statement (through the connection's statement cache) across the
+    /// whole batch. The fused-search lexical reads call this once for all query
+    /// strings rather than re-resolving the scope and recompiling the statement per
+    /// query. Returns one row vector per expression, in `exprs` order.
     ///
     /// `conn` is a checked-out [`ReadPool`] connection — read-only by discipline
-    /// (SELECTs plus the TEMP scope staging below, never a store write).
+    /// (SELECTs, plus a TEMP scope set only for a scope past the inline cap, never a
+    /// store write).
     ///
-    /// The scope (when present) is staged ONCE in a per-connection TEMP table and
-    /// referenced as an invariant `IN (SELECT id FROM temp.…)` subquery, so the
-    /// SQL text — hence the statement-cache key — is identical for every query in
-    /// the batch and the statement compiles once for the whole set. (The singular
-    /// [`Self::match_rows`] inlines a small scope; the result set is identical.)
+    /// The scope is constant across the batch, so its clause — inline literals at or
+    /// below the inline cap, a TEMP subquery above it (see [`Self::scope_clause`]) —
+    /// leaves the SQL text, hence the statement-cache key, identical for every query
+    /// in the batch, and the statement compiles once for the whole set.
     ///
     /// # Errors
     ///
-    /// Returns an error if scope staging fails, or any expression's MATCH query
+    /// Returns an error if resolving the scope fails, or any expression's MATCH query
     /// fails (the batch stops at the first failure, like the singular read).
     fn match_rows_batch(
         conn: &Connection,
@@ -1495,17 +1507,11 @@ impl DerivedEngine {
         let span = tracing::debug_span!("derived.match_batch", n = exprs.len(), limit, with_text);
         let _enter = span.enter();
         let txt_col = if with_text { "idx.txt" } else { "NULL" };
-        // Stage the scope ONCE for the whole batch as an invariant subquery: it is
-        // referenced by every query below, and the staged form keeps the SQL — the
-        // statement-cache key — stable so the statement compiles once.
-        let scope_clause = match scope {
-            Some(ids) if !ids.is_empty() => {
-                Self::stage_id_set(conn, "shrike_scope_ids", ids)?;
-                "AND m.note_id IN (SELECT id FROM temp.shrike_scope_ids) ".to_string()
-            }
-            Some(_) => "AND 0 ".to_string(), // an empty scope matches nothing
-            None => String::new(),
-        };
+        // The scope is constant across the batch, so inlining it as literals leaves
+        // the SQL — the prepare_cached key — stable across the batch's queries (it
+        // compiles once), while keeping the parallel chunks off the temp-table
+        // pcache mutex a staged set would re-introduce. See [`Self::scope_clause`].
+        let scope_clause = Self::scope_clause(conn, scope)?;
         let exclude_clause = if exclude_sources.is_empty() {
             String::new()
         } else {
@@ -2976,7 +2982,7 @@ impl DerivedEngine {
     /// text contains it: `term_rowids[term]` is the matching idx rowids, and
     /// `seg_meta[rowid]` their `(note_id, source, ref)` provenance (owned once,
     /// shared across queries). One MATCH per term — no rank, no text, no limit, just
-    /// the posting — sharing ONE connection and ONE staged scope across the set, like
+    /// the posting — sharing ONE connection and ONE scope clause across the set, like
     /// [`Self::match_rows_batch`]. No `LIMIT`: the overlap ranker needs every match
     /// to stay recall-safe; a rowid `LIMIT` here would silently drop high-rowid
     /// (recently-added) high-overlap notes. Reads on the passed [`ReadPool`]
@@ -2984,7 +2990,7 @@ impl DerivedEngine {
     ///
     /// # Errors
     ///
-    /// Returns an error if scope staging or any term's MATCH query fails.
+    /// Returns an error if resolving the scope or any term's MATCH query fails.
     #[allow(clippy::type_complexity)]
     fn term_segments_batch(
         conn: &Connection,
@@ -3003,14 +3009,7 @@ impl DerivedEngine {
         }
         let span = tracing::debug_span!("derived.fuzzy_terms", n = terms.len());
         let _enter = span.enter();
-        let scope_clause = match scope {
-            Some(ids) if !ids.is_empty() => {
-                Self::stage_id_set(conn, "shrike_scope_ids", ids)?;
-                "AND m.note_id IN (SELECT id FROM temp.shrike_scope_ids) ".to_string()
-            }
-            Some(_) => "AND 0 ".to_string(), // an empty scope matches nothing
-            None => String::new(),
-        };
+        let scope_clause = Self::scope_clause(conn, scope)?;
         let exclude_clause = if exclude_sources.is_empty() {
             String::new()
         } else {
