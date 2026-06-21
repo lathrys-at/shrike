@@ -2998,19 +2998,25 @@ impl DerivedEngine {
         Ok(term_rowids)
     }
 
-    /// Provenance `(note_id, source, ref)` per idx rowid, for a set of rowids, in
-    /// ONE batched `rowmap` read, dropping any whose `source` is in
-    /// `exclude_sources`. Hydrates the overlap candidates the unfiltered fuzzy path
-    /// deferred (it read postings rowid-only, hidden sources included), applying the
-    /// `exclude_sources` filter HERE rather than in the per-posting scan. A dropped
-    /// rowid is then absent from the returned map, so [`Self::rank_overlap`] skips
-    /// it — the same effect as the JOIN path's `source NOT IN`, off the hot scan.
-    /// `rowmap.rowid` is the primary key, so this is a batched PK lookup over the
-    /// (small) candidate set. Reads on the passed [`ReadPool`] connection.
+    /// Provenance `(note_id, source, ref)` per idx rowid, for a set of rowids,
+    /// dropping any whose `source` is in `exclude_sources`. Hydrates the overlap
+    /// candidates the unfiltered fuzzy path deferred (it read postings rowid-only,
+    /// hidden sources included), applying the `exclude_sources` filter HERE rather
+    /// than in the per-posting scan. A dropped rowid is then absent from the
+    /// returned map, so [`Self::rank_overlap`] skips it — the same effect as the
+    /// JOIN path's `source NOT IN`, off the hot scan.
+    ///
+    /// The rowid set goes in as an INLINE integer `IN` list (the rowids are our own
+    /// `i64`s — no injection), NOT a staged temp table. That is load-bearing: a temp
+    /// table's btree pages bypass mmap (it maps only the main DB file), so they
+    /// fault through `pcache1`'s `STATIC_LRU` mutex and serialize the parallel fuzzy
+    /// chunks. `rowmap` lives in the mmap'd main file, so an inline `IN` seeks it
+    /// (rowid is its primary key) with no shared-cache mutex. Chunked so the SQL
+    /// text stays bounded. Reads on the passed [`ReadPool`] connection.
     ///
     /// # Errors
     ///
-    /// Returns an error if staging the rowid set or the read fails.
+    /// Returns an error if the read fails.
     fn seg_meta_for_rowids(
         conn: &Connection,
         rowids: &[i64],
@@ -3018,38 +3024,31 @@ impl DerivedEngine {
     ) -> NativeResult<std::collections::HashMap<i64, (i64, String, String)>> {
         let mut seg_meta: std::collections::HashMap<i64, (i64, String, String)> =
             std::collections::HashMap::new();
-        if rowids.is_empty() {
-            return Ok(seg_meta);
-        }
-        Self::stage_id_set(conn, "shrike_seg_rowids", rowids)?;
-        let exclude_clause = if exclude_sources.is_empty() {
-            String::new()
-        } else {
-            let marks = (0..exclude_sources.len())
-                .map(|i| format!("?{}", i + 1))
+        for chunk in rowids.chunks(Self::INLINE_ID_MAX) {
+            let id_list = chunk
+                .iter()
+                .map(i64::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
-            format!("WHERE m.source NOT IN ({marks}) ")
-        };
-        let sql = format!(
-            "SELECT m.rowid, m.note_id, m.source, m.ref FROM rowmap m \
-             JOIN temp.shrike_seg_rowids s ON s.id = m.rowid {exclude_clause}"
-        );
-        let run = || -> rusqlite::Result<Vec<(i64, i64, String, String)>> {
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let params: Vec<&dyn rusqlite::ToSql> = exclude_sources
-                .iter()
-                .map(|s| s as &dyn rusqlite::ToSql)
-                .collect();
-            let rows = stmt
-                .query_map(rusqlite::params_from_iter(params), |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        };
-        for (rowid, note_id, source, r) in with_busy_retry(run)? {
-            seg_meta.insert(rowid, (note_id, source, r));
+            let sql = format!(
+                "SELECT m.rowid, m.note_id, m.source, m.ref FROM rowmap m \
+                 WHERE m.rowid IN ({id_list})"
+            );
+            let run = || -> rusqlite::Result<Vec<(i64, i64, String, String)>> {
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            };
+            for (rowid, note_id, source, r) in with_busy_retry(run)? {
+                if exclude_sources.contains(&source.as_str()) {
+                    continue;
+                }
+                seg_meta.insert(rowid, (note_id, source, r));
+            }
         }
         Ok(seg_meta)
     }
