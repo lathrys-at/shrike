@@ -665,8 +665,8 @@ impl Ingestor {
         // The trigram-DF snapshot the fuzzy prune reads is materialized at rebuild;
         // an incremental field write/removal drifts it, so poke the debounced refresh
         // to re-materialize once the batch settles. Best-effort: the snapshot lagging
-        // degrades the prune (a bounded recall window, see refresh_trigram_df), not
-        // the index — so gate only on the write having succeeded.
+        // degrades the prune (a ranking drift, see refresh_trigram_df), not the
+        // index — so gate only on the write having succeeded.
         if had_derived_change && derived_ok {
             self.df_refresh.request();
         }

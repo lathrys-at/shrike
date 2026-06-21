@@ -12,13 +12,11 @@
 //! batch is done is wasted work). A burst cap bounds the staleness when a write
 //! stream never quiesces (the re-arming delay would otherwise starve the refresh).
 //!
-//! The lag has a RECALL cost, not merely a ranking one: a trigram written since the
-//! snapshot reads as DF 0, sorts last in the prune, and can be truncated away, so a
-//! fuzzy match whose overlap is dominated by such just-written trigrams can be
-//! DROPPED until the refresh catches up. It is a BOUNDED window (this refresh + the
-//! next rebuild both close it), and the batch-then-quiet workload searches AFTER the
-//! batch settles — but it is not "never recall." See the doc on
-//! `DerivedEngine::refresh_trigram_df`.
+//! The snapshot lag is a RANKING drift, not a recall loss: the prune scans every
+//! absent (DF-0) trigram, so a trigram written since the snapshot is still scanned
+//! and a match through it is still found (see `DerivedEngine::prune_to_rare_terms`).
+//! Keeping the snapshot fresh keeps the prune's rarest-trigram SELECTION accurate —
+//! a quality concern, not a correctness one. See `refresh_trigram_df`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,9 +45,9 @@ pub struct DerivedSnapshotRefresher {
 impl DerivedSnapshotRefresher {
     /// Build a refresher over `derived`. The refresh runs on the compute pool (a
     /// blocking SQLite rewrite, O(distinct trigrams)) and is best-effort: a failure
-    /// leaves a stale snapshot — which degrades prune quality and reopens the bounded
-    /// recall window (see the module doc), but never fails the op it rides on — so it
-    /// is logged, not surfaced.
+    /// leaves a stale snapshot — which degrades prune quality (a ranking drift, see
+    /// the module doc), but never fails the op it rides on — so it is logged, not
+    /// surfaced.
     pub fn new(derived: Arc<dyn DerivedStore>) -> Arc<Self> {
         let job = Maintenance::new(
             Box::new(move || {
