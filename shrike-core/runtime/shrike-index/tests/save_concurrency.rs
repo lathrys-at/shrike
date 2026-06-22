@@ -101,7 +101,7 @@ fn searches_during_repeated_saves_stay_correct_and_never_crash() {
             let mut q = 100i64 + t as i64;
             while !st.load(Ordering::Relaxed) {
                 let out = e
-                    .search_by_modality(std::slice::from_ref(&vecs[q as usize]), 5, None)
+                    .search_by_modality(std::slice::from_ref(&vecs[q as usize]), 5, None, None)
                     .unwrap();
                 // Structural validity under the concurrent save: a populated
                 // index must return hits, every key in range, every distance

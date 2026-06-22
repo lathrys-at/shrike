@@ -1032,7 +1032,7 @@ impl Kernel {
             // on THIS space's engine.
             let qvectors = svc.embedder.embed(source_texts.to_vec()).await?;
             let engine = orch.engine_arc();
-            let rows = engine.search_by_modality(&qvectors, fetch_k, Some(&note_spaces))?;
+            let rows = engine.search_by_modality(&qvectors, fetch_k, Some(&note_spaces), None)?;
             let per_source: Vec<actions::SpaceSourceHits> = rows
                 .into_iter()
                 .map(|modality_hits| {
@@ -1179,8 +1179,12 @@ impl Kernel {
         let qvectors = svc.embedder.embed(texts).await?;
         // CALIB_K so a pseudo-query whose own image is the nearest hit still has
         // a non-self hit to record (mirrors the engine's intra-modal sampling).
-        let rows =
-            engine.search_by_modality(&qvectors, index_orchestrator::CALIB_K, Some(note_spaces))?;
+        let rows = engine.search_by_modality(
+            &qvectors,
+            index_orchestrator::CALIB_K,
+            Some(note_spaces),
+            None,
+        )?;
         let mut best_sims: Vec<f64> = Vec::with_capacity(sample.len());
         for ((self_id, _), modality_hits) in sample.iter().zip(rows.iter()) {
             let Some((keys, dists)) = modality_hits.get("image") else {
@@ -2881,6 +2885,10 @@ impl Kernel {
                     })
                     .await??
             };
+            // Scope is shared by Arc across every Phase 2 job (the semantic walk +
+            // the lexical chunks) and Phase 3 assembly — a job clones a pointer, not
+            // the set.
+            let lex_scope = Arc::new(lex_scope);
 
             // Phase 2 (compute): the semantic read as ONE job (the per-modality
             // USearch lookups are fast — not worth subdividing), and the two
@@ -2897,9 +2905,10 @@ impl Kernel {
                 let engine = Arc::clone(&engine);
                 let vectors = vectors.clone();
                 let args = args.clone();
+                let lex_scope = Arc::clone(&lex_scope);
                 crate::runtime::dispatch_compute(move || {
                     if args.semantic {
-                        actions::search_semantic(&*engine, &vectors, &args)
+                        actions::search_semantic(&*engine, &vectors, &args, lex_scope.as_deref())
                     } else {
                         Ok(Vec::new())
                     }
@@ -2914,7 +2923,6 @@ impl Kernel {
                 .map(|s| s.text.clone())
                 .collect();
             let hidden = Arc::new(args.hidden_lexical_sources.clone());
-            let lex_scope = Arc::new(lex_scope);
             let lex_args = Arc::new(args.clone());
             let chunk_size = query_texts
                 .len()
@@ -2992,6 +3000,7 @@ impl Kernel {
                         &sources,
                         &vectors,
                         &args,
+                        lex_scope.as_deref(),
                         discovery,
                     )?;
                     Ok((groups, core.col_mod()?, settled.is_settled()))

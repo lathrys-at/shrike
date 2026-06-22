@@ -1064,7 +1064,7 @@ impl NativeIndexEngine {
     ) -> PyResult<ModalityRankings> {
         py.detach(|| {
             self.inner
-                .search_by_modality(&queries, k, modalities.as_deref())
+                .search_by_modality(&queries, k, modalities.as_deref(), None)
         })
         .map_err(to_py_err)
     }

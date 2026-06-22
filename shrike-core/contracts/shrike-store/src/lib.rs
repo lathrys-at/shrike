@@ -44,6 +44,55 @@ pub type ActivationStats = Vec<(String, f64, f64, f64)>;
 /// `(note_id, source, ref, text?, snippet?)`.
 pub type MatchRow = (i64, String, String, Option<String>, Option<String>);
 
+/// A fast non-cryptographic hasher for the search path's `i64`-keyed maps (rowids,
+/// note-ids). `std`'s default is SipHash — DoS-resistant, but slow on small integer
+/// keys; these maps are internal (keys are our own index rowids/note-ids, never
+/// adversarial input), so the FxHash rotate-xor-multiply is the right trade. The
+/// hash cost shows up directly in the search profile (the fuzzy overlap maps, the
+/// kernel's RRF score maps, the vector index's scope set), so it lives here — the
+/// only crate the index, derived, and kernel impls all depend on.
+#[derive(Default)]
+pub struct FxI64Hasher(u64);
+
+impl FxI64Hasher {
+    const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+    #[inline]
+    fn add(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(Self::K);
+    }
+}
+
+impl std::hash::Hasher for FxI64Hasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write_i64(&mut self, i: i64) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+    // Required, but the i64/u64-keyed maps never reach it; hash byte-wise as a
+    // correct fallback so the type stays a general `Hasher`.
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.add(u64::from(b));
+        }
+    }
+}
+
+/// `HashMap` keyed on `i64` with [`FxI64Hasher`] — the search path's integer-keyed
+/// map type (fuzzy overlap, RRF score maps).
+pub type FxI64Map<V> =
+    std::collections::HashMap<i64, V, std::hash::BuildHasherDefault<FxI64Hasher>>;
+
+/// `HashSet` keyed on `i64` with [`FxI64Hasher`] — the search path's integer-keyed
+/// set type (the deck/tag scope membership set).
+pub type FxI64Set = std::collections::HashSet<i64, std::hash::BuildHasherDefault<FxI64Hasher>>;
+
 /// One lexical (substring/fuzzy) hit: `(note_id, source, ref, snippet?)`.
 pub type LexicalRow = (i64, String, String, Option<String>);
 
@@ -120,6 +169,11 @@ pub trait VectorIndex: Send + Sync {
     /// Rank each query against each (selected) modality separately — the
     /// per-modality RRF signals.
     ///
+    /// `scope`, when set, is the note-id set a deck/tag-scoped search restricts to:
+    /// it is pushed into the index walk as a per-candidate predicate (so the walk
+    /// returns only in-scope neighbours, no over-fetch-then-filter), NOT applied
+    /// afterwards. `None` searches the whole index.
+    ///
     /// # Errors
     ///
     /// Returns an error if a query's dimension conflicts with a searched
@@ -129,6 +183,7 @@ pub trait VectorIndex: Send + Sync {
         queries: &[Vec<f32>],
         k: usize,
         modalities: Option<&[String]>,
+        scope: Option<&[i64]>,
     ) -> NativeResult<Vec<BTreeMap<String, ModalityRanking>>>;
     /// Whether any vector is stored under `key` (any modality).
     fn contains(&self, key: i64) -> bool;

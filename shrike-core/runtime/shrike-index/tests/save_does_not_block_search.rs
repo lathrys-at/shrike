@@ -61,7 +61,7 @@ fn search_is_not_serialized_behind_a_concurrent_save() {
     // A single (uncontended) search is the latency floor.
     let t0 = Instant::now();
     let _ = engine
-        .search_by_modality(std::slice::from_ref(&q), 10, None)
+        .search_by_modality(std::slice::from_ref(&q), 10, None, None)
         .unwrap();
     let uncontended = t0.elapsed();
 
@@ -85,7 +85,7 @@ fn search_is_not_serialized_behind_a_concurrent_save() {
     std::thread::sleep(Duration::from_millis(1));
 
     let t_search0 = Instant::now();
-    let _ = engine.search_by_modality(&[q], 10, None).unwrap();
+    let _ = engine.search_by_modality(&[q], 10, None, None).unwrap();
     let contended_search = t_search0.elapsed();
 
     let _ = saver.join().unwrap();

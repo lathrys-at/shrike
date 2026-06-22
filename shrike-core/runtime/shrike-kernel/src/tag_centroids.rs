@@ -515,6 +515,7 @@ pub fn tag_ranking(
         &[query.to_vec()],
         top_tags,
         Some(&[TAG_TEXT_SPACE.to_string()]),
+        None,
     ) else {
         return Vec::new();
     };
@@ -759,7 +760,7 @@ mod tests {
 
         // A note search scoped to NOTE_MODALITIES never sees the tag key.
         let hits = engine
-            .search_by_modality(&[vec![1.0, 0.0]], 10, Some(&["text".to_string()]))
+            .search_by_modality(&[vec![1.0, 0.0]], 10, Some(&["text".to_string()]), None)
             .unwrap();
         let ids = &hits[0]["text"].0;
         assert!(!ids.contains(&tag_key("topic")));

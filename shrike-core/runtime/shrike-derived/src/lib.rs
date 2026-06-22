@@ -2520,49 +2520,11 @@ pub const FUZZY_MIN_SHARED: usize = 2;
 /// has only a handful of trigrams, all kept). A perf/recall dial.
 pub const FUZZY_MAX_TRIGRAMS: usize = 6;
 
-/// A fast non-cryptographic hasher for the search path's `i64`-keyed maps (rowids,
-/// note-ids). `std`'s default is SipHash — DoS-resistant, but slow on small integer
-/// keys; these maps are internal (keys are our own index rowids/note-ids, never
-/// adversarial input), so the FxHash rotate-xor-multiply is the right trade. The
-/// hash cost shows up directly in the search profile (the fuzzy overlap maps here,
-/// the kernel's RRF score maps), so it is shared. Same logic, faster keys.
-#[derive(Default)]
-pub struct FxI64Hasher(u64);
-
-impl FxI64Hasher {
-    const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
-    #[inline]
-    fn add(&mut self, i: u64) {
-        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(Self::K);
-    }
-}
-
-impl std::hash::Hasher for FxI64Hasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    #[inline]
-    fn write_i64(&mut self, i: i64) {
-        self.add(i as u64);
-    }
-    #[inline]
-    fn write_u64(&mut self, i: u64) {
-        self.add(i);
-    }
-    // Required, but the i64/u64-keyed maps never reach it; hash byte-wise as a
-    // correct fallback so the type stays a general `Hasher`.
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.add(u64::from(b));
-        }
-    }
-}
-
-/// `HashMap` keyed on `i64` with [`FxI64Hasher`] — the search path's integer-keyed
-/// map type (fuzzy overlap here, RRF score maps in the kernel).
-pub type FxI64Map<V> =
-    std::collections::HashMap<i64, V, std::hash::BuildHasherDefault<FxI64Hasher>>;
+// The integer-keyed fast-hash types live in `shrike-store` (the only crate the
+// index, derived, and kernel impls all share, so the vector index can use the same
+// hasher); re-exported so existing `shrike_derived::{FxI64Hasher, FxI64Map}` users
+// keep resolving.
+pub use shrike_store::{FxI64Hasher, FxI64Map};
 
 pub use shrike_store::LexicalRow;
 
