@@ -24,6 +24,7 @@ import argparse
 import io
 import logging
 import os
+import random
 import shlex
 import shutil
 import subprocess
@@ -165,6 +166,7 @@ async def _run_workloads(
     repeats: int,
     warmup: int,
     ops: int,
+    seed: int,
     with_media: bool,
 ) -> list[WorkloadResult]:
     results: list[WorkloadResult] = []
@@ -173,9 +175,13 @@ async def _run_workloads(
     label_w = max(16, *(len(n) for n in names)) if names else 16
     registry = [n for n in names if n != INGEST]
     if registry:
+        # One RNG for the whole run, shared across the workloads — a single
+        # deterministic stream given the seed (resolved in main from entropy unless
+        # pinned with --seed).
+        rng = random.Random(seed)
         # Read-only workloads first so the single shared boot stays representative.
         workloads = sorted(
-            (build_workload(n, ops=ops, corpus_size=corpus.spec.notes) for n in registry),
+            (build_workload(n, ops=ops, corpus_size=corpus.spec.notes, rng=rng) for n in registry),
             key=lambda w: getattr(w, "mutates", False),
         )
         # An isolated working copy so a mutating workload never pollutes the cached
@@ -359,6 +365,15 @@ def main() -> int:
         f"Default {DEFAULT_OPS}. 'rebuild' ignores it (one O(collection) pass).",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed for the run's workload RNG (search queries, upsert/delete/churn "
+        "note bodies). Default: real entropy, logged so the run is reproducible — pass "
+        "the logged --seed to replay a run's data (e.g. to compare two builds over the "
+        "identical query set). Does not affect the corpus (its seed is fixed for caching).",
+    )
+    parser.add_argument(
         "--baseline", type=Path, default=None, help="A stored result to diff this run against."
     )
     parser.add_argument(
@@ -472,6 +487,11 @@ def main() -> int:
         print(f"Ensuring corpus: {args.size} notes ({args.variant}) ...")
         corpus = ensure_corpus(spec)
 
+        # One seed for the whole run's workload data — real entropy unless pinned,
+        # logged so the run is reproducible (replay with the printed --seed).
+        seed = args.seed if args.seed is not None else random.SystemRandom().getrandbits(64)
+        print(f"Workload RNG seed: {seed}  (pass --seed {seed} to reproduce this run's data)")
+
         # The kernel runs a harness-driven runtime with no lazy fallback: install +
         # park the committed driver threads before any kernel op, tear down after.
         from shrike.platform.driven_runtime import DrivenRuntime
@@ -489,6 +509,7 @@ def main() -> int:
                     args.repeats,
                     args.warmup,
                     args.ops,
+                    seed,
                     with_media=(args.variant == "text+image"),
                 )
             )

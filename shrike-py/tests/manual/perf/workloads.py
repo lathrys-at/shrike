@@ -39,9 +39,15 @@ rebuild) have no asynchronous tail and report ``response`` only.
 (upsert/delete/reconcile); the runner orders read-only workloads first so a
 single boot stays representative. Running MORE THAN ONE mutating workload in a
 single invocation compounds the collection state across them, so for a clean
-absolute number run one mutating workload per invocation (comparisons across runs
-stay valid regardless — the mutation is deterministic and identical on both
-sides).
+absolute number run one mutating workload per invocation (the mutation is
+deterministic given the run's RNG seed, so two runs that pin the same ``--seed``
+mutate identically and stay comparable).
+
+The synthetic data each workload generates (search queries, upsert/delete/churn
+note bodies) is drawn from ONE RNG the harness seeds — from real entropy by
+default, logged so a run is reproducible; pin ``--seed`` to replay a run's data,
+e.g. to compare two builds over the identical query set. The RNG is passed into
+each workload (``build_workload(..., rng=...)``); no workload self-seeds.
 
 A workload MAY define an optional ``prepare(booted, iteration)`` coroutine: per-
 iteration setup run UNTIMED before each timed ``run_one`` (see ``driver.Workload``).
@@ -86,18 +92,25 @@ class _SearchWorkload:
 
     mutates = False
 
-    def __init__(self, *, count: int = DEFAULT_OPS, limit: int = 20, corpus_size: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        count: int = DEFAULT_OPS,
+        limit: int = 20,
+        corpus_size: int = 0,
+        rng: random.Random,
+    ) -> None:
         self._count = count
         self._limit = limit
         self._topics = n_topics(corpus_size)
+        self._rng = rng
         self._batches: list[list[str]] = []
 
     async def setup(self, booted: Booted, iterations: int) -> None:
         # Precompute every iteration's queries (untimed) so the string formatting
         # never lands in the timed region.
-        rng = random.Random(0x5EED)
         self._batches = [
-            [_query(rng, self._topics) for _ in range(self._count)] for _ in range(iterations)
+            [_query(self._rng, self._topics) for _ in range(self._count)] for _ in range(iterations)
         ]
 
     async def _search(self, booted: Booted, queries: list[str]) -> None:
@@ -148,12 +161,14 @@ class _ScopedSearchWorkload(_SearchWorkload):
         # Each iteration's queries are drawn from THAT iteration's deck topic (fixed
         # per iteration, unlike the unscoped twin's random-topic draw), so a scoped
         # call's queries actually land inside the deck it's scoped to. Untimed.
-        rng = random.Random(0x5C09ED)
         self._batches = []
         for iteration in range(iterations):
             topic = iteration % self._topics
             self._batches.append(
-                [" ".join(choose(rng, rng.randint(1, 4), topic)) for _ in range(self._count)]
+                [
+                    " ".join(choose(self._rng, self._rng.randint(1, 4), topic))
+                    for _ in range(self._count)
+                ]
             )
 
     async def _search_scoped(self, booted: Booted, queries: list[str], deck: str) -> None:
@@ -194,6 +209,54 @@ class SearchScopedSeqWorkload(_ScopedSearchWorkload):
         return self._count
 
 
+class SearchLexicalSingleWorkload:
+    """ONE ``mode="lexical"`` query per timed iteration — the as-you-type lexical
+    path (fuzzy + substring + RRF, no query embed) the live-search latency budget
+    governs. One query per ``run_one``, so the per-iteration distribution IS the
+    single-query latency (the runner's repeats are the p50/p95 samples) — unlike
+    the batched ``search-*`` workloads, whose per-iteration time folds ``count``
+    queries together and whose fused mode hides the lexical cost behind the query
+    embed. The profiler reads the whole lexical path end to end (substring + fuzzy
+    + fusion + hydration). Read-only, so no settle phase."""
+
+    name = "search-lexical-single"
+    mutates = False
+
+    def __init__(
+        self,
+        *,
+        count: int = DEFAULT_OPS,
+        limit: int = 20,
+        corpus_size: int = 0,
+        rng: random.Random,
+    ) -> None:
+        # One query per iteration; ``count`` (``--ops``) does not apply to a
+        # single-query workload — accepted and discarded for uniform construction
+        # (like ``rebuild``).
+        del count
+        self._limit = limit
+        self._topics = n_topics(corpus_size)
+        self._rng = rng
+        self._queries: list[str] = []
+
+    async def setup(self, booted: Booted, iterations: int) -> None:
+        # One query per iteration (untimed), drawn by the same generator as the
+        # batched search workloads so the query shape matches.
+        self._queries = [_query(self._rng, self._topics) for _ in range(iterations)]
+
+    async def run_one(self, booted: Booted, iteration: int) -> int:
+        await booted.call(
+            "search_notes",
+            queries=[self._queries[iteration]],
+            ids=[],
+            limit=self._limit,
+            tags=[],
+            exclude_ids=[],
+            mode="lexical",
+        )
+        return 1
+
+
 class RebuildWorkload:
     """Rebuild the whole vector index — the O(collection) maintenance path a perf
     audit watches for full-collection scans. Synchronous to completion (boot/
@@ -202,11 +265,13 @@ class RebuildWorkload:
     name = "rebuild"
     mutates = False
 
-    def __init__(self, *, count: int = DEFAULT_OPS, corpus_size: int = 0) -> None:
-        # A rebuild is one O(collection) pass; the per-op N (``--ops``) doesn't
-        # apply. The uniform ``count`` keyword lets the runner build every workload
-        # identically — here it's accepted and discarded.
-        del count
+    def __init__(
+        self, *, count: int = DEFAULT_OPS, corpus_size: int = 0, rng: random.Random
+    ) -> None:
+        # A rebuild is one O(collection) pass with no synthetic data; the per-op N
+        # (``--ops``) and the run RNG don't apply. The uniform keywords let the
+        # runner build every workload identically — here they're accepted and discarded.
+        del count, rng
 
     async def setup(self, booted: Booted, iterations: int) -> None:
         return None
@@ -216,10 +281,9 @@ class RebuildWorkload:
         return 1  # one full-collection rebuild
 
 
-def _upsert_note(iteration: int, j: int) -> NoteInput:
-    # A fresh deck/tag so upserted notes never collide with the corpus; the text
-    # is deterministic per (iteration, j) and the front is globally unique.
-    rng = random.Random((iteration << 20) ^ j)
+def _upsert_note(rng: random.Random, iteration: int, j: int) -> NoteInput:
+    # A fresh deck/tag so upserted notes never collide with the corpus; the body
+    # is drawn from the shared run RNG and the front is globally unique.
     body = " ".join(choose(rng, 12))
     return NoteInput(
         deck="Perf::Upsert",
@@ -236,22 +300,25 @@ class _UpsertWorkload:
     quiescence separately.
 
     Each iteration ADDS ``count`` notes, so the collection grows across the run
-    (the recorded ``corpus_size`` is the *starting* size); identical deterministic
-    growth on both sides keeps comparisons valid. Run ``upsert-batch`` and
-    ``upsert-seq`` in SEPARATE invocations (a fresh boot each) for an
-    apples-to-apples batch-vs-sequential comparison."""
+    (the recorded ``corpus_size`` is the *starting* size); deterministic growth
+    given the run's RNG seed keeps comparisons valid (pin ``--seed`` across the two
+    runs). Run ``upsert-batch`` and ``upsert-seq`` in SEPARATE invocations (a fresh
+    boot each) for an apples-to-apples batch-vs-sequential comparison."""
 
     mutates = True
 
-    def __init__(self, *, count: int = DEFAULT_OPS, corpus_size: int = 0) -> None:
+    def __init__(
+        self, *, count: int = DEFAULT_OPS, corpus_size: int = 0, rng: random.Random
+    ) -> None:
         self._count = count
+        self._rng = rng
         self._batches: list[list[NoteInput]] = []
 
     async def setup(self, booted: Booted, iterations: int) -> None:
         # Precompute every iteration's notes (untimed) so neither the random text
         # generation nor the NoteInput construction lands in the timed region.
         self._batches = [
-            [_upsert_note(i, j) for j in range(self._count)] for i in range(iterations)
+            [_upsert_note(self._rng, i, j) for j in range(self._count)] for i in range(iterations)
         ]
 
     async def settle(self, booted: Booted, iteration: int) -> None:
@@ -282,8 +349,7 @@ class UpsertSeqWorkload(_UpsertWorkload):
         return self._count
 
 
-def _delete_note(j: int) -> NoteInput:
-    rng = random.Random(0xDE1E7E ^ j)
+def _delete_note(rng: random.Random, j: int) -> NoteInput:
     return NoteInput(
         deck="Perf::Delete",
         note_type="Basic",
@@ -302,12 +368,15 @@ class _DeleteWorkload:
 
     mutates = True
 
-    def __init__(self, *, count: int = DEFAULT_OPS, corpus_size: int = 0) -> None:
+    def __init__(
+        self, *, count: int = DEFAULT_OPS, corpus_size: int = 0, rng: random.Random
+    ) -> None:
         self._count = count
+        self._rng = rng
         self._ids: list[int] = []
 
     async def setup(self, booted: Booted, iterations: int) -> None:
-        pool = [_delete_note(j) for j in range(iterations * self._count)]
+        pool = [_delete_note(self._rng, j) for j in range(iterations * self._count)]
         resp = await booted.call("upsert_notes", notes=pool)
         self._ids = [r.id for r in resp.results if r.status in ("created", "updated")]
         # Drain so the pool is indexed before timing — the timed delete then drops
@@ -347,10 +416,9 @@ class DeleteSeqWorkload(_DeleteWorkload):
         return len(ids)
 
 
-def _reconcile_note(iteration: int, j: int) -> dict:
-    # A fresh note in its own deck/tag, deterministic per (iteration, j), so each
+def _reconcile_note(rng: random.Random, iteration: int, j: int) -> dict:
+    # A fresh note in its own deck/tag (front unique per iteration/j), so each
     # iteration drifts a disjoint set the reconcile sees as new.
-    rng = random.Random((iteration << 24) ^ (j ^ 0x5EC0))
     body = " ".join(choose(rng, 12))
     return {
         "deck": "Perf::Reconcile",
@@ -377,21 +445,26 @@ class ReconcileWorkload:
     Writing through the same actor makes the new ``col.mod`` live to the reconcile,
     so no reopen is needed; reopen is a collection-reacquire cost, not a reconcile
     cost. Each iteration ADDS ``count`` notes, so the collection grows across the
-    run (the recorded ``corpus_size`` is the *starting* size); identical
-    deterministic growth on both sides keeps comparisons valid."""
+    run (the recorded ``corpus_size`` is the *starting* size); deterministic growth
+    given the run's RNG seed keeps comparisons valid (pin ``--seed`` across the two
+    runs)."""
 
     name = "reconcile"
     mutates = True
 
-    def __init__(self, *, count: int = DEFAULT_OPS, corpus_size: int = 0) -> None:
+    def __init__(
+        self, *, count: int = DEFAULT_OPS, corpus_size: int = 0, rng: random.Random
+    ) -> None:
         self._count = count
+        self._rng = rng
         self._batches: list[list[dict]] = []
 
     async def setup(self, booted: Booted, iterations: int) -> None:
         # Precompute the drift notes per iteration (untimed) — the prepare write is
         # untimed too, but this keeps the random text generation out of the loop.
         self._batches = [
-            [_reconcile_note(i, j) for j in range(self._count)] for i in range(iterations)
+            [_reconcile_note(self._rng, i, j) for j in range(self._count)]
+            for i in range(iterations)
         ]
 
     async def prepare(self, booted: Booted, iteration: int) -> None:
@@ -408,10 +481,9 @@ class ReconcileWorkload:
         await booted.harness.kernel.settle()
 
 
-def _churn_note(iteration: int, j: int) -> NoteInput:
-    # Deterministic per (iteration, j), in its own deck/tag so churn never collides
+def _churn_note(rng: random.Random, iteration: int, j: int) -> NoteInput:
+    # In its own deck/tag (front unique per iteration/j) so churn never collides
     # with the loaded corpus.
-    rng = random.Random((iteration << 22) ^ (j ^ 0xC40))
     body = " ".join(choose(rng, 12))
     return NoteInput(
         deck="Perf::Churn",
@@ -439,9 +511,12 @@ class ChurnWorkload:
     name = "churn"
     mutates = True
 
-    def __init__(self, *, count: int = DEFAULT_OPS, corpus_size: int = 0) -> None:
+    def __init__(
+        self, *, count: int = DEFAULT_OPS, corpus_size: int = 0, rng: random.Random
+    ) -> None:
         self._count = count
         self._topics = n_topics(corpus_size)
+        self._rng = rng
         self._upserts: list[list[NoteInput]] = []
         self._queries: list[str] = []
         self._ids: list[list[int]] = []
@@ -449,9 +524,12 @@ class ChurnWorkload:
     async def setup(self, booted: Booted, iterations: int) -> None:
         # Per-iteration churn notes (untimed text gen) + a fixed query bank sized to
         # the corpus topics (like the search workloads) so the searches actually hit.
-        self._upserts = [[_churn_note(i, j) for j in range(self._count)] for i in range(iterations)]
-        rng = random.Random(0xC0FFEE)
-        self._queries = [_query(rng, self._topics) for _ in range(min(max(self._count, 1), 20))]
+        self._upserts = [
+            [_churn_note(self._rng, i, j) for j in range(self._count)] for i in range(iterations)
+        ]
+        self._queries = [
+            _query(self._rng, self._topics) for _ in range(min(max(self._count, 1), 20))
+        ]
         self._ids = [[] for _ in range(iterations)]
 
     async def prepare(self, booted: Booted, iteration: int) -> None:
@@ -478,6 +556,7 @@ WORKLOADS = {
         SearchSeqWorkload,
         SearchScopedBatchWorkload,
         SearchScopedSeqWorkload,
+        SearchLexicalSingleWorkload,
         RebuildWorkload,
         UpsertBatchWorkload,
         UpsertSeqWorkload,
@@ -489,9 +568,15 @@ WORKLOADS = {
 }
 
 
-def build_workload(name: str, *, ops: int = DEFAULT_OPS, corpus_size: int = 0) -> Workload:
+def build_workload(
+    name: str, *, ops: int = DEFAULT_OPS, corpus_size: int = 0, rng: random.Random
+) -> Workload:
     """Instantiate workload ``name`` with ``ops`` operations per iteration — the N
     the runner scales via ``--ops``. ``corpus_size`` lets the search workload size
     its query topics to the corpus (one deck per ~500 notes); the other workloads
-    accept and ignore it (uniform construction, like ``count`` for ``rebuild``)."""
-    return WORKLOADS[name](count=ops, corpus_size=corpus_size)
+    accept and ignore it (uniform construction, like ``count`` for ``rebuild``).
+
+    ``rng`` is the run's single shared RNG (the harness seeds it once from real
+    entropy; see ``run.py``), passed to every workload so the synthetic data is
+    drawn from one reproducible stream rather than each workload self-seeding."""
+    return WORKLOADS[name](count=ops, corpus_size=corpus_size, rng=rng)
