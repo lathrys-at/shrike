@@ -42,14 +42,8 @@ logger = logging.getLogger("shrike.derived")
 
 # v2: segments table + recognition meta. Must match DerivedEngine::SCHEMA_VERSION.
 SCHEMA_VERSION = 2
-MIN_TRIGRAM = 3  # FTS5's trigram tokenizer can't match a term shorter than 3 chars
 FUZZY_MIN_SHARED = 2  # a fuzzy candidate must share at least this many query trigrams (noise floor)
-SNIPPET_TOKENS = 12  # window size for FTS5 snippet()
 DEFAULT_FUZZY_TOP_K = 20
-
-# (note_id, source, ref, txt, snippet) — what an engine MATCH query returns. ``txt`` is only
-# filled when asked for (the fuzzy overlap filter needs it; substring doesn't).
-EngineRow = tuple[int, str, str, str | None, str | None]
 
 
 @dataclass(frozen=True)
@@ -60,20 +54,6 @@ class LexicalMatch:
     source: str  # "field" | "ocr" | "asr" | …
     ref: str  # field name, or a media filename for a derived source
     snippet: str | None
-
-
-def _trigrams(text: str) -> list[str]:
-    s = text.lower()
-    return [s[i : i + 3] for i in range(len(s) - 2)]
-
-
-def _fts_quote(term: str) -> str:
-    """Quote a term as an FTS5 string literal (wrap in double quotes, double internal ones).
-
-    The only safe way to feed arbitrary user text into a MATCH expression — otherwise query
-    punctuation is parsed as FTS5 syntax (injection / errors).
-    """
-    return '"' + term.replace('"', '""') + '"'
 
 
 class NativeDerivedEngine:
@@ -140,13 +120,6 @@ class NativeDerivedEngine:
             self._rust.build(list(rows), int(col_mod))
         except self._native_errors as e:
             raise sqlite3.DatabaseError(str(e)) from e
-
-    def match_rows(self, expr: str, limit: int, *, with_text: bool) -> list[EngineRow]:
-        try:
-            rows = self._rust.match_rows(expr, int(limit), with_text)
-        except self._native_errors as e:
-            raise sqlite3.OperationalError(str(e)) from e
-        return [(int(n), s, r, t, sn) for n, s, r, t, sn in rows]
 
     def search_substring(
         self, query: str, limit: int

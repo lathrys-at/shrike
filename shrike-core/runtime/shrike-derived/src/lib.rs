@@ -2520,6 +2520,21 @@ pub const FUZZY_MIN_SHARED: usize = 2;
 /// has only a handful of trigrams, all kept). A perf/recall dial.
 pub const FUZZY_MAX_TRIGRAMS: usize = 6;
 
+/// Ceiling on the rowids one trigram's posting contributes to the overlap basis.
+/// `prune_to_rare_terms` keeps the rarest trigrams, but a query of all-common words
+/// (every trigram is frequent) leaves the pruned set with O(collection)-length
+/// postings, and the batch bounds the COUNT of queries (≤50), not their length — so a
+/// pathological batch reads, accumulates, and hydrates a collection-scale rowid set
+/// per term. Past this many rowids a posting is deterministically downsampled to it
+/// ([`DerivedEngine::sample_posting`]).
+///
+/// Sized above the worst single-trigram posting at the heaviest standard scale (50k
+/// notes, ~2 indexed text rows each → a top-frequency trigram appears in ≈10^5 rows)
+/// so it never fires there; it only caps the 100k+ pathological case the bound exists
+/// for. A power of two for a clean stride and to read as "deliberately large, not a
+/// tuned recall cut".
+pub const FUZZY_POSTING_CEILING: usize = 1 << 18;
+
 // The integer-keyed fast-hash types live in `shrike-store` (the only crate the
 // index, derived, and kernel impls all share, so the vector index can use the same
 // hasher); re-exported so existing `shrike_derived::{FxI64Hasher, FxI64Map}` users
@@ -2918,14 +2933,43 @@ impl DerivedEngine {
         Ok(out)
     }
 
+    /// Bound one trigram's posting to [`FUZZY_POSTING_CEILING`] rowids, returning it
+    /// unchanged when it already fits. Past the ceiling, keep an EVENLY-SPACED sample
+    /// across the ascending posting (indices `i * len / ceiling`), not a prefix: the
+    /// sample spans the whole rowid range, so a capped common-trigram posting still
+    /// contributes overlap from low- AND high-rowid notes rather than dropping the
+    /// newest (highest-rowid) ones a `LIMIT` would.
+    ///
+    /// Deterministic — same posting in, same sample out — and a pure function of THIS
+    /// term's own rowids, so the batched and singular paths sample identically (the
+    /// `batch_lexical_matches_loop_of_singular` parity invariant). `i = 0` keeps the
+    /// first (lowest) rowid; the stride reaches into the final stride-window, so the
+    /// high-rowid tail is sampled, never truncated away.
+    fn sample_posting(rids: Vec<i64>) -> Vec<i64> {
+        let len = rids.len();
+        if len <= FUZZY_POSTING_CEILING {
+            return rids;
+        }
+        (0..FUZZY_POSTING_CEILING)
+            .map(|i| rids[i * len / FUZZY_POSTING_CEILING])
+            .collect()
+    }
+
     /// Each term's matching idx rowids, rowid-ONLY — no `rowmap` JOIN, no
     /// provenance. FTS5 yields rowids straight off the posting list with no table
     /// access, the cheapest posting read; provenance is deferred to the overlap
     /// candidates ([`Self::seg_meta_for_rowids`]), which also drops the
     /// `exclude_sources` and out-of-scope segments — so the posting scan needs
     /// neither `note_id` nor `source` and stays rowid-only for every fuzzy read,
-    /// scoped or not. No `LIMIT`: the overlap ranker needs every match to stay
-    /// recall-safe. Reads on the passed [`ReadPool`] connection.
+    /// scoped or not. Reads on the passed [`ReadPool`] connection.
+    ///
+    /// No SQL `LIMIT`: a `LIMIT` cuts the posting positionally (FTS5 yields rowids
+    /// ascending, so it drops the highest-rowid — newest — notes), a measured recall
+    /// gap. Instead a posting past [`FUZZY_POSTING_CEILING`] is deterministically
+    /// downsampled across its whole rowid range ([`Self::sample_posting`]) so an
+    /// all-common-word query's collection-scale postings stay bounded while a capped
+    /// term still contributes a representative overlap signal. The ceiling sits above
+    /// the worst posting at every standard scale, so it never fires there.
     ///
     /// # Errors
     ///
@@ -2966,7 +3010,7 @@ impl DerivedEngine {
                 }
                 Ok(Ok(rids))
             };
-            let rids = with_busy_retry(run)??;
+            let rids = Self::sample_posting(with_busy_retry(run)??);
             term_rowids.insert((*term).to_string(), rids);
         }
         Ok(term_rowids)
@@ -3818,6 +3862,112 @@ mod lexical_tests {
         assert!(
             terms.contains(&"zzz".to_string()),
             "KEEPS the absent (DF 0) trigram — it may be written-since-snapshot"
+        );
+    }
+
+    #[test]
+    fn sample_posting_passes_through_at_or_below_the_ceiling() {
+        // A posting that fits is returned BYTE-IDENTICALLY: no sampling fires at any
+        // standard scale, so the common case keeps every rowid.
+        let exact: Vec<i64> = (0..FUZZY_POSTING_CEILING as i64).collect();
+        assert_eq!(
+            DerivedEngine::sample_posting(exact.clone()),
+            exact,
+            "a posting AT the ceiling is untouched"
+        );
+        let small: Vec<i64> = (0..1000).collect();
+        assert_eq!(
+            DerivedEngine::sample_posting(small.clone()),
+            small,
+            "a posting below the ceiling is untouched"
+        );
+    }
+
+    #[test]
+    fn sample_posting_caps_and_spans_past_the_ceiling() {
+        // A posting past the ceiling is capped to EXACTLY the ceiling, and the sample
+        // SPANS the whole range — not a prefix `LIMIT` (which would drop the
+        // highest-rowid notes). The posting is the rowids 0..2N for a ceiling N, so
+        // every kept value reveals where in the range it was drawn from.
+        let n = FUZZY_POSTING_CEILING;
+        let posting: Vec<i64> = (0..2 * n as i64).collect();
+        let sampled = DerivedEngine::sample_posting(posting);
+        assert_eq!(sampled.len(), n, "capped to exactly the ceiling");
+        assert_eq!(sampled[0], 0, "keeps the lowest rowid");
+        // A prefix LIMIT over 0..2n would top out at n-1; an evenly-spaced sample
+        // reaches the high half, proving the high-rowid tail is sampled, not cut. The
+        // last kept index is (n-1)*2n/n = 2n-2, so the max is at the very top.
+        let max = *sampled.last().unwrap();
+        assert!(
+            max >= n as i64,
+            "the sample spans past the prefix a LIMIT would cut at (max {max} >= {n})"
+        );
+        // Ascending in, ascending out (the stride walks a sorted posting in order).
+        assert!(
+            sampled.windows(2).all(|w| w[0] < w[1]),
+            "the sample preserves ascending rowid order with no duplicates"
+        );
+    }
+
+    #[test]
+    fn sample_posting_just_over_the_ceiling_caps_spans_and_dedups() {
+        // The FRAGILE boundary the 2x cap/span test misses: just past the ceiling the
+        // integer-division stride `i * len / CEILING` is barely above 1.0, the regime
+        // where consecutive floors could collide and yield a DUPLICATE rowid (which
+        // would over-count a note's overlap, corrupting the fuzzy ranking). They
+        // don't — when `len > CEILING` the real stride exceeds 1, so consecutive
+        // floors strictly increase — but only a near-ceiling length exercises it.
+        // Sweeps every length in `[CEILING+1, CEILING+64]` plus a few irregular
+        // multiples: capped to exactly the ceiling, lowest rowid kept, the high tail
+        // reached (not a prefix cut), and strictly ascending (== no duplicate).
+        let n = FUZZY_POSTING_CEILING;
+        for len in (n + 1..=n + 64).chain([n + n / 2, 2 * n + 1, 3 * n - 1, 10 * n + 7]) {
+            let posting: Vec<i64> = (0..len as i64).collect();
+            let s = DerivedEngine::sample_posting(posting);
+            assert_eq!(s.len(), n, "len {len}: capped to exactly the ceiling");
+            assert_eq!(s[0], 0, "len {len}: keeps the lowest rowid");
+            // The fragile property: strictly ascending == NO duplicate rowid. A
+            // colliding integer-division stride (two `i` mapping to the same floor)
+            // would repeat a rowid and over-count its note's overlap; because `len >
+            // CEILING` the real stride exceeds 1, floors strictly increase and no
+            // rowid repeats. This is what the 2x test cannot isolate.
+            assert!(
+                s.windows(2).all(|w| w[0] < w[1]),
+                "len {len}: strictly ascending — no duplicate rowid from a colliding stride"
+            );
+            // Anti-prefix-cut: the sample reaches at least as far as a prefix LIMIT
+            // would (max == (n-1)*len/n >= n-1). At len == n+1 the two coincide (only
+            // one element is dropped, so max == n-1), so the boundary-correct
+            // assertion is `>=`, strengthening to `>` once len is comfortably over the
+            // ceiling — the high-rowid tail is sampled, never truncated.
+            let max = *s.last().unwrap();
+            let prefix_max = n as i64 - 1;
+            assert!(
+                max >= prefix_max,
+                "len {len}: never worse than a prefix cut"
+            );
+            if len >= 2 * n {
+                assert!(
+                    max > prefix_max,
+                    "len {len}: spans strictly past a prefix cut"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sample_posting_is_deterministic() {
+        // Same posting in → same sample out: the bound is a pure function of the
+        // term's own rowids (no batch-wide or positional-stateful input), so the
+        // batched and singular fuzzy paths sample identically.
+        let posting: Vec<i64> = (0..3 * FUZZY_POSTING_CEILING as i64)
+            .map(|x| x * 7)
+            .collect();
+        let a = DerivedEngine::sample_posting(posting.clone());
+        let b = DerivedEngine::sample_posting(posting);
+        assert_eq!(
+            a, b,
+            "deterministic across repeated calls on the same posting"
         );
     }
 
