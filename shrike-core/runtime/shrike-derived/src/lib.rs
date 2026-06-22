@@ -1592,9 +1592,9 @@ impl DerivedEngine {
     /// snapshot — the fuzzy path reads it to prune common trigrams. A term absent
     /// from the result is absent from the SNAPSHOT (treated as DF 0, sorting last in
     /// the prune); see [`Self::refresh_trigram_df`] for the freshness contract.
-    /// Per-term `term = ?` primary-key seek on the plain table (mmap-served, one
-    /// cached statement), NOT a doclist count through fts5vocab. Reads on the passed
-    /// [`ReadPool`] connection.
+    /// ONE prepare-cached `term IN rarray(?1)` primary-key seek over the plain table
+    /// (the in-memory carray binds the whole trigram set; mmap-served), NOT a doclist
+    /// count through fts5vocab. Reads on the passed [`ReadPool`] connection.
     ///
     /// # Errors
     ///
@@ -1607,13 +1607,22 @@ impl DerivedEngine {
             return Ok(std::collections::HashMap::new());
         }
         let run = || -> rusqlite::Result<std::collections::HashMap<String, i64>> {
-            let mut stmt = conn.prepare_cached("SELECT df FROM trigram_df WHERE term = ?1")?;
+            // The whole trigram set as an in-memory carray, so the term→df lookup is
+            // ONE prepare-cached `IN rarray(?1)` statement over one implicit
+            // transaction, versus a `query`/`reset` per trigram. Terms absent from
+            // the table never come back — the caller reads a missing term as DF 0.
+            let want: std::rc::Rc<Vec<rusqlite::types::Value>> = std::rc::Rc::new(
+                terms
+                    .iter()
+                    .map(|&t| rusqlite::types::Value::Text(t.to_string()))
+                    .collect(),
+            );
+            let mut stmt =
+                conn.prepare_cached("SELECT term, df FROM trigram_df WHERE term IN rarray(?1)")?;
             let mut m = std::collections::HashMap::new();
-            for &term in terms {
-                let mut q = stmt.query([term])?;
-                if let Some(r) = q.next()? {
-                    m.insert(term.to_string(), r.get::<_, i64>(0)?);
-                }
+            let mut q = stmt.query(rusqlite::params![want])?;
+            while let Some(r) = q.next()? {
+                m.insert(r.get::<_, String>(0)?, r.get::<_, i64>(1)?);
             }
             Ok(m)
         };
