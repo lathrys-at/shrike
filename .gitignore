@@ -55,6 +55,12 @@ shrike-py/tests/manual/search_quality/cache/
 # The PR2b runner's generated report (a local artifact, not committed).
 shrike-py/tests/manual/search_quality/RESULTS.md
 
+# Fuzzy-recall eval (#927): the auto-generated scratch report is not committed;
+# a curated, named snapshot (RESULTS_927.md) is. The misspellings-list bytes are
+# NEVER committed (downloaded on demand; pin + attribution in ASSETS.md).
+shrike-py/tests/manual/fuzzy_recall/RESULTS.md
+.cache/fuzzy_recall/
+
 # MobileCLIP2 spike (#568): model bytes are NEVER committed — fetched on demand
 # into this gitignored scratch cache. Only the verify script + RESULTS.md +
 # ASSETS.md (pinned URLs/attribution) are committed.

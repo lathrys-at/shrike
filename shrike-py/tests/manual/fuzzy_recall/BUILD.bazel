@@ -1,0 +1,58 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("//tools/bazel:defs.bzl", "pytest_test")
+
+package(default_testonly = True)
+
+# The fuzzy-recall eval support: the typo generator + the curated-misspellings
+# resolver (both pure stdlib) and the driver (builds the perf corpus, materializes
+# a derived store, runs the cap-policy arms). The driver needs the native extension
+# (the DerivedTextEngine + its fuzzy/substring search), the collection harness (to
+# read the corpus's note texts), the perf corpus/wordlist, and the search-quality
+# metric engine (recall@k / MRR — imported, not reimplemented). The pinned
+# misspellings source manifest + ASSETS attribution ride along as data; the
+# gitignored cache and RESULTS.md are never present at build time.
+py_library(
+    name = "fuzzy_recall",
+    srcs = [
+        "__init__.py",
+        "fuzzy_recall.py",
+        "misspellings.py",
+        "typo_queries.py",
+    ],
+    data = [
+        "ASSETS.md",
+        "misspellings_source.json",
+    ],
+    imports = ["../../.."],  # repo root on sys.path so `tests.manual.fuzzy_recall.*` resolves
+    visibility = ["//shrike-py/tests:__subpackages__"],
+    deps = [
+        "//shrike-core/bindings/shrike-pyo3:shrike_native",
+        "//shrike-py/src/shrike:collection",
+        "//shrike-py/tests/manual/perf:perf",
+        "//shrike-py/tests/manual/search_quality:search_quality",
+    ],
+)
+
+# The eval entrypoint: the pure generator unit tests (fast, offline) plus the
+# env-gated (SHRIKE_FUZZY_RECALL=1) full eval that builds the corpus and runs every
+# cap-policy arm. `manual` — the eval is tuning infra, off the per-PR critical path
+# (templated on the perf lane's manual targets), so it stays out of
+# `bazel test //...` and is run by name.
+pytest_test(
+    name = "fuzzy_recall_test",
+    size = "medium",
+    srcs = ["test_fuzzy_recall.py"],
+    tags = ["manual"],
+    deps = [":fuzzy_recall"],
+)
+
+# Source files for the //shrike-py:sdist source distribution.
+filegroup(
+    name = "dist_files",
+    testonly = False,
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel", "**/__pycache__/**", "**/*.pyc", "**/*.pyo"],
+    ),
+    visibility = ["//visibility:public"],
+)
