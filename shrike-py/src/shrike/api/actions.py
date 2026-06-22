@@ -984,22 +984,38 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             else None
         )
 
-        # Kernel-internal fused search (#928): the kernel embeds every source
-        # text on its own runtime — query vectors never cross the FFI — then
-        # builds cross-space, computes the over-fetch clamp from its own index
-        # size, runs the assembly under the freshness bracket, and returns the
-        # same {groups, stale} wire. `kernel` is guaranteed present (build_actions
-        # rejects a None context kernel). `limit == 0` means "return all".
-        raw = await kernel.search_fused(
-            sources,
-            limit,
-            threshold,
-            deck=deck,
-            tags=tags or None,
-            exclude=sorted(exclude_set),
-            image_floor=image_floor,
-            semantic=semantic_ok,
-        )
+        # `kernel` is guaranteed present (build_actions rejects a None context
+        # kernel). `limit == 0` means "return all".
+        if mode == "lexical" and len(queries) == 1 and not ids:
+            # The single-query as-you-type fast path: a dedicated lean kernel
+            # routine that skips the batch fan-out, compute-pool chunking, and
+            # semantic machinery the fused path carries — identical results to the
+            # fused lexical path, less orchestration. Only this exact shape (one
+            # query string, no anchors) qualifies; everything else takes the
+            # general path below.
+            raw = await kernel.search_lexical_single(
+                queries[0],
+                limit,
+                deck=deck,
+                tags=tags or None,
+                exclude=sorted(exclude_set),
+            )
+        else:
+            # Kernel-internal fused search: the kernel embeds every source text on
+            # its own runtime — query vectors never cross the FFI — then builds
+            # cross-space, computes the over-fetch clamp from its own index size,
+            # runs the assembly under the freshness bracket, and returns the same
+            # {groups, stale} wire.
+            raw = await kernel.search_fused(
+                sources,
+                limit,
+                threshold,
+                deck=deck,
+                tags=tags or None,
+                exclude=sorted(exclude_set),
+                image_floor=image_floor,
+                semantic=semantic_ok,
+            )
         # The native read returns the fused groups plus the read-time `stale`
         # verdict: the kernel brackets the whole read with col_mod + ingest-settled
         # stamps sampled INSIDE its collection-actor jobs (the first and last of

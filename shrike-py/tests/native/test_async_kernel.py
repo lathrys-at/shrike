@@ -185,6 +185,56 @@ class TestAsyncKernel:
         backend = asyncio.run(flow())
         assert backend.calls, "embeds went through the harness backend"
 
+    def test_search_lexical_single_matches_fused_lexical(self, tmp_path) -> None:
+        """The dedicated single-query lexical routine returns the SAME wire as the
+        general fused path with semantic disabled — it trims only orchestration (no
+        embed, no compute-pool chunk fan-out), never behaviour. Parity holds across
+        substring, fuzzy (typo), tag scope, and exclude."""
+
+        async def flow():
+            backend = _Backend()
+            kernel = await _open(tmp_path, backend)
+            assert await kernel.reindex_if_needed()
+            core = kernel.core_handle()
+            basic = core.notetype_id("Basic")
+            results = await kernel.upsert_notes(
+                [
+                    (basic, 1, ["the mitochondria powerhouse", "energy"], ["smoke"]),
+                    (basic, 1, ["mitochondrial membrane", "biology"], ["smoke"]),
+                    (basic, 1, ["newton laws of motion", "mechanics"], []),
+                ],
+                "skip",
+            )
+            await kernel.settle()
+            first = results[0][1]
+
+            cases: list[tuple[str, int, dict[str, object]]] = [
+                ("mitochondria", 10, {}),  # exact substring + fuzzy
+                ("mitochondrai", 10, {}),  # transposed typo -> fuzzy
+                ("mito", 10, {}),  # short substring
+                ("newton", 10, {}),  # the other note
+                ("zzzznomatch", 10, {}),  # no matches -> empty groups, both paths
+                ("mitochondria", 10, {"tags": ["smoke"]}),  # tag-scoped
+                ("mitochondria", 10, {"exclude": [first]}),  # exclude the top hit
+                ("mitochondria", 10, {"deck": "Default"}),  # deck-scoped
+                ("mitochondria", 0, {}),  # limit=0 -> the return-all sentinel branch
+            ]
+            exact_matches = 0
+            for q, lim, kw in cases:
+                single = json.loads(await kernel.search_lexical_single(q, lim, **kw))
+                fused = json.loads(
+                    await kernel.search_fused([(q, q, True)], lim, 0.5, semantic=False, **kw)
+                )
+                assert single == fused, f"lexical-single != fused-lexical for {q!r} lim={lim} {kw}"
+                if q == "mitochondria" and lim == 10 and not kw:
+                    exact_matches = sum(len(g["matches"]) for g in single["groups"])
+            # Teeth: the plain exact-substring case must actually return hits, so the
+            # parity assertions above are not vacuously comparing two empty results.
+            assert exact_matches >= 1, "exact-substring 'mitochondria' must return matches"
+            await kernel.close()
+
+        asyncio.run(flow())
+
     def test_is_settled_tracks_the_ingest_drain(self, tmp_path) -> None:
         """The non-blocking freshness probe behind the stale-read advisory: False
         while a write's embed is still draining, True once the queue drains."""

@@ -3042,6 +3042,133 @@ impl Kernel {
         .await
     }
 
+    /// Single-query lexical search — the as-you-type fast path. A dedicated lean
+    /// routine for ONE query string with no id anchors and no semantic ranking.
+    /// It skips everything [`search_fused`] does for the general case: the query
+    /// embed, the cross-space build, the index-size over-fetch clamp, and the
+    /// compute-pool CHUNK fan-out (which exists to spread a query *bank* across
+    /// the workers — pure overhead for a single query). The substring + fuzzy
+    /// reads run as ONE compute job (off the runtime thread, since they block on
+    /// SQLite), then the lexical-only assembly runs on the collection actor.
+    ///
+    /// The result is identical to `search_fused([query], …, semantic=false)`: it
+    /// reuses the same [`actions::search_lexical`] reads and
+    /// [`actions::search_assemble`] fusion, so parity is structural — only the
+    /// orchestration is leaner. Returns the same `(groups, stale)` pair, bracketed
+    /// by the same freshness stamps.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a collection job, a derived read, or the assembly fails.
+    pub async fn search_lexical_single(
+        &self,
+        query: String,
+        limit: usize,
+        deck: Option<String>,
+        tags: Vec<String>,
+        exclude: Vec<i64>,
+    ) -> NativeResult<(Vec<shrike_schemas::SearchResultGroup>, bool)> {
+        let span = tracing::debug_span!("kernel.search_lexical_single", limit);
+        async move {
+            // Lexical-only: no embedder, cross-space, semantic threshold, or image
+            // floor. The `limit == 0` over-fetch sentinel matches `search_fused`'s
+            // lexical-only branch (the cheap FTS5 `LIMIT` sentinel).
+            let top_k = if limit > 0 { limit } else { 1_000_000_000 };
+            let args = actions::SearchArgs {
+                top_k,
+                deck,
+                tags,
+                exclude,
+                semantic: false,
+                hidden_lexical_sources: Self::hidden_lexical_sources()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                ..Default::default()
+            };
+            // One query source (a query string, not an anchor), so the lexical
+            // collectors and the assembly see exactly the single-query batch.
+            let sources = vec![actions::SearchSource {
+                label: query.clone(),
+                text: query,
+                is_query: true,
+            }];
+
+            let engine = self.index_set.primary().engine_arc();
+            let derived = Arc::clone(&self.derived);
+            let tag_keys = Arc::clone(&self.tag_keys);
+            let settled = self.ingest.settled_probe();
+
+            // Phase 1 (collection): freshness start stamps + the deck/tag scope.
+            let (start_mod, start_settled, lex_scope) = {
+                let args = args.clone();
+                let settled = settled.clone();
+                self.collection
+                    .run(move |core| -> NativeResult<_> {
+                        Ok((
+                            core.col_mod()?,
+                            settled.is_settled(),
+                            actions::compute_lex_scope(core, &args)?,
+                        ))
+                    })
+                    .await??
+            };
+            let lex_scope = Arc::new(lex_scope);
+
+            // Phase 2 (compute): the substring + fuzzy reads as ONE job. A single
+            // query has nothing to fan across the pool, so `search_fused`'s chunk
+            // machinery would be pure overhead; the reads block on SQLite, so they
+            // ride the compute pool rather than the runtime thread.
+            let discovery = {
+                let derived = Arc::clone(&derived);
+                let lex_scope = Arc::clone(&lex_scope);
+                let args = args.clone();
+                let sources = sources.clone();
+                crate::runtime::dispatch_compute(move || -> NativeResult<actions::Discovery> {
+                    let (substr_batch, fuzzy_batch) =
+                        actions::search_lexical(&*derived, &sources, lex_scope.as_deref(), &args)?;
+                    Ok(actions::Discovery {
+                        sem_by_source: Vec::new(),
+                        substr_batch,
+                        fuzzy_batch,
+                    })
+                })
+                .await?
+            };
+
+            // Phase 3 (collection): prefetch hydration + assembly + end stamps.
+            let (groups, end_mod, end_settled) = self
+                .collection
+                .run(move |core| -> NativeResult<_> {
+                    let groups = actions::search_assemble(
+                        core,
+                        Some(&*engine),
+                        Some(&tag_keys),
+                        &sources,
+                        &[],
+                        &args,
+                        lex_scope.as_deref(),
+                        discovery,
+                    )?;
+                    Ok((groups, core.col_mod()?, settled.is_settled()))
+                })
+                .await??;
+            let stale = actions::is_stale_read(
+                actions::FreshnessStamp {
+                    col_mod: start_mod,
+                    settled: start_settled,
+                },
+                actions::FreshnessStamp {
+                    col_mod: end_mod,
+                    settled: end_settled,
+                },
+            );
+            Ok((groups, stale))
+        }
+        .instrument(span)
+        .await
+    }
+
     /// Cooperative idle-release: close the collection, keeping the
     /// kernel reusable via [`reopen`]. WHEN to release is harness policy (an
     /// idle timer on its runtime); the kernel only provides the ops.
