@@ -1,24 +1,36 @@
-"""The fuzzy-recall eval driver.
+"""The fuzzy-recall + as-you-type-latency frontier eval driver.
 
 Builds (or reuses) the perf corpus, materializes a derived-text store from it,
 generates a deterministic typo-query set with gold known by construction, then runs
 each cap-policy arm and reports recall@10 / MRR aggregated per (query-length bucket
-× typo-count × edit-type). The fuzzy signal is measured **in isolation** —
-``search_fuzzy_batch`` directly, not the fused ``search_notes`` — so the cap policy
-is the only thing moving between arms.
+× typo-count × edit-type), plus — with ``--latency`` — the **single-query lexical
+latency** frontier that the #977 as-you-type budget reads off.
 
-Recall@10 and MRR are deterministic (a function of the seeded corpus + query set +
-the cap policy), so this is safe to run anywhere. The latency-delta probe is wired
-but OFF by default (``--latency``): timing is noise-sensitive and belongs on a clean
-machine, not a loaded dev box.
+Two axes with very different trust:
+
+- **Recall** (the RELIABLE result) is the fuzzy signal in isolation
+  (``search_fuzzy_batch``), deterministic (a function of the seeded corpus + query set
+  + cap policy) and mode-independent — so it is correct on ANY machine and the cap
+  policy is the only variable. The recall@10 grid is the eval's actual output.
+- **Latency** (a HARNESS, not a result) is the SINGLE-QUERY lexical path (one substring
+  + one fuzzy read per query — the per-keystroke cost, not a batch), reported as the
+  p50/p90/p95/p99/max distribution against a **p95 ≤ 10ms** budget (:data:`BUDGET_MS`).
+  It is wired with ``--latency`` but is **untrustworthy on a loaded/dev machine** —
+  there it is noise. The AUTHORITATIVE single-query latency, and therefore the budget
+  verdict + the cap pick + the tail-driver, come ONLY from the maintainer's clean-env
+  run; the local output is a template that run fills in (loudly labelled untrusted).
+
+The cap sweep is the 2D ``k × ceiling`` grid (floor pinned at 6) — see :func:`cap_grid`.
+On a clean run the latency harness picks the curve with max recall@10 whose single-query
+**p95** clears the budget (the #927 cap-default decision), and the **tail diagnostic**
+(:func:`_render_slow_query_diagnostic`) names which query shapes (trigram count,
+candidate-set size, typo count) drive the slow tail — so the worst-case bound (PR2) is
+designed from real numbers, not a dev-box guess.
 
 Run it directly::
 
     python shrike-py/tests/manual/fuzzy_recall/fuzzy_recall.py --notes 5000
-    python shrike-py/tests/manual/fuzzy_recall/fuzzy_recall.py --notes 50000 --sample 1000
-
-The arms swept by default are the floor sweep (fixed-6/5/4) and the log-growth curve
-(k ∈ {2.0, 2.7, 4.0}, ceiling 12), all against the fixed-6 control.
+    python shrike-py/tests/manual/fuzzy_recall/fuzzy_recall.py --notes 50000 --sample 1000 --latency
 """
 
 from __future__ import annotations
@@ -28,6 +40,7 @@ import sys
 import tempfile
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,6 +73,10 @@ from tests.manual.search_quality.metrics import (  # noqa: E402
 _DERIVED_SCHEMA_VERSION = 2
 #: recall@k / MRR are computed at this k (the eval's headline cut).
 TOP_K = 10
+#: The as-you-type single-query round-trip budget (#977): a lexical search must
+#: clear this on a 50k corpus to populate a dropdown per keystroke. The frontier
+#: picks the cap curve with max recall whose single-query p50 stays under it.
+BUDGET_MS = 10.0
 
 
 @dataclass(frozen=True)
@@ -73,23 +90,73 @@ class CapPolicy:
     ceiling: int
 
 
-#: The arms swept by default. The floor sweep (down) asks whether 6 is even the
-#: right constant; the log-growth curve (up) asks whether keeping more rare trigrams
-#: on a long query recovers recall. fixed-6 is the control every arm is read against.
-DEFAULT_ARMS: tuple[CapPolicy, ...] = (
-    CapPolicy("fixed-6 (control)", floor=6, k=2.7, ceiling=6),
-    CapPolicy("fixed-5", floor=5, k=2.7, ceiling=5),
-    CapPolicy("fixed-4", floor=4, k=2.7, ceiling=4),
-    CapPolicy("curve k=2.0", floor=6, k=2.0, ceiling=12),
-    CapPolicy("curve k=2.7", floor=6, k=2.7, ceiling=12),
-    CapPolicy("curve k=4.0", floor=6, k=4.0, ceiling=12),
-)
+#: The fixed cap policy every arm is read against — the shipped default.
+CONTROL: CapPolicy = CapPolicy("fixed-6 (control)", floor=6, k=2.7, ceiling=6)
+
+#: The 2D cap grid (#927/#977): per-query rare-trigram budget = clamp(k·ln(n), floor,
+#: ceiling). The frontier sweeps `k` (growth rate) × `ceiling` (the hard cap a long
+#: query saturates at) with `floor` pinned at 6, so the recall/single-query-latency
+#: knee is visible across the whole flank — the prior 3-point curve sweep sat on the
+#: steep part and couldn't show where the budget cuts.
+GRID_KS: tuple[float, ...] = (2.0, 3.0, 4.0, 6.0, 8.0)
+GRID_CEILINGS: tuple[int, ...] = (10, 12, 16, 20, 24)
+GRID_FLOOR: int = 6
+
+
+def cap_grid(
+    ks: tuple[float, ...] = GRID_KS,
+    ceilings: tuple[int, ...] = GRID_CEILINGS,
+    floor: int = GRID_FLOOR,
+) -> tuple[CapPolicy, ...]:
+    """The control followed by the full `k × ceiling` grid (floor pinned). A
+    `(k, ceiling)` cell whose `k·ln(n)` never reaches `ceiling` over the query set
+    still runs — it just behaves like a lower effective ceiling, which the frontier
+    reads correctly. The control is first so it anchors the per-arm deltas."""
+    grid = tuple(
+        CapPolicy(f"k={k:g} ceil={ceil}", floor=floor, k=k, ceiling=ceil)
+        for k in ks
+        for ceil in ceilings
+    )
+    return (CONTROL, *grid)
+
+
+#: The arms swept by default: the control + the 2D frontier grid.
+DEFAULT_ARMS: tuple[CapPolicy, ...] = cap_grid()
+
+
+@dataclass(frozen=True)
+class SingleQueryLatency:
+    """Single-query lexical-path latency over the query set, in milliseconds:
+    each sample is ONE query's substring + fuzzy read (the as-you-type cost per
+    keystroke), so the percentiles describe a single keystroke — not a batch.
+    The user's budget is read at **p95** (`p95_ms`); the others bracket the tail."""
+
+    p50_ms: float
+    p90_ms: float
+    p95_ms: float
+    p99_ms: float
+    max_ms: float
+
+
+@dataclass(frozen=True)
+class QuerySample:
+    """One query's measured latency plus the cheap shape features that might explain
+    a slow tail — the diagnostic feedstock for "what shapes are the slow ones". All
+    features are eval-side (no native DF/posting introspection): trigram count, typo
+    count, and the candidate-set size the two lexical reads returned (the fuzzy posting
+    scan + substring rows the assembly would hydrate). `cap_label` tags which arm."""
+
+    query: str
+    latency_ms: float
+    n_trigrams: int
+    typo_count: int
+    candidates: int
 
 
 @dataclass(frozen=True)
 class ArmResult:
     """One arm's aggregated recall@10 / MRR over the query set, plus the per-slice
-    breakdowns and the optional measured latency."""
+    breakdowns and the optional measured single-query latency + slow-query samples."""
 
     policy: CapPolicy
     recall_at_k: float
@@ -98,7 +165,10 @@ class ArmResult:
     by_length: dict[str, tuple[float, float, int]]  # bucket -> (recall, mrr, n)
     by_typo_count: dict[int, tuple[float, float, int]]
     by_edit: dict[str, tuple[float, float, int]]
-    latency_ms: float | None = None
+    latency: SingleQueryLatency | None = None
+    #: Per-query latency + shape samples (only for the control arm — the tail
+    #: diagnostic is per-corpus, not per-cap; capturing it once avoids 25× the noise).
+    samples: list[QuerySample] | None = None
 
 
 def _build_derived_store(
@@ -154,6 +224,79 @@ def _make_gold_resolver(engine: shrike_native.DerivedTextEngine) -> GoldResolver
     return resolve
 
 
+def _percentile(ordered: list[float], q: float) -> float:
+    """The ``q`` quantile (0..1) of an already-sorted list, by linear interpolation
+    (the perf harness's convention, so the numbers read the same way)."""
+    if not ordered:
+        return 0.0
+    pos = q * (len(ordered) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(ordered) - 1)
+    return ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo)
+
+
+#: Single-query timing discards this many warmup samples (page cache + posting-list
+#: priming) before the percentiles, so the first-touch cost never skews p50.
+_LATENCY_WARMUP = 50
+
+
+def _latency_summary(samples_ms: list[float]) -> SingleQueryLatency:
+    """The percentile bracket of a single-query latency sample (the user's budget is
+    read at p95; p50/p90/p99/max bracket the tail)."""
+    ordered = sorted(samples_ms)
+    return SingleQueryLatency(
+        p50_ms=_percentile(ordered, 0.50),
+        p90_ms=_percentile(ordered, 0.90),
+        p95_ms=_percentile(ordered, 0.95),
+        p99_ms=_percentile(ordered, 0.99),
+        max_ms=max(ordered) if ordered else 0.0,
+    )
+
+
+def _measure_single_query_latency(
+    engine: shrike_native.DerivedTextEngine,
+    queries: list[TypoQuery],
+    *,
+    capture_samples: bool = False,
+) -> tuple[SingleQueryLatency, list[QuerySample]]:
+    """Time the LEXICAL PATH per SINGLE query — one substring read + one fuzzy read
+    per query, the as-you-type cost of a single keystroke (NOT a batch). This is the
+    #977 budget probe: the kernel's fused search runs the two lexical lanes per query,
+    so the single-query wall cost is their serial sum here (the kernel can overlap
+    them on the compute pool — this is the conservative serial bound). The cap policy
+    must already be set. Warmup samples are discarded so first-touch I/O never skews
+    p50. With ``capture_samples`` it also records each query's latency + cheap shape
+    features (trigram count, typo count, candidate-set size) for the tail diagnostic.
+    Timing is noise-sensitive — read it only from a clean-environment run."""
+    # Cap the warmup at half the set so a small query set still yields timed samples
+    # (the standard --sample 500/1000 run is far above the constant either way).
+    warmup = min(_LATENCY_WARMUP, len(queries) // 2)
+    samples_ms: list[float] = []
+    samples: list[QuerySample] = []
+    for i, q in enumerate(queries):
+        start = time.perf_counter()
+        sub = engine.search_substring(q.query, TOP_K, None)
+        fz = engine.search_fuzzy_batch([q.query], TOP_K, None)
+        elapsed = (time.perf_counter() - start) * 1000.0
+        if i < warmup:
+            continue
+        samples_ms.append(elapsed)
+        if capture_samples:
+            # Candidate-set size = the rows the two lanes returned (capped at TOP_K each
+            # here; the eval reads the post-cap result, the honest as-you-type cost).
+            candidates = (len(sub) if sub else 0) + (len(fz[0]) if fz else 0)
+            samples.append(
+                QuerySample(
+                    query=q.query,
+                    latency_ms=elapsed,
+                    n_trigrams=q.n_trigrams,
+                    typo_count=q.typo_count,
+                    candidates=candidates,
+                )
+            )
+    return _latency_summary(samples_ms), samples
+
+
 def _evaluate_arm(
     engine: shrike_native.DerivedTextEngine,
     policy: CapPolicy,
@@ -161,20 +304,32 @@ def _evaluate_arm(
     *,
     batch_size: int = 200,
     measure_latency: bool = False,
+    capture_samples: bool = False,
 ) -> ArmResult:
-    """Run one arm: set the cap policy, fuzzy-search the whole query set (batched),
-    and aggregate recall@10 / MRR overall and per slice. Optionally time the search
-    (off by default — timing belongs on a clean machine)."""
+    """Run one arm: set the cap policy, fuzzy-search the whole query set (batched, for
+    recall), aggregate recall@10 / MRR overall and per slice, and — when
+    ``measure_latency`` — time the SINGLE-QUERY lexical path (substring + fuzzy per
+    query) for the as-you-type frontier. ``capture_samples`` additionally records the
+    per-query latency + shape features for the tail diagnostic (set once, for the
+    control arm). Recall is computed from the batched fuzzy read (deterministic,
+    mode-independent); latency is a separate single-query pass. Timing is off by
+    default — it belongs on a clean machine."""
     engine.set_fuzzy_cap_policy(policy.floor, policy.k, policy.ceiling)
     texts = [q.query for q in queries]
 
-    latency_ms: float | None = None
     results: list[list[tuple]] = []
-    start = time.perf_counter() if measure_latency else 0.0
     for i in range(0, len(texts), batch_size):
         results.extend(engine.search_fuzzy_batch(texts[i : i + batch_size], TOP_K, None))
+
+    # Single-query latency is a SEPARATE pass (after the recall read, so the cap
+    # policy and page cache are both warm) — the as-you-type per-keystroke cost.
+    latency: SingleQueryLatency | None = None
+    samples: list[QuerySample] | None = None
     if measure_latency:
-        latency_ms = (time.perf_counter() - start) * 1000.0
+        latency, captured = _measure_single_query_latency(
+            engine, queries, capture_samples=capture_samples
+        )
+        samples = captured if capture_samples else None
 
     # Aggregate. recall@k / MRR come from the shared metric engine (open-world: an
     # un-graded fuzzy return is not a false positive — recall is all we measure).
@@ -216,7 +371,8 @@ def _evaluate_arm(
         by_length={k: fold(v) for k, v in by_length.items()},
         by_typo_count={k: fold(v) for k, v in by_typo.items()},
         by_edit={k: fold(v) for k, v in by_edit.items()},
-        latency_ms=latency_ms,
+        latency=latency,
+        samples=samples,
     )
 
 
@@ -275,8 +431,18 @@ def run_eval(
             )
             if not queries:
                 raise RuntimeError("typo-query generation produced no queries — corpus too small?")
+            # Capture the per-query tail diagnostic ONCE, on the first (control) arm —
+            # the shape→latency relationship is a corpus property, not a per-cap one,
+            # so one capture avoids 25× the sample noise.
             results = [
-                _evaluate_arm(engine, p, queries, measure_latency=measure_latency) for p in arms
+                _evaluate_arm(
+                    engine,
+                    p,
+                    queries,
+                    measure_latency=measure_latency,
+                    capture_samples=(measure_latency and i == 0),
+                )
+                for i, p in enumerate(arms)
             ]
         finally:
             # Close the native handle before the temp dir is torn down, so the SQLite
@@ -311,9 +477,10 @@ def render_results(run: EvalRun) -> str:
     lines.append("")
     lines.append(
         "Gold by construction (a note's own clean text; gold = all notes containing "
-        "the un-perturbed phrase). The fuzzy signal is measured in isolation "
-        "(`search_fuzzy_batch`), so the cap policy is the only variable. Control = "
-        "**fixed-6** (the shipped default)."
+        "the un-perturbed phrase). Recall is the fuzzy signal in isolation "
+        "(`search_fuzzy_batch`), deterministic and mode-independent, so the cap policy "
+        "is the only variable; latency (the frontier below) is the single-query lexical "
+        "path. Control = **fixed-6** (the shipped default)."
     )
     lines.append("")
 
@@ -378,21 +545,165 @@ def render_results(run: EvalRun) -> str:
         lines.append(f"| {a.policy.label} | " + " | ".join(cells) + " |")
     lines.append("")
 
-    if any(a.latency_ms is not None for a in run.arms):
-        lines.append("## search latency (the whole query set, batched)")
-        lines.append("")
-        lines.append("> Timing is noise-sensitive — read it only from a clean-environment run.")
-        lines.append("")
-        lines.append("| arm | total ms | per query |")
-        lines.append("|---|---:|---:|")
-        for a in run.arms:
-            if a.latency_ms is None:
-                continue
-            per = a.latency_ms / a.n_queries if a.n_queries else 0.0
-            lines.append(f"| {a.policy.label} | {a.latency_ms:.1f} | {per:.3f} |")
-        lines.append("")
+    if any(a.latency is not None for a in run.arms):
+        lines.extend(_render_frontier(run, control))
 
     return "\n".join(lines)
+
+
+def _render_frontier(run: EvalRun, control: ArmResult) -> list[str]:
+    """The single-query latency HARNESS output (#977). IMPORTANT: latency is only
+    trustworthy from a clean-environment run — on any loaded/dev machine these numbers
+    are noise, so this whole section is a TEMPLATE the maintainer's clean run fills in,
+    not a result. The budget is **p95 ≤ 10ms**; the `p95≤` verdict and the cap pick are
+    computed mechanically from whatever latency was measured, so they only MEAN anything
+    once the latency is real. The RELIABLE #977 result is the recall@10 grid above — that
+    is deterministic and environment-independent; this section is not."""
+    timed = [a for a in run.arms if a.latency is not None]
+    lines: list[str] = []
+    lines.append("## single-query latency harness — UNTRUSTED unless clean-env")
+    lines.append("")
+    lines.append(
+        "> ⚠️ **Latency below is NOT a result unless this was a clean-environment run.** "
+        "On a loaded/dev machine it is noise. The authoritative single-query latency (and "
+        "therefore the budget verdict + cap pick) is the maintainer's clean-env run; until "
+        "then read only the recall grid above. The budget is **p95 ≤ "
+        f"{BUDGET_MS:g}ms** (#977)."
+    )
+    lines.append("")
+    lines.append(
+        f"Single-query latency = ONE query's substring + fuzzy read (the per-keystroke "
+        f"cost) over {run.n_queries} queries after a {_LATENCY_WARMUP}-query warmup. The "
+        "budget reads the p95 tail (what every keystroke feels), not the median; `p90≤`/"
+        "`p99≤` bracket it. The serial sum is the conservative bound (the kernel can "
+        "overlap the two lanes on the compute pool)."
+    )
+    lines.append("")
+    lines.append(
+        "| arm | recall@10 | Δ vs control | p50 ms | p90 ms | p95 ms | p99 ms | max ms | "
+        "p90≤ | p95≤ | p99≤ |"
+    )
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|:--:|:--:|:--:|")
+
+    def mark(v: float) -> str:
+        return "✓" if v <= BUDGET_MS else "✗"
+
+    for a in timed:
+        lat = a.latency
+        assert lat is not None  # filtered above; for the type-checker
+        delta = a.recall_at_k - control.recall_at_k
+        dstr = "—" if a is control else f"{delta * 100:+.1f}"
+        lines.append(
+            f"| {a.policy.label} | {_fmt_pct(a.recall_at_k)} | {dstr} | "
+            f"{lat.p50_ms:.3f} | {lat.p90_ms:.3f} | {lat.p95_ms:.3f} | {lat.p99_ms:.3f} | "
+            f"{lat.max_ms:.3f} | {mark(lat.p90_ms)} | {mark(lat.p95_ms)} | {mark(lat.p99_ms)} |"
+        )
+    lines.append("")
+    lines.extend(_render_picks(timed))
+    if control.samples:
+        lines.extend(_render_slow_query_diagnostic(control.samples))
+    return lines
+
+
+def _render_picks(timed: list[ArmResult]) -> list[str]:
+    """The cap pick at the user's budget (p95 ≤ 10ms) — max recall@10 among arms whose p95
+    clears the budget, ties broken by the lower p95. The p50 pick is surfaced too as the
+    "if the bar were the median" contrast (it will be a looser cap), making explicit that
+    the budget is the tail, not the median."""
+    lines: list[str] = []
+
+    def pick_for(pct: str, value: Callable[[SingleQueryLatency], float]) -> str:
+        eligible = [a for a in timed if a.latency is not None and value(a.latency) <= BUDGET_MS]
+        if not eligible:
+            return (
+                f"- **{pct} budget:** no arm clears {BUDGET_MS:g}ms at {pct} — the budget cut "
+                "takes the cheapest arm, or the bound (PR2) has to bring the tail down first."
+            )
+        best = max(
+            eligible,
+            key=lambda a: (a.recall_at_k, -(value(a.latency) if a.latency else 0.0)),
+        )
+        assert best.latency is not None
+        return (
+            f"- **{pct} budget:** `{best.policy.label}` (floor={best.policy.floor}, "
+            f"k={best.policy.k:g}, ceiling={best.policy.ceiling}) — recall@10 "
+            f"{_fmt_pct(best.recall_at_k)} at {pct} {value(best.latency):.3f}ms."
+        )
+
+    lines.append(
+        f"**Cap pick (max recall@10 within {BUDGET_MS:g}ms)** — mechanical from the "
+        "latency above, so only valid on a clean-env run:"
+    )
+    lines.append(pick_for("p95", lambda lat: lat.p95_ms))  # the user's budget
+    lines.append(pick_for("p50", lambda lat: lat.p50_ms))  # the looser median contrast
+    lines.append("")
+    return lines
+
+
+#: How many of the slowest queries to surface in the tail diagnostic.
+_SLOW_QUERY_SHOW = 15
+
+
+def _render_slow_query_diagnostic(samples: list[QuerySample]) -> list[str]:
+    """The TAIL DIAGNOSTIC (#977): what SHAPES are the slow single queries? Correlates
+    per-query latency with the cheap eval-side shape features (trigram count, typo count,
+    candidate-set size) so PR2 can pick the right bound (candidate cap / posting cap /
+    time-budget early-exit). Captured once on the control arm.
+
+    Native DF / posting-scan introspection is not exposed to the eval, so the rarest-
+    trigram DF — the suspected fuzzy-tail driver (the posting SCAN) — is NOT measured
+    here; candidate-set size is its observable proxy (a high-DF trigram yields a large
+    posting → large candidate set). If candidate size doesn't explain the tail, a native
+    per-query DF/scan-count hook is the follow-up."""
+    lines: list[str] = []
+    lines.append("### tail diagnostic — what shapes the slow single queries")
+    lines.append("")
+    lines.append(
+        "> ⚠️ The slow/fast split is ordered by the UNTRUSTED local latency above, so the "
+        "feature contrast is only meaningful on a clean-env run. The machinery is here so "
+        "the maintainer's run names the driver; do not read a driver off dev-box noise."
+    )
+    lines.append("")
+
+    n = len(samples)
+    by_lat = sorted(samples, key=lambda s: s.latency_ms, reverse=True)
+    slow = by_lat[: max(1, n // 10)]  # the slowest decile
+    fast = by_lat[n - max(1, n // 10) :]  # the fastest decile
+
+    def avg(rows: list[QuerySample], f: Callable[[QuerySample], float]) -> float:
+        return sum(f(r) for r in rows) / len(rows) if rows else 0.0
+
+    # The slow-vs-fast decile contrast: which feature moves with latency tells PR2 what
+    # to bound. A big trigram/candidate gap → bound those; a flat gap → the tail is
+    # elsewhere (native DF hook needed). Reliable only when the latency ordering is real.
+    lines.append("Slowest vs fastest decile (mean feature value) — the gap names the driver:")
+    lines.append("")
+    lines.append("| feature | slowest 10% | fastest 10% | ratio |")
+    lines.append("|---|---:|---:|---:|")
+    for name, f in (
+        ("latency ms", lambda s: s.latency_ms),
+        ("n_trigrams", lambda s: float(s.n_trigrams)),
+        ("candidates", lambda s: float(s.candidates)),
+        ("typo_count", lambda s: float(s.typo_count)),
+    ):
+        s_avg, f_avg = avg(slow, f), avg(fast, f)
+        ratio = f"{s_avg / f_avg:.1f}×" if f_avg else "—"
+        lines.append(f"| {name} | {s_avg:.2f} | {f_avg:.2f} | {ratio} |")
+    lines.append("")
+
+    # The actual slow queries, so a human can eyeball the shape (all-common-word phrase?
+    # one rare token? long phrase?) the aggregate can't show.
+    lines.append(f"The {min(_SLOW_QUERY_SHOW, n)} slowest queries:")
+    lines.append("")
+    lines.append("| query | latency ms | n_trigrams | candidates | typos |")
+    lines.append("|---|---:|---:|---:|---:|")
+    for s in by_lat[:_SLOW_QUERY_SHOW]:
+        q = s.query if len(s.query) <= 40 else s.query[:37] + "..."
+        lines.append(
+            f"| `{q}` | {s.latency_ms:.3f} | {s.n_trigrams} | {s.candidates} | {s.typo_count} |"
+        )
+    lines.append("")
+    return lines
 
 
 def main() -> int:
@@ -405,7 +716,9 @@ def main() -> int:
     parser.add_argument(
         "--latency",
         action="store_true",
-        help="Also time each arm (noisy on a loaded machine — for a clean-env run).",
+        help="Also measure single-query lexical p50/p90/p95/p99/max per arm and emit "
+        "the as-you-type frontier + the tail diagnostic (noisy on a loaded machine — "
+        "for a clean-env run; budget is p95 <= 10ms).",
     )
     parser.add_argument(
         "--offline",
