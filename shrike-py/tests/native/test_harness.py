@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import sys
+from typing import Any
 
 import pytest
 
@@ -19,6 +21,26 @@ shrike_native = pytest.importorskip("shrike_native")
 from shrike.harness.derived import DerivedTextStore, NativeDerivedEngine  # noqa: E402
 from shrike.harness.engines.embedding.runtime import EmbeddingRuntime  # noqa: E402
 from shrike.harness.harness import Harness, KernelConfigError  # noqa: E402
+
+
+def _text_neighbors(harness: Harness, backend: Any, query: str, top_k: int = 5) -> list[dict]:
+    """Nearest text-modality neighbours of ``query`` over the kernel's engine.
+
+    Embeds the query with ``backend`` (unit-normalized — the engine's
+    inner-product metric assumes unit vectors), then searches the kernel's
+    Arc-shared engine handle in the ``text`` modality. Returns one
+    ``{note_id, distance}`` dict per hit. This is the dedup/neighbour path's
+    underlying text-to-text ranking, exercised directly against the engine.
+    """
+    raw = backend.embed_texts([query])[0]
+    norm = math.sqrt(sum(x * x for x in raw))
+    vector = [x / norm for x in raw] if norm > 0 else raw
+    rankings = harness.kernel.engine_handle().search_by_modality([vector], top_k, ["text"])
+    ids, distances = rankings[0].get("text", ([], []))
+    return [
+        {"note_id": int(nid), "distance": float(dist)}
+        for nid, dist in zip(ids, distances, strict=True)
+    ]
 
 
 async def _assemble(tmp_path, *, cooperative: bool = False) -> Harness:
@@ -392,9 +414,6 @@ class TestRecognition:
         # transcript is both lexically searchable AND vector-minting through the
         # binding search — proving audio end-to-end without the platform engine.
         import hashlib
-        from types import SimpleNamespace
-
-        from shrike.harness.harness import KernelIndexView
 
         class _TokenHash:
             def embed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -455,9 +474,8 @@ class TestRecognition:
             assert harness.derived.search_substring("powerhouse of the cell", limit=5), (
                 "asr transcript reached the lexical store"
             )
-            # ... and mints a vector reachable through the binding search.
-            view = KernelIndexView(harness.kernel, SimpleNamespace(backend=backend))  # type: ignore[arg-type]
-            hits = view.search(["cell powerhouse mitochondria"], top_k=5)[0]
+            # ... and mints a vector reachable through the text-modality search.
+            hits = _text_neighbors(harness, backend, "cell powerhouse mitochondria")
             assert any(h["note_id"] == audio_id for h in hits), (
                 "asr transcript reachable via the vector"
             )
@@ -715,18 +733,14 @@ class TestRecognition:
 
 class TestDedupOverOcr:
     def test_dedup_search_covers_ocr_vectors_max_over_items(self, tmp_path) -> None:
-        # The text-space semantic ranking (KernelIndexView.search, the
-        # max-over-items dedup the neighbor path relies on) matches a draft
-        # against ALL of a note's text-modality vectors: a card whose content
-        # lives ONLY inside an image surfaces as a near-dupe through its OCR
-        # vector, while the card's own field text shares nothing with the
-        # draft. Text-to-text — no modality gap, no activation gate. (Neighbors
-        # route through the fused search action, which ranks over the same text
-        # space; this pins the underlying max-over-items property.)
+        # The text-space semantic ranking (the max-over-items dedup the neighbor
+        # path relies on) matches a draft against ALL of a note's text-modality
+        # vectors: a card whose content lives ONLY inside an image surfaces as a
+        # near-dupe through its OCR vector, while the card's own field text shares
+        # nothing with the draft. Text-to-text — no modality gap, no activation
+        # gate. (Neighbors route through the fused search action, which ranks over
+        # the same text space; this pins the underlying max-over-items property.)
         import hashlib
-        from types import SimpleNamespace
-
-        from shrike.harness.harness import KernelIndexView
 
         class _TokenHash:
             """Token-overlap cosine: shared words → similarity."""
@@ -789,12 +803,10 @@ class TestDedupOverOcr:
             report = await harness.recognition_sweep(batch_size=4)
             assert report["total_stored"] == 1
 
-            # The dedup path's exact call, with the same backend embedding the
-            # draft query (a fresh view over the kernel's engine, like the
-            # server wires it).
-            view = KernelIndexView(harness.kernel, SimpleNamespace(backend=backend))  # type: ignore[arg-type]
+            # The dedup path's exact ranking, with the same backend embedding the
+            # draft query against the kernel's engine, like the server wires it.
             draft = "oxaloacetate condenses with acetyl coa today"
-            hits = view.search([draft], top_k=5)[0]
+            hits = _text_neighbors(harness, backend, draft)
             scores = {h["note_id"]: 1.0 - h["distance"] for h in hits}
             assert diagram_id in scores, "the image-only content surfaced as a near-dupe"
             assert scores[diagram_id] >= 0.6, (
@@ -833,9 +845,6 @@ class TestDescribeAttach:
         # exact/fuzzy/text ranking).
         # OCR alongside it stays lexically searchable (byte-identical routing).
         import hashlib
-        from types import SimpleNamespace
-
-        from shrike.harness.harness import KernelIndexView
 
         class _TokenHash:
             """Token-overlap cosine: shared words → similarity (no model)."""
@@ -948,11 +957,10 @@ class TestDescribeAttach:
                 "the describe row is stored (provenance + reconcile) even though search hides it"
             )
 
-            # The dedup view (the other binding search seam) also surfaces the
+            # The dedup ranking (the other binding search seam) also surfaces the
             # describe vector max-over-items — a query overlapping the prose
             # finds the note even though its field text shares nothing.
-            view = KernelIndexView(harness.kernel, SimpleNamespace(backend=backend))  # type: ignore[arg-type]
-            hits = view.search(["sunlit mountain valley with grazing cattle"], top_k=5)[0]
+            hits = _text_neighbors(harness, backend, "sunlit mountain valley with grazing cattle")
             assert any(h["note_id"] == photo_id for h in hits), (
                 "describe vector reachable through the dedup search path"
             )
@@ -1038,9 +1046,9 @@ class TestDescribeAttach:
             assert report["total_stored"] == 2, report
 
             # Register the REAL MCP action registry against the harness's
-            # surfaces (the search-facing KernelIndexView embeds queries with the
-            # same backend, like the server wires it), then drive search_notes —
-            # the exact path a client's tools/call reaches.
+            # surfaces (the search-facing KernelIndexView over the kernel, like
+            # the server wires it), then drive search_notes — the exact path a
+            # client's tools/call reaches.
             view = KernelIndexView(harness.kernel, SimpleNamespace(backend=backend))  # type: ignore[arg-type]
             mcp = FastMCP("test")
             register_tools(

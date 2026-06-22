@@ -15,7 +15,6 @@ import contextlib
 import functools
 import json
 import logging
-import math
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -176,10 +175,10 @@ class DedupStatsRecorder:
 class KernelIndexView:
     """The search-facing index view, live over the kernel.
 
-    The actions' search path needs: availability/state/progress, the engine
-    handle, query embedding (host-side, via the runtime's backend), and the
-    activation stats — all of which the kernel owns now. This view reads them
-    live (``index_status_json``) instead of holding facade copies.
+    The actions' search path needs availability/state/progress, the engine
+    handle, and the activation stats — all of which the kernel owns now. This
+    view reads them live (``index_status_json``) instead of holding facade
+    copies.
     """
 
     def __init__(self, kernel: Any, runtime: EmbeddingRuntime) -> None:
@@ -225,38 +224,6 @@ class KernelIndexView:
     def engine(self) -> Any:
         """The Arc-shared native engine handle (the vectors the kernel maintains)."""
         return self._engine_handle
-
-    def embed_queries(self, texts: list[str]) -> list[list[float]] | None:
-        backend = self._runtime.backend
-        if backend is None or not texts:
-            return None
-        # Unit-normalize: the engine's inner-product metric assumes unit vectors. The
-        # kernel's search path normalizes at the engine boundary; this direct-to-engine
-        # diagnostic helper queries the engine itself, so it normalizes too (a
-        # non-normalizing backend would otherwise mis-rank under IP).
-        out: list[list[float]] = []
-        for v in backend.embed_texts(texts):
-            norm = math.sqrt(sum(x * x for x in v))
-            out.append([x / norm for x in v] if norm > 0 else v)
-        return out
-
-    def search(self, texts: list[str], top_k: int = 10) -> list[list[dict[str, Any]]]:
-        """Nearest **text** neighbors per query: one list per text of
-        ``{note_id, distance}`` dicts, over the kernel's engine."""
-        vectors = self.embed_queries(texts)
-        if vectors is None:
-            return [[] for _ in texts]
-        rankings = self._engine_handle.search_by_modality(vectors, top_k, ["text"])
-        out: list[list[dict[str, Any]]] = []
-        for per_query in rankings:
-            ids, distances = per_query.get("text", ([], []))
-            out.append(
-                [
-                    {"note_id": int(nid), "distance": float(dist)}
-                    for nid, dist in zip(ids, distances, strict=True)
-                ]
-            )
-        return out
 
 
 class Harness:

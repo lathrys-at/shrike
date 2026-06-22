@@ -124,11 +124,14 @@ each modality enters fusion as its own signal. Because rank fusion compares rank
 
 Derived data — text Shrike computes locally from notes — wants one home, separate
 from Anki's synced collection. The home is a sidecar SQLite file (`shrike.db`) in
-the cache directory, written by the kernel's `DerivedEngine` (`shrike-derived`) —
-the single writer, reached through the ingest actor, with `harness/derived.py`
-(`DerivedTextStore`) the harness-side facade. Its first artifact is an **FTS5
-trigram index** over note text, which backs the substring (`exact`) candidates
-and the `fuzzy` signal of `search_notes`.
+the cache directory, owned end-to-end by the kernel's `DerivedEngine`
+(`shrike-derived`): the single writer (reached through the ingest actor) AND the
+reader that `search_notes` queries, in-core, as part of `kernel.search_fused`. The
+harness-side facade (`harness/derived.py`, `DerivedTextStore`) is no longer on the
+search path — it coordinates the drift watermark (claim/settle around the kernel's
+rebuild) and backs the `/status` read surface. The store's first artifact is an
+**FTS5 trigram index** over note text, which backs the substring (`exact`)
+candidates and the `fuzzy` signal of `search_notes`.
 
 It lives in a sidecar rather than in `collection.anki2` because Anki's sync,
 "Check Database", media check, and version migrations own that schema — a foreign
@@ -152,10 +155,10 @@ deliberate divergences:
   drift.
 - **Graceful absence is first-class** — if the runtime's SQLite lacks FTS5 or the
   trigram tokenizer (probed at construction), the store reports `unavailable` and
-  every lookup signals the caller to fall back to the linear `find_notes` scan.
-  Likewise a `<3`-character query (which trigram can't match) falls back. All
-  MATCH expressions are FTS5-quoted (`_fts_quote`), so query punctuation can't be
-  parsed as FTS5 syntax.
+  the kernel's search falls the lexical signals back to the linear `find_notes`
+  scan. Likewise a `<3`-character query (which trigram can't match) falls back.
+  The kernel's `DerivedEngine` FTS5-quotes every MATCH expression, so query
+  punctuation can't be parsed as FTS5 syntax.
 
 The store is independent of the embedder (it builds and ingests with embeddings
 off) and updates incrementally on upsert/delete alongside the vector index.
@@ -210,15 +213,16 @@ Two signals deserve note:
   self-matches excluded; stored in `index.meta.json` under `activation`). So an
   off-topic query no longer injects weak image cards, and text-only collections
   are unaffected (no image sub-index → nothing to calibrate).
-- **The `fuzzy` signal** is the derived store's trigram/typo ranking
-  (`DerivedTextStore.search_fuzzy`), weighted below the rest
-  (`SEARCH_WEIGHTS["fuzzy"]=0.5` — a near-miss is weaker evidence), surfacing
-  near-misses an exact search misses (`protien` → `protein`).
+- **The `fuzzy` signal** is the kernel derived engine's trigram/typo ranking
+  (`DerivedEngine::search_fuzzy`, reached in-core via `kernel.search_fused`),
+  weighted below the rest (`SEARCH_WEIGHTS["fuzzy"]=0.5` — a near-miss is weaker
+  evidence), surfacing near-misses an exact search misses (`protien` →
+  `protein`).
 
 Both lexical hits carry source-aware provenance (`SubstringInfo`/`FuzzyMatch`
 `.source`/`.ref`), today always `source="field"` but seamed for `ocr`/`asr`. The
-substring (`exact`) candidates come from the same store
-(`DerivedTextStore.search_substring`, a fast FTS5 pre-filter), falling back to
+substring (`exact`) candidates come from the same engine
+(`DerivedEngine::search_substring`, a fast FTS5 pre-filter), falling back to
 `find_notes` when the store is unavailable or the query is sub-trigram; either way
 `substring_info` stays the authority that confirms and annotates each candidate.
 
