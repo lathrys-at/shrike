@@ -448,7 +448,6 @@ impl MultiModalIndex {
         // The FxHash set keeps the per-candidate `contains` off SipHash.
         let scope_set: Option<shrike_store::FxI64Set> =
             scope.map(|ids| ids.iter().copied().collect());
-        let fetch = (k * SEARCH_OVERFETCH).max(k);
         let mut out: Vec<BTreeMap<String, ModalityRanking>> =
             (0..queries.len()).map(|_| BTreeMap::new()).collect();
         for (modality, sub) in &state.indexes {
@@ -463,16 +462,24 @@ impl MultiModalIndex {
             if sub.index.size() == 0 {
                 continue;
             }
-            // Clamp the over-fetch to what THIS sub-index can actually return:
-            // usearch's `search(query, count)` reserves AND
-            // zero-fills `count` result slots up front (lib.cpp search_) before
-            // the graph walk, so an unclamped `fetch` allocates work proportional
-            // to `count`, not to the hits. With `limit=0` the caller sets
-            // `k = index.size`, so `fetch = SEARCH_OVERFETCH * index.size` — at
-            // 100k notes that is a ~400k-slot zero-fill per query per modality
-            // for a sub-index that holds at most `size` vectors. A sub-index can
-            // never yield more than `size()` hits, so the clamp is lossless.
-            let fetch = fetch.min(sub.index.size());
+            // The over-fetch covers the per-note dedup of a MULTI-vector modality (a
+            // note's several images deduped to k distinct notes); a single-vector
+            // modality (`size == note count`, e.g. text) has no dupes, so it fetches
+            // exactly k. Then clamp to what THIS sub-index can return: usearch's
+            // `search(query, count)` reserves AND zero-fills `count` result slots up
+            // front (lib.cpp search_) before the graph walk, so an unclamped `fetch`
+            // allocates work proportional to `count`, not to the hits — a `limit=0`
+            // (k = size) query would be a ~400k-slot zero-fill at 100k notes. A
+            // sub-index can never yield more than `size()` hits, so the clamp is
+            // lossless; skipping the over-fetch where there is nothing to dedup is the
+            // rest of the win.
+            let multi_vector = sub.index.size() != sub.counts.len();
+            let base = if multi_vector {
+                (k * SEARCH_OVERFETCH).max(k)
+            } else {
+                k
+            };
+            let fetch = base.min(sub.index.size());
             for (qi, query) in queries.iter().enumerate() {
                 let hits = match &scope_set {
                     Some(set) => sub
@@ -898,7 +905,10 @@ mod tests {
         let got: std::collections::HashSet<i64> = keys.iter().copied().collect();
         assert_eq!(
             got,
-            scope.iter().copied().collect::<std::collections::HashSet<i64>>(),
+            scope
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<i64>>(),
             "filtered_search must return exactly the in-scope keys, got {keys:?}"
         );
     }
