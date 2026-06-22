@@ -110,11 +110,10 @@ jobs:
 
   # The coverage lane's Rust cache (#422): coverage.yml builds the native
   # extension with a debug `cargo build -p shrike-pyo3` under the `rust-coverage`
-  # shared-key. Its scheduled runs (Mon/Wed/Fri, on main) self-seed that key —
-  # but a Cargo.lock bump merged between schedules would leave the next
-  # coverage run (or an rc PR's) cold. This job runs the same build on the same
-  # triggers as the other warms, so the coverage cache turns over with the
-  # locks like everything else.
+  # shared-key. Its push-to-main runs self-seed that key on every merge — this job
+  # runs the same build on the same triggers as the other warms (the daily schedule
+  # + lock bumps), so the coverage cache stays warm against toolchain drift even
+  # across a quiet stretch with no merges, like every other warmed entry.
   warm-rust-coverage:
     name: Warm Rust coverage cache (linux)
     runs-on: ubuntu-latest

@@ -3,10 +3,15 @@ name: Coverage
 # Coverage lives entirely here, OFF the per-PR critical path, and is **never a gate** —
 # it reports a number, it never fails a build on a threshold. Three entry points:
 #
+#   - push (main): every merge to main runs coverage on the freshly-merged tree and
+#     publishes the README badge to the `badges` branch. Shrike is squash-merge
+#     trunk-based, so a push to main IS a PR landing — this keeps the number current as
+#     work lands, without running on every in-PR commit (PRs validate via test.yml;
+#     coverage is not a gate, so paying a tracer + native build per PR push buys nothing).
 #   - pull_request (rc-labelled only): a release candidate carries a fresh coverage
-#     report. The job is skipped on every non-rc PR, so this costs ~nothing there.
-#   - schedule (Mon/Wed/Fri on main): an ongoing record as work lands between releases.
-#     These runs (and manual ones) ALSO publish the README badge to the `badges` branch.
+#     report before it merges, refreshed on each push to the PR. The coverage job's `if`
+#     skips every non-rc PR, so an ordinary PR pays nothing and never runs it on an
+#     in-PR commit.
 #   - workflow_dispatch: a one-off run whenever you want the current number / to (re)seed
 #     the badge.
 #
@@ -17,15 +22,15 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, labeled]
-  schedule:
-    # Mon / Wed / Fri — an ongoing record between releases. 3x/week, not daily:
-    # since the native cutover each run also carries a Rust build of the
-    # extension, and the number doesn't move fast enough to justify 7 runs/week.
-    - cron: "0 14 * * 1,3,5" # 14:00 UTC = 7am PDT (6am PST in winter)
+  push:
+    branches: [main]
   workflow_dispatch:
 
-# Cancel a PR's in-flight coverage run on a new push (same scoping as test.yml);
-# scheduled/manual runs group by the main ref and don't fight the PR ones.
+# Cancel an rc PR's in-flight coverage run when it gets a new push; a merge burst on
+# main likewise keeps only the newest run, since each is a superset of the prior tree
+# (linear squash history). Grouped by the ref — refs/pull/<n>/merge per PR,
+# refs/heads/main for a push or a main-dispatched manual run — so PRs and main never
+# cancel each other.
 concurrency:
   group: coverage-${{ github.ref }}
   cancel-in-progress: true
@@ -33,7 +38,7 @@ concurrency:
 jobs:
   coverage:
     name: Measure coverage
-    # Skip on non-rc PRs; always run on schedule / manual.
+    # Skip on non-rc PRs; always run on push to main / manual dispatch.
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'rc')
     runs-on: ubuntu-latest
     permissions:
@@ -53,16 +58,17 @@ jobs:
       - uses: astral-sh/setup-uv@v8.2.0
         with:
           enable-cache: true
-          cache-dependency-glob: pyproject.toml
+          cache-dependency-glob: shrike-py/pyproject.toml
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
+        # pyproject.toml lives in the shrike-py/ unit (#731).
+        run: uv pip install --system -e "shrike-py/[dev]"
       # The native extension (#400): since the cutover `shrike.collection` does
       # `import shrike_native`, which a plain pip install doesn't build — without
       # this step every run died at test collection (ModuleNotFoundError), so the
       # whole lane was a 17-second no-op. The rust-setup composite carries the
       # rust-cache + protoc preamble; `rust-coverage` is this lane's own
       # shared-key (a debug `cargo build`, not clippy's check artifacts),
-      # seeded on main by the scheduled runs here and by warm-cache.yml's
+      # seeded on main by the push-to-main runs here and by warm-cache.yml's
       # warm-rust-coverage on lock bumps (#422).
       - uses: ./.github/actions/rust-setup
         with:
@@ -86,8 +92,8 @@ jobs:
       # total. Kept identical to scripts/coverage.sh.
       - name: Run unit + integration under coverage
         env:
-          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
-        run: coverage run --parallel-mode -m pytest tests/unit tests/integration tests/native -q -m "not embedding" -n auto
+          COVERAGE_PROCESS_START: ${{ github.workspace }}/shrike-py/pyproject.toml
+        run: coverage run --parallel-mode -m pytest shrike-py/tests/unit shrike-py/tests/integration shrike-py/tests/native -q -m "not embedding" -n auto
       - name: Combine
         run: coverage combine
       # Surface the number in the run summary. `--fail-under=0` prints the table but
@@ -120,9 +126,9 @@ jobs:
           echo "coverage: ${PCT}% (${COLOR})"
       # Leave a browsable line-by-line report so keeping coverage healthy is easy.
       # --fail-under=0 like every other invocation here: `coverage html` also
-      # enforces pyproject's fail_under, and a below-target scheduled run must
-      # report (and publish the badge), never fail (#421 — exit 2 at 85% failed
-      # the whole workflow and skipped the badge).
+      # enforces pyproject's fail_under, and a below-target main run must report
+      # (and publish the badge), never fail (#421 — exit 2 at 85% failed the whole
+      # workflow and skipped the badge).
       - name: Build HTML report
         run: coverage html --fail-under=0
       - name: Upload HTML report
@@ -133,12 +139,13 @@ jobs:
           retention-days: 14
 
   # Publish the README badge (a shields-endpoint JSON on the orphan `badges` branch).
-  # ONLY the standalone main runs do this — never a PR (an rc PR reports, it doesn't
-  # move main's badge). Force-pushes a single-commit orphan so the branch never grows.
+  # ONLY the main-scoped runs do this — a merge to main or a manual dispatch, never a
+  # PR (an rc PR reports its number, it doesn't move main's badge), which the `if`
+  # enforces. Force-pushes a single-commit orphan so the branch never grows.
   badge:
     name: Publish coverage badge
     needs: coverage
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
