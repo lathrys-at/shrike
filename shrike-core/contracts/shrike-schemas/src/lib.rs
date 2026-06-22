@@ -762,9 +762,9 @@ pub struct SearchResponse {
     #[serde(default)]
     /// An optional advisory (e.g. index still building).
     pub message: Option<String>,
-    /// The two-tier live-search contract: "partial" = the
+    /// The as-you-type completeness contract: "partial" = the
     /// embedding-bearing signals were skipped at the caller's request
-    /// (tier="live"); "full" = the final answer for this query/server state.
+    /// (mode="lexical"); "full" = the final answer for this query/server state.
     #[serde(default)]
     pub completeness: Completeness,
     /// Echo of the request's `version` (client-side stale-response dropping).
