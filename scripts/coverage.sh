@@ -49,7 +49,12 @@ if [ ! -f "$HOOK" ]; then
 fi
 
 # The [tool.coverage.*] config lives in the harness pyproject under shrike-py/.
+# COVERAGE_PROCESS_START gives it to the spawned server subprocesses (branch mode);
+# COVERAGE_RCFILE gives the SAME file to the foreground `coverage run`/`combine`/`report`,
+# which otherwise discover no config from the repo-root cwd and record statement coverage
+# — and `coverage combine` refuses to merge branch with statement data.
 export COVERAGE_PROCESS_START="$ROOT/shrike-py/pyproject.toml"
+export COVERAGE_RCFILE="$ROOT/shrike-py/pyproject.toml"
 
 # Combined `-n auto` run over both suites, matching CI. `-m "not embedding and not
 # search_quality"` keeps the embedding-gated AND the manual search-quality tests out

@@ -43,6 +43,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      # The harness pyproject carrying [tool.coverage.*] (branch = true) lives under
+      # shrike-py/, NOT the repo-root cwd — and coverage.py only discovers config from
+      # cwd. Without this the foreground `coverage run`/`combine`/`report` find no config
+      # and default to *statement* coverage, while the spawned servers read the same file
+      # via COVERAGE_PROCESS_START and record *branch* coverage; `coverage combine` then
+      # refuses to merge branch + statement data. Point every coverage subcommand at the
+      # one config so the whole run is branch-mode and the number matches scripts/
+      # coverage.sh. (COVERAGE_PROCESS_START stays scoped to the pytest step so the other
+      # steps' Python calls don't spuriously start a tracer.)
+      COVERAGE_RCFILE: ${{ github.workspace }}/shrike-py/pyproject.toml
     outputs:
       pct: ${{ steps.fields.outputs.pct }}
       color: ${{ steps.fields.outputs.color }}

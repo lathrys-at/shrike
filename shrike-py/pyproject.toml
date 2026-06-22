@@ -128,8 +128,8 @@ show_missing = true
 # those modules out of the embedding/daemon blind spots; the buffer absorbs
 # platform/timing variance. (server.py's remaining gap is the async/embedding-
 # gated route handlers, covered by the embedding lane rather than this gate.)
-# A target, not a CI gate: CI *reports* coverage (rc PRs + 3x/week, coverage.yml)
-# but never fails on it. Enforced only locally by `scripts/coverage.sh` (exits
+# A target, not a CI gate: CI *reports* coverage (every push to main + rc PRs,
+# coverage.yml) but never fails on it. Enforced only locally by `scripts/coverage.sh` (exits
 # non-zero below this) as a proactive self-check; see docs/dev/testing.md (Coverage).
 fail_under = 86
 
