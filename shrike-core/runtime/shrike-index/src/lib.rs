@@ -19,8 +19,11 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 pub use engine::{ActivationStats, ModalityRanking, MultiModalIndex};
 
-/// Build a usearch index matching `UsearchIndexEngine._ensure`'s configuration:
-/// cosine metric, f32 scalars, multi=true (several vectors per note_id key).
+/// Build a usearch index: the INNER-PRODUCT metric over L2-normalized f32 vectors,
+/// multi=true (several vectors per note_id key). Vectors are unit-normalized at the
+/// ENGINE boundary (the kernel's `NormalizingEmbedder`), so the index treats every
+/// stored vector and query as already unit — IP then equals cosine similarity but
+/// skips the Cos metric's per-comparison vector norms + two sqrts (~half the cost).
 ///
 /// # Errors
 ///
@@ -28,7 +31,7 @@ pub use engine::{ActivationStats, ModalityRanking, MultiModalIndex};
 pub fn new_index(ndim: usize) -> NativeResult<Index> {
     let options = IndexOptions {
         dimensions: ndim,
-        metric: MetricKind::Cos,
+        metric: MetricKind::IP,
         quantization: ScalarKind::F32,
         multi: true,
         ..Default::default()
@@ -101,16 +104,25 @@ mod spike {
     }
 
     #[test]
-    fn cosine_is_scale_invariant() {
-        // Checklist: cos/f32/i64 keys + the scale-invariance the engine's
-        // "normalization is not vector-affecting" stance relies on.
+    fn ip_metric_equals_cosine_only_on_unit_vectors() {
+        // Checklist: the index uses the INNER-PRODUCT metric (ip/f32/i64 keys). On
+        // UNIT vectors it equals cosine (a vector against itself → distance ~0); it
+        // is NOT scale-invariant, so unit-normalizing every vector is the ENGINE
+        // BOUNDARY's job (the kernel's `NormalizingEmbedder`), not the metric's — the
+        // index assumes its inputs are already unit.
         let index = new_index(8).unwrap();
         let v = unit(7, 8);
         index.add(10, &v).unwrap();
-        let scaled: Vec<f32> = v.iter().map(|x| x * 42.0).collect();
-        let hits = index.search(&scaled, 1).unwrap();
+        // Unit query against its own unit vector: IP dist = 1 - (v·v) = 0.
+        let hits = index.search(&v, 1).unwrap();
         assert_eq!(hits.keys[0], 10);
         assert!(hits.distances[0].abs() < 1e-5);
+        // A non-unit (scaled) query is NOT distance-0 — IP scales with magnitude
+        // (dist = 1 - 42·(v·v) ≈ -41), so the index relies on normalized input.
+        let scaled: Vec<f32> = v.iter().map(|x| x * 42.0).collect();
+        let scaled_hits = index.search(&scaled, 1).unwrap();
+        assert_eq!(scaled_hits.keys[0], 10); // still the only/nearest vector
+        assert!(scaled_hits.distances[0].abs() > 1.0);
     }
 
     #[test]

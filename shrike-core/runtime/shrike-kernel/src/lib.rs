@@ -851,6 +851,20 @@ impl Kernel {
         images: Option<KernelImages>,
     ) {
         let has_images = images.is_some();
+        // Normalize at the engine boundary: wrap the text + image embedders so EVERY
+        // vector (stored notes AND queries — both route through this service) is unit
+        // before the kernel or index sees it. The index's inner-product metric then
+        // equals cosine without the per-comparison vector norms, and nothing
+        // downstream re-normalizes.
+        let embedder: Arc<dyn Embedder> =
+            Arc::new(shrike_engine_api::NormalizingEmbedder(embedder));
+        let images: Option<KernelImages> = images.map(|(img, resolver)| {
+            (
+                Box::new(shrike_engine_api::NormalizingImageEmbedder(img))
+                    as Box<dyn ImageEmbedder>,
+                resolver,
+            )
+        });
         self.embed
             .write()
             .expect("embed slot poisoned")

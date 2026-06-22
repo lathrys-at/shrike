@@ -196,6 +196,63 @@ impl<T: ImageEmbedder + ?Sized> ImageEmbedder for Arc<T> {
     }
 }
 
+/// L2-normalize `v` to unit length in place — a no-op (to within fp error) on an
+/// already-unit vector; a zero vector is left unchanged (no divide by zero).
+pub fn l2_normalize(v: &mut [f32]) {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
+/// An [`Embedder`] decorator that L2-normalizes every output vector to unit length.
+///
+/// Wrapping the embedder at the engine boundary means EVERY vector the kernel and
+/// vector index see — stored notes AND queries — is already unit, so the index uses
+/// the cheaper inner-product metric (equal to cosine on unit vectors, but without
+/// the per-comparison vector norms) and nothing downstream re-normalizes. A backend
+/// that already emits unit vectors (the ONNX text/CLIP paths) sees a near-no-op; one
+/// that does not (a remote service) is made conformant here, in one place.
+pub struct NormalizingEmbedder(pub Arc<dyn Embedder>);
+
+impl Embedder for NormalizingEmbedder {
+    fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+        Box::pin(async move {
+            let mut vectors = self.0.embed(texts).await?;
+            for v in &mut vectors {
+                l2_normalize(v);
+            }
+            Ok(vectors)
+        })
+    }
+
+    fn fingerprint(&self) -> Option<String> {
+        self.0.fingerprint()
+    }
+
+    fn dim(&self) -> Option<usize> {
+        self.0.dim()
+    }
+}
+
+/// The [`ImageEmbedder`] counterpart of [`NormalizingEmbedder`] — unit-normalizes
+/// every image vector at the engine boundary.
+pub struct NormalizingImageEmbedder(pub Box<dyn ImageEmbedder>);
+
+impl ImageEmbedder for NormalizingImageEmbedder {
+    fn embed_images(&self, images: Vec<MediaItem>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+        Box::pin(async move {
+            let mut vectors = self.0.embed_images(images).await?;
+            for v in &mut vectors {
+                l2_normalize(v);
+            }
+            Ok(vectors)
+        })
+    }
+}
+
 /// Media access the host injects: read bytes lazily, stat cheaply. The
 /// per-note fingerprint hashes *names of present media* via `exists` (no
 /// byte read); bytes are read only for items actually being processed.
@@ -782,6 +839,47 @@ mod tests {
             vec![2, 2, 1],
             "images split by the vision safe_batch"
         );
+    }
+
+    struct NonUnitEmbedder;
+    impl Embedder for NonUnitEmbedder {
+        fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            // One non-unit vector per text: [3, 4] has norm 5.
+            Box::pin(async move { Ok(texts.iter().map(|_| vec![3.0f32, 4.0]).collect()) })
+        }
+        fn fingerprint(&self) -> Option<String> {
+            Some("nonunit:v1".into())
+        }
+    }
+
+    #[test]
+    fn l2_normalize_makes_unit_and_leaves_zero() {
+        let mut v = vec![3.0f32, 4.0];
+        l2_normalize(&mut v);
+        assert!((v[0] - 0.6).abs() < 1e-6 && (v[1] - 0.8).abs() < 1e-6);
+        let mut z = vec![0.0f32, 0.0];
+        l2_normalize(&mut z);
+        assert_eq!(z, vec![0.0, 0.0], "a zero vector is left unchanged");
+    }
+
+    #[test]
+    fn normalizing_embedder_unit_normalizes_output_and_delegates() {
+        let wrapped = NormalizingEmbedder(Arc::new(NonUnitEmbedder) as Arc<dyn Embedder>);
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        let out = rt
+            .block_on(wrapped.embed(vec!["a".into(), "b".into()]))
+            .unwrap();
+        for v in &out {
+            let norm = (v[0] * v[0] + v[1] * v[1]).sqrt();
+            assert!(
+                (norm - 1.0).abs() < 1e-6,
+                "every output vector is unit, got {norm}"
+            );
+        }
+        assert!((out[0][0] - 0.6).abs() < 1e-6 && (out[0][1] - 0.8).abs() < 1e-6);
+        // Identity methods delegate to the inner embedder.
+        assert_eq!(wrapped.fingerprint().as_deref(), Some("nonunit:v1"));
     }
 
     /// safe_batch=1 (a probed batch-variant vision graph) embeds every image
