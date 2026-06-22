@@ -94,8 +94,8 @@ def note_outcome(message: str) -> None:
 # is the single source of truth, applied when the host passes none. The action below passes no
 # weights; a future config/`--search-*` knob re-enters through the same parameter as an override.
 
-# The live-search min-query gate: query strings shorter than this skip the
-# embedding-bearing tier even on tier="full" — single letters and typing
+# The as-you-type min-query gate: query strings shorter than this skip the
+# embedding-bearing signals even in mode="fused" — single letters and typing
 # fragments must not burn an embedding call. Ids-anchored searches are never
 # gated (no typing-fragment problem).
 MIN_SEMANTIC_QUERY_CHARS = 3
@@ -823,24 +823,25 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 description="Additional note IDs to exclude from results.",
             ),
         ],
-        tier: Annotated[
-            Literal["full", "live"],
+        mode: Annotated[
+            Literal["lexical", "fused"],
             Field(
                 description=(
-                    "The live-search tier contract (#181): 'live' runs only the "
-                    "no-embedding signals (exact substring + fuzzy) for per-keystroke "
-                    "latency and returns completeness='partial'; 'full' (default) adds "
-                    "the semantic + tag signals. Same fused result shape either way."
+                    "Retrieval mode. 'lexical' runs only the no-embedding signals "
+                    "(exact substring + fuzzy) for per-keystroke as-you-type latency "
+                    "and returns completeness='partial'; 'fused' (default) adds the "
+                    "semantic + tag signals (the full multi-signal RRF fusion). Same "
+                    "result shape either way, so a client can swap modes."
                 ),
             ),
-        ] = "full",
+        ] = "fused",
         version: Annotated[
             int | None,
             Field(
                 description=(
                     "Opaque client sequence number, echoed back verbatim — drop any "
                     "response whose echo doesn't match your latest request (the "
-                    "stale-live-search guard; the server is stateless per request)."
+                    "stale as-you-type guard; the server is stateless per request)."
                 ),
             ),
         ] = None,
@@ -893,12 +894,12 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         # Substring matching needs no embeddings; semantic ranking does.
         semantic_ok = index is not None and index.available and index.state == IndexState.READY
         message: str | None = None
-        # The live tier: the caller wants the cheap signals only — "partial"
-        # promises a fuller answer on a tier="full" re-request.
+        # Lexical mode: the caller wants the cheap signals only — "partial"
+        # promises a fuller answer on a mode="fused" re-request.
         completeness: Literal["partial", "full"] = (
-            "partial" if (tier == "live" and semantic_ok) else "full"
+            "partial" if (mode == "lexical" and semantic_ok) else "full"
         )
-        if tier == "live":
+        if mode == "lexical":
             semantic_ok = False
         elif (
             semantic_ok
@@ -913,7 +914,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
                 f"Semantic ranking skipped (queries shorter than "
                 f"{MIN_SEMANTIC_QUERY_CHARS} characters); exact text matches only."
             )
-        if tier != "live" and not semantic_ok and message is None:
+        if mode != "lexical" and not semantic_ok and message is None:
             if index is not None and index.state == IndexState.BUILDING:
                 indexed, total = index.build_progress
                 message = (
@@ -938,7 +939,7 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             if not queries:
                 return SearchResponse(message=message, completeness=completeness, version=version)
         elif not semantic_ok and not queries:
-            # The live tier with id anchors only: anchors are semantic-only,
+            # Lexical mode with id anchors only: anchors are semantic-only,
             # so there is nothing the cheap signals can do.
             return SearchResponse(message=message, completeness=completeness, version=version)
 

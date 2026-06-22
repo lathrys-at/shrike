@@ -783,24 +783,24 @@ class TestUpsertPolicyTool:
         assert kharness.engine.size() == size_before
 
 
-class TestTwoTierSearch:
-    """The live-search tier contract: tier='live' runs only the
+class TestSearchMode:
+    """The retrieval-mode contract: mode='lexical' runs only the
     no-embedding signals and reports partial; the min-query gate keeps typing
     fragments from burning embedding calls; `version` echoes verbatim."""
 
-    def test_live_tier_skips_semantic_and_reports_partial(self, kharness, mcp_sem):
+    def test_lexical_mode_skips_semantic_and_reports_partial(self, kharness, mcp_sem):
         planted = kharness.seed_note("sem only", back="A")
         _plant(kharness, "qry", [(planted, 0.05)])
         result = kharness.call_tool(
-            mcp_sem, "search_notes", {"queries": ["qry"], "tier": "live", "version": 7}
+            mcp_sem, "search_notes", {"queries": ["qry"], "mode": "lexical", "version": 7}
         )
         assert result["completeness"] == "partial"
         assert result["version"] == 7
-        # The semantically-planted note does not surface on the live tier.
+        # The semantically-planted note does not surface in lexical mode.
         ids = [m["id"] for m in result["results"][0]["matches"]]
         assert planted not in ids
 
-    def test_full_tier_reports_full_and_finds_semantic(self, kharness, mcp_sem):
+    def test_fused_mode_reports_full_and_finds_semantic(self, kharness, mcp_sem):
         planted = kharness.seed_note("sem hit", back="A")
         _plant(kharness, "qry", [(planted, 0.05)])
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["qry"]})

@@ -200,7 +200,7 @@ def evaluate_query(
 
     ``expects_degradation`` + ``response_announced_degradation`` drive the
     DEGRADE_SILENT tag: a query that should run degraded (embedding down /
-    sub-trigram / live tier) must carry the response's announcement
+    sub-trigram / lexical mode) must carry the response's announcement
     (``message`` / ``completeness`` / a ``score is None``); a silent degrade is
     a failure even when the ranking happens to look fine.
     """

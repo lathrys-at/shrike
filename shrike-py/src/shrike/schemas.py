@@ -663,11 +663,11 @@ class SearchResultGroup(BaseModel):
 class SearchResponse(BaseModel):
     results: list[SearchResultGroup] = []
     message: str | None = None
-    # The two-tier live-search contract: "partial" means the
+    # The as-you-type completeness contract: "partial" means the
     # embedding-bearing signals (semantic + tag) were skipped because the
-    # caller asked for the live tier — re-request with tier="full" to upgrade.
-    # A response that is the final answer for its query/server state (full
-    # tier, or nothing more would run) is "full".
+    # caller asked for mode="lexical" — re-request with mode="fused" to upgrade.
+    # A response that is the final answer for its query/server state
+    # (mode="fused", or nothing more would run) is "full".
     completeness: Literal["partial", "full"] = "full"
     # Echo of the request's `version` (client-side stale-response dropping:
     # the server is stateless per request; the client owns cancellation).

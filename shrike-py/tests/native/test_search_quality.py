@@ -363,13 +363,13 @@ class TestActivationGate:
 
 
 class TestGracefulDegradation:
-    """The response ANNOUNCES degradation (the two-tier contract + the
+    """The response ANNOUNCES degradation (the lexical/fused mode contract + the
     no-embedding / sub-trigram paths): a degraded search must surface its
     incompleteness through ``message`` / ``completeness`` / a ``score is None``,
     never silently return a thinner result that looks complete. The metric
     engine's DEGRADE_SILENT tag depends on exactly this announcement."""
 
-    def test_live_tier_is_partial_and_skips_the_semantic_signal(self, tmp_path) -> None:
+    def test_lexical_mode_is_partial_and_skips_the_semantic_signal(self, tmp_path) -> None:
         async def flow() -> None:
             backend = StubEmbedder(dim=DIM, fingerprint="stub:degrade:v1")
             backend.plant_text("d1", onehot(DIM, 0))
@@ -381,18 +381,18 @@ class TestGracefulDegradation:
                 )
                 await ip.finalize()
 
-                live = await ip.search("photosynthesis", limit=10, threshold=0.0, tier="live")
-                # The live tier ANNOUNCES partial completeness and runs only the
+                lexical = await ip.search("photosynthesis", limit=10, threshold=0.0, mode="lexical")
+                # Lexical mode ANNOUNCES partial completeness and runs only the
                 # no-embedding signals — its hits carry no semantic `score`.
-                assert live.get("completeness") == "partial", "live tier announces partial"
-                live_matches = live["results"][0]["matches"] if live["results"] else []
-                assert live_matches, "the literal hit still surfaces on the live tier"
-                for m in live_matches:
-                    assert m.get("score") is None, "no semantic score on the live tier"
+                assert lexical.get("completeness") == "partial", "lexical mode announces partial"
+                lexical_matches = lexical["results"][0]["matches"] if lexical["results"] else []
+                assert lexical_matches, "the literal hit still surfaces in lexical mode"
+                for m in lexical_matches:
+                    assert m.get("score") is None, "no semantic score in lexical mode"
                     assert "text" not in _signals(m), "the semantic signal is skipped"
 
-                full = await ip.search("photosynthesis", limit=10, threshold=0.0, tier="full")
-                assert full.get("completeness") == "full", "the full tier is complete"
+                fused = await ip.search("photosynthesis", limit=10, threshold=0.0, mode="fused")
+                assert fused.get("completeness") == "full", "fused mode is complete"
             finally:
                 await ip.harness.close()
 
