@@ -3910,6 +3910,52 @@ mod lexical_tests {
     }
 
     #[test]
+    fn sample_posting_just_over_the_ceiling_caps_spans_and_dedups() {
+        // The FRAGILE boundary the 2x cap/span test misses: just past the ceiling the
+        // integer-division stride `i * len / CEILING` is barely above 1.0, the regime
+        // where consecutive floors could collide and yield a DUPLICATE rowid (which
+        // would over-count a note's overlap, corrupting the fuzzy ranking). They
+        // don't — when `len > CEILING` the real stride exceeds 1, so consecutive
+        // floors strictly increase — but only a near-ceiling length exercises it.
+        // Sweeps every length in `[CEILING+1, CEILING+64]` plus a few irregular
+        // multiples: capped to exactly the ceiling, lowest rowid kept, the high tail
+        // reached (not a prefix cut), and strictly ascending (== no duplicate).
+        let n = FUZZY_POSTING_CEILING;
+        for len in (n + 1..=n + 64).chain([n + n / 2, 2 * n + 1, 3 * n - 1, 10 * n + 7]) {
+            let posting: Vec<i64> = (0..len as i64).collect();
+            let s = DerivedEngine::sample_posting(posting);
+            assert_eq!(s.len(), n, "len {len}: capped to exactly the ceiling");
+            assert_eq!(s[0], 0, "len {len}: keeps the lowest rowid");
+            // The fragile property: strictly ascending == NO duplicate rowid. A
+            // colliding integer-division stride (two `i` mapping to the same floor)
+            // would repeat a rowid and over-count its note's overlap; because `len >
+            // CEILING` the real stride exceeds 1, floors strictly increase and no
+            // rowid repeats. This is what the 2x test cannot isolate.
+            assert!(
+                s.windows(2).all(|w| w[0] < w[1]),
+                "len {len}: strictly ascending — no duplicate rowid from a colliding stride"
+            );
+            // Anti-prefix-cut: the sample reaches at least as far as a prefix LIMIT
+            // would (max == (n-1)*len/n >= n-1). At len == n+1 the two coincide (only
+            // one element is dropped, so max == n-1), so the boundary-correct
+            // assertion is `>=`, strengthening to `>` once len is comfortably over the
+            // ceiling — the high-rowid tail is sampled, never truncated.
+            let max = *s.last().unwrap();
+            let prefix_max = n as i64 - 1;
+            assert!(
+                max >= prefix_max,
+                "len {len}: never worse than a prefix cut"
+            );
+            if len >= 2 * n {
+                assert!(
+                    max > prefix_max,
+                    "len {len}: spans strictly past a prefix cut"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn sample_posting_is_deterministic() {
         // Same posting in → same sample out: the bound is a pure function of the
         // term's own rowids (no batch-wide or positional-stateful input), so the
