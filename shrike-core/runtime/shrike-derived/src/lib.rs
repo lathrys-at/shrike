@@ -3013,16 +3013,28 @@ impl DerivedEngine {
         // parallel fuzzy chunks fault through (the pcache `STATIC_LRU` mutex). A
         // cached `rowid = ?1` is both: parsed once, and a direct mmap'd PK lookup
         // with no temp btree.
+        //
+        // The whole batch rides ONE explicit read transaction: without it, each
+        // single-row `query`/`reset` runs its own implicit auto-transaction, and the
+        // per-candidate begin/commit pairs serialize on SQLite's btree transaction
+        // mutex (`sqlite3BtreeBeginTrans` / `CommitPhaseTwo` under `sqlite3_reset`) on
+        // the parallel chunks. One transaction = one begin/commit per call — the
+        // single-statement `IN`'s profile — over a consistent snapshot (the candidate
+        // set is fixed; the search's freshness bracket still flags a mid-read write).
         let run = || -> rusqlite::Result<Vec<(i64, i64, String, String)>> {
-            let mut stmt =
-                conn.prepare_cached("SELECT note_id, source, ref FROM rowmap WHERE rowid = ?1")?;
+            let tx = conn.unchecked_transaction()?;
             let mut out = Vec::with_capacity(rowids.len());
-            for &rowid in rowids {
-                let mut q = stmt.query([rowid])?;
-                if let Some(r) = q.next()? {
-                    out.push((rowid, r.get(0)?, r.get(1)?, r.get(2)?));
+            {
+                let mut stmt =
+                    tx.prepare_cached("SELECT note_id, source, ref FROM rowmap WHERE rowid = ?1")?;
+                for &rowid in rowids {
+                    let mut q = stmt.query([rowid])?;
+                    if let Some(r) = q.next()? {
+                        out.push((rowid, r.get(0)?, r.get(1)?, r.get(2)?));
+                    }
                 }
             }
+            tx.commit()?;
             Ok(out)
         };
         for (rowid, note_id, source, r) in with_busy_retry(run)? {
