@@ -98,7 +98,6 @@ def action_search_notes(
     image_floor: float | None = None,
     weights: dict[str, float] | None = None,
     semantic: bool = False,
-    index_size: int = 0,
     kernel: AsyncKernel | None = None,
     cross_space: str | None = None,
 ) -> str: ...
