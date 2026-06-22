@@ -57,8 +57,8 @@ use shrike_store::{DerivedStore, VectorIndex};
 pub mod runtime;
 pub use runtime::{
     block_on, drive_collection, drive_compute, drive_io, drive_io_until_shutdown,
-    init_driven_runtime, is_driven, set_compute_width, shutdown_driven_pools, spawn_op,
-    submit_blocking, submit_compute,
+    init_driven_runtime, is_driven, shutdown_driven_pools, spawn_op, submit_blocking,
+    submit_compute,
 };
 
 // The multi-engine routing key: re-exported so the pyo3 binding maps

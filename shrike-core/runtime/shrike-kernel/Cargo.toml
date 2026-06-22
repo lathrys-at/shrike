@@ -40,6 +40,9 @@ serde_json = "1"
 # hashlib.blake2b(digest_size=8) so the on-disk sidecar survives the swap.
 blake2 = "0.10"
 tracing = "0.1"
+# The compute pool's work-stealing deques (Injector + per-worker Worker/Stealer).
+# Already transitive via tokio, so no new tree weight.
+crossbeam-deque = "0.8"
 # futures stays for the channel/future utility types shared with the engine
 # contract (BoxFuture at the dyn seams); the runtime itself is tokio (#374).
 futures = { version = "0.3", features = ["executor"] }

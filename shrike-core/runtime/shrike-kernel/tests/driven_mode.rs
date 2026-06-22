@@ -76,6 +76,7 @@ fn full_flow_on_a_driven_runtime() {
             .enable_all()
             .build()
             .unwrap(),
+        2, // the committed drive_compute worker count (the two threads spawned below)
     )
     .unwrap_or_else(|_| panic!("this binary owns the runtime seam"));
 
@@ -103,8 +104,8 @@ fn full_flow_on_a_driven_runtime() {
         .unwrap();
     let drive_collection_thread = collection_id_rx.recv().unwrap();
 
-    // drive_compute ×2 — N≥2 cooperate on one shared queue. Each reports its
-    // thread id (before parking) so the submit_blocking assertion can prove the
+    // drive_compute ×2 — N≥2 cooperate over the work-stealing pool. Each reports
+    // its thread id (before parking) so the submit_blocking assertion can prove the
     // work ran on a compute thread, not the request thread.
     let (compute_id_tx, compute_id_rx) = mpsc::channel();
     let compute: Vec<_> = (0..2)

@@ -25,6 +25,7 @@ rust_library(
         "//shrike-core/runtime/shrike-index:shrike_index",
         "//shrike-core/contracts/shrike-schemas:shrike_schemas",
         "@crates//:blake2",
+        "@crates//:crossbeam-deque",
         "@crates//:futures",
         "@crates//:serde",
         "@crates//:serde_json",

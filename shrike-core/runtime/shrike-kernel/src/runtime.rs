@@ -50,8 +50,10 @@
 
 use std::cell::Cell;
 use std::future::Future;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 
+use crossbeam_deque::{Injector, Stealer, Worker as Deque};
 use shrike_error::{NativeError, NativeResult};
 use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -63,26 +65,21 @@ static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 /// size, not the channel.
 type PoolJob = Box<dyn FnOnce() + Send + 'static>;
 
-/// The work queues + their receivers, installed by [`init_driven_runtime`]. The
-/// collection receiver is single-consumer (one [`drive_collection`] thread); the compute
-/// receiver is shared across the N [`drive_compute`] threads behind a mutex
-/// (each `recv` hands a job to one waiter). Present once the harness has
-/// installed the driven runtime.
+/// The driven pools, installed by [`init_driven_runtime`]. The collection queue
+/// is a single-consumer mpsc (one [`drive_collection`] thread pops it); the
+/// compute pool is a [`ComputePool`] — a work-stealing pool over the N
+/// [`drive_compute`] threads. Present once the harness has installed the driven
+/// runtime.
 struct DrivenPools {
-    /// The senders are `Option` so [`shutdown_driven_pools`] can `.take()` them:
-    /// dropping every sender closes the queue, so the [`drive_collection`] /
-    /// [`drive_compute`] parkers see `recv() == None` and return for the harness
-    /// to join (the same end-the-loop-by-dropping-the-sender shape the
-    /// collection actor uses). Held under a mutex because the static is shared
-    /// and the take races concurrent enqueues. A `None` here is treated like a
-    /// gone pool — the awaiting future sees the closed receiver.
+    /// The sender is `Option` so [`shutdown_driven_pools`] can `.take()` it:
+    /// dropping it closes the queue, so [`drive_collection`] sees `recv() == None`
+    /// and returns for the harness to join. Held under a mutex because the static
+    /// is shared and the take races concurrent enqueues.
     collection_tx: Mutex<Option<mpsc::UnboundedSender<PoolJob>>>,
-    compute_tx: Mutex<Option<mpsc::UnboundedSender<PoolJob>>>,
     /// Taken once by the [`drive_collection`] thread.
     collection_rx: Mutex<Option<mpsc::UnboundedReceiver<PoolJob>>>,
-    /// Shared by every [`drive_compute`] thread (cloned Arc; the mutex is the
-    /// dequeue lock — held only to pop, never across a running job).
-    compute_rx: Arc<Mutex<mpsc::UnboundedReceiver<PoolJob>>>,
+    /// The work-stealing pool the N [`drive_compute`] threads run.
+    compute: ComputePool,
     /// Tripped by [`shutdown_driven_pools`] to resolve a [`drive_io`] parked on
     /// [`drive_io_until_shutdown`] (the binding's IO thread), so all N + 2
     /// committed threads return from one shutdown call.
@@ -98,33 +95,109 @@ impl DrivenPools {
             .expect("driven collection sender poisoned")
             .clone()
     }
+}
 
-    /// A live clone of the compute sender, or `None` post-shutdown.
-    fn compute_sender(&self) -> Option<mpsc::UnboundedSender<PoolJob>> {
-        self.compute_tx
-            .lock()
-            .expect("driven compute sender poisoned")
-            .clone()
+/// A **work-stealing thread pool** over the N committed [`drive_compute`]
+/// workers. A lock-free global [`Injector`] is the submission queue; each worker
+/// owns a local deque and, when it runs dry, steals a batch from the injector or
+/// a single task from a peer (see [`find_task`]). The hot path — a busy worker
+/// popping its own deque — touches no shared lock; only a worker that finds *no*
+/// work parks on a condvar. This replaces the earlier single `Mutex<Receiver>`
+/// every worker locked to pop one job, which serialized the whole pool on that
+/// one lock under load.
+struct ComputePool {
+    /// The submission queue. [`dispatch_compute`] / [`submit_compute`] /
+    /// [`submit_blocking`] push here; workers steal batches out.
+    injector: Injector<PoolJob>,
+    /// One stealer per worker deque, built at construction. Read-only; a worker
+    /// steals from peers through it.
+    stealers: Vec<Stealer<PoolJob>>,
+    /// The worker deques, built in [`ComputePool::new`] (one per committed
+    /// worker) and claimed one-each by the [`drive_compute`] threads at startup.
+    locals: Mutex<Vec<Deque<PoolJob>>>,
+    /// Idle-worker parking. A worker that finds no work waits on `unpark` under
+    /// `park`; a submission or shutdown notifies under the same lock, so the
+    /// check-then-park and the wake can never interleave into a lost wakeup.
+    park: Mutex<()>,
+    unpark: Condvar,
+    /// Set by [`shutdown_driven_pools`]; a worker that drains to empty under it
+    /// returns for the harness to join.
+    shutdown: AtomicBool,
+}
+
+impl ComputePool {
+    /// Build the pool with `workers` local deques — one per committed
+    /// [`drive_compute`] thread — and their stealers.
+    fn new(workers: usize) -> Self {
+        let deques: Vec<Deque<PoolJob>> = (0..workers).map(|_| Deque::new_fifo()).collect();
+        let stealers = deques.iter().map(Deque::stealer).collect();
+        Self {
+            injector: Injector::new(),
+            stealers,
+            locals: Mutex::new(deques),
+            park: Mutex::new(()),
+            unpark: Condvar::new(),
+            shutdown: AtomicBool::new(false),
+        }
     }
+
+    /// Push a job and wake one idle worker. Returns `false` (dropping the job, so
+    /// its result channel closes and the awaiting future errors) when the pool is
+    /// shutting down. The notify is taken under `park` so a worker mid
+    /// check-then-park either observes this job in its re-check or is woken by it.
+    fn push(&self, job: PoolJob) -> bool {
+        if self.shutdown.load(Ordering::Acquire) {
+            return false;
+        }
+        self.injector.push(job);
+        let _g = self.park.lock().expect("compute park poisoned");
+        self.unpark.notify_one();
+        true
+    }
+
+    /// Whether the injector or any peer deque holds work — the re-check a worker
+    /// runs under `park` before committing to a wait.
+    fn has_work(&self) -> bool {
+        !self.injector.is_empty() || self.stealers.iter().any(|s| !s.is_empty())
+    }
+
+    /// Signal shutdown and wake every parked worker so it can drain and return.
+    fn begin_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        let _g = self.park.lock().expect("compute park poisoned");
+        self.unpark.notify_all();
+    }
+}
+
+/// Find the next job for a worker: pop its own deque, else steal a batch from the
+/// global injector or a single task from a peer, retrying while a steal reports a
+/// transient conflict. `None` only once every queue is genuinely empty.
+fn find_task(
+    local: &Deque<PoolJob>,
+    injector: &Injector<PoolJob>,
+    stealers: &[Stealer<PoolJob>],
+) -> Option<PoolJob> {
+    local.pop().or_else(|| {
+        std::iter::repeat_with(|| {
+            injector
+                .steal_batch_and_pop(local)
+                .or_else(|| stealers.iter().map(Stealer::steal).collect())
+        })
+        .find(|s| !s.is_retry())
+        .and_then(|s| s.success())
+    })
 }
 
 static DRIVEN: OnceLock<DrivenPools> = OnceLock::new();
 
-/// The committed `drive_compute` worker count, recorded by the harness at boot so
+/// The committed `drive_compute` worker count, set by [`init_driven_runtime`] so
 /// [`compute_width`] can size parallel fan-out to the real pool width. 0 until set.
 static COMPUTE_WIDTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Record the committed compute-pool width — the number of [`drive_compute`]
-/// threads the harness parks. The harness knows this number; the kernel reads it
-/// via [`compute_width`] to fan work out across exactly that many workers.
-pub fn set_compute_width(workers: usize) {
-    COMPUTE_WIDTH.store(workers, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// The compute-pool width for sizing parallel fan-out: the committed
-/// [`drive_compute`] worker count ([`set_compute_width`]), or a machine estimate
-/// (`available_parallelism`) when the harness never set it (the C ABI, a direct
-/// embed, a test). Never 0.
+/// [`drive_compute`] worker count (from [`init_driven_runtime`]), or a machine
+/// estimate (`available_parallelism`) when no driven runtime was installed (the C
+/// ABI, a direct embed, a test). Never 0.
 pub fn compute_width() -> usize {
     match COMPUTE_WIDTH.load(std::sync::atomic::Ordering::Relaxed) {
         0 => std::thread::available_parallelism()
@@ -155,10 +228,16 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 /// kernel uses; shrike-core spawns none of its own. The `dispatch_collection` /
 /// `dispatch_compute` helpers enqueue onto the driven queues.
 ///
+/// `compute_workers` is the number of [`drive_compute`] threads the harness will
+/// park — the committed compute-pool width. The pool is built here with exactly
+/// that many local deques (one per worker, claimed at startup), and the width is
+/// recorded for [`compute_width`] to size parallel fan-out. The harness must park
+/// the same count of `drive_compute` threads.
+///
 /// The supplied runtime MUST be a `current_thread` runtime — one async thread
 /// the harness drives via [`drive_io`]. The driven queues are created here, so a
 /// job submitted before [`drive_collection`] / [`drive_compute`] is parked simply
-/// waits in the channel.
+/// waits in the queue.
 ///
 /// # Errors
 ///
@@ -166,16 +245,16 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 /// (the seam is set-once).
 pub fn init_driven_runtime(
     runtime: tokio::runtime::Runtime,
+    compute_workers: usize,
 ) -> Result<(), tokio::runtime::Runtime> {
     RUNTIME.set(runtime)?;
     // We won the runtime install, so the pools below are uncontended.
+    COMPUTE_WIDTH.store(compute_workers, Ordering::Relaxed);
     let (collection_tx, collection_rx) = mpsc::unbounded_channel::<PoolJob>();
-    let (compute_tx, compute_rx) = mpsc::unbounded_channel::<PoolJob>();
     let _ = DRIVEN.set(DrivenPools {
         collection_tx: Mutex::new(Some(collection_tx)),
-        compute_tx: Mutex::new(Some(compute_tx)),
         collection_rx: Mutex::new(Some(collection_rx)),
-        compute_rx: Arc::new(Mutex::new(compute_rx)),
+        compute: ComputePool::new(compute_workers),
         shutdown: Notify::new(),
     });
     Ok(())
@@ -303,30 +382,44 @@ pub fn drive_collection() -> NativeResult<()> {
 /// panicked).
 pub fn drive_compute() -> NativeResult<()> {
     let pools = DRIVEN.get().ok_or_else(driven_missing)?;
-    let rx = Arc::clone(&pools.compute_rx);
+    let pool = &pools.compute;
+    // Claim a local deque. init_driven_runtime provisions exactly N (the committed
+    // worker count) before the harness spawns the workers; a worker beyond N — not
+    // expected — falls back to a fresh unregistered deque (still correct, just not
+    // steal-balanced).
+    let local = pool
+        .locals
+        .lock()
+        .expect("compute locals poisoned")
+        .pop()
+        .unwrap_or_else(Deque::new_fifo);
     loop {
-        // Hold the dequeue lock only to pop; run the job lock-free so N workers
-        // genuinely overlap.
-        let job = {
-            let mut guard = rx.lock().expect("driven compute receiver poisoned");
-            guard.blocking_recv()
-        };
-        match job {
-            Some(job) => job(),
-            None => break, // every sender dropped ⇒ shutdown
+        // Hot path: run every job we can find, lock-free.
+        if let Some(job) = find_task(&local, &pool.injector, &pool.stealers) {
+            job();
+            continue;
         }
+        // Dry. Re-check under `park` (closing the lost-wakeup window): take a job
+        // that raced in, return on shutdown, else park until a submission wakes us.
+        let guard = pool.park.lock().expect("compute park poisoned");
+        if pool.has_work() {
+            continue; // a job landed after find_task — drop the guard and take it
+        }
+        if pool.shutdown.load(Ordering::Acquire) {
+            return Ok(()); // drained and closing
+        }
+        drop(pool.unpark.wait(guard).expect("compute park poisoned"));
     }
-    Ok(())
 }
 
 /// **Signal every committed thread to return so the harness can join them.**
-/// Drops the pool senders (closing the [`drive_collection`] / [`drive_compute`] queues,
-/// so their `recv` yields `None` and they return) and trips the
-/// [`drive_io_until_shutdown`] signal. Call it once, AFTER kernel work has
-/// quiesced (the collection actor drained), so no in-flight enqueue is holding a
-/// transient sender clone — then the queues close promptly and the joins are
-/// immediate. Idempotent: a second call finds the senders already taken and only
-/// re-trips the signal. A no-op if the driven runtime was never installed.
+/// Closes the collection queue (drops its sender, so [`drive_collection`]'s `recv`
+/// yields `None`), trips the compute pool's shutdown flag and wakes its parked
+/// workers, and trips the [`drive_io_until_shutdown`] signal. Call it once, AFTER
+/// kernel work has quiesced (the collection actor drained), so no in-flight
+/// enqueue is racing — then the threads return and the joins are immediate.
+/// Idempotent: a second call finds the sender already taken and only re-signals.
+/// A no-op if the driven runtime was never installed.
 ///
 /// # Panics
 ///
@@ -335,10 +428,8 @@ pub fn shutdown_driven_pools() {
     let Some(pools) = DRIVEN.get() else {
         return; // no driven install — nothing to signal
     };
-    // Drop the senders: this is what closes the queues. Each parker returns
-    // once its receiver sees every sender gone — the transient clones held by
-    // an in-flight enqueue drop as that call returns, so a quiesced kernel
-    // closes immediately.
+    // Close the collection queue by dropping its sender: drive_collection returns
+    // once its receiver sees the sender gone.
     drop(
         pools
             .collection_tx
@@ -346,13 +437,8 @@ pub fn shutdown_driven_pools() {
             .expect("driven collection sender poisoned")
             .take(),
     );
-    drop(
-        pools
-            .compute_tx
-            .lock()
-            .expect("driven compute sender poisoned")
-            .take(),
-    );
+    // Signal the compute workers: each drains its deques to empty, then returns.
+    pools.compute.begin_shutdown();
     // Wake the IO thread. `notify_one` stores a permit if no waiter is parked
     // yet, so a shutdown racing `drive_io_until_shutdown`'s start is not lost.
     pools.shutdown.notify_one();
@@ -381,13 +467,9 @@ pub fn submit_blocking<T: Send + 'static>(
     let job: PoolJob = Box::new(move || {
         let _ = tx.send(run_in_pool_job(work));
     });
-    DRIVEN
-        .get()
-        .ok_or_else(driven_missing)?
-        .compute_sender()
-        .ok_or_else(|| NativeError::internal("the compute pool is gone"))?
-        .send(job)
-        .map_err(|_| NativeError::internal("the compute pool is gone"))?;
+    if !DRIVEN.get().ok_or_else(driven_missing)?.compute.push(job) {
+        return Err(NativeError::internal("the compute pool is gone"));
+    }
     rx.recv()
         .map_err(|_| NativeError::internal("the compute worker dropped a job"))?
 }
@@ -493,8 +575,8 @@ pub fn submit_compute(job: Box<dyn FnOnce() + Send + 'static>) {
             Ok::<(), NativeError>(())
         });
     });
-    if let Some(sender) = DRIVEN.get().and_then(DrivenPools::compute_sender) {
-        let _ = sender.send(contained);
+    if let Some(pools) = DRIVEN.get() {
+        pools.compute.push(contained);
     }
 }
 
@@ -519,12 +601,15 @@ fn enqueue<T: Send + 'static>(
     // If the queue is gone (shutdown took the sender, or no driven runtime
     // installed), the receiver closes empty → the internal error below.
     if let Some(pools) = DRIVEN.get() {
-        let sender = match kind {
-            QueueKind::Collection => pools.collection_sender(),
-            QueueKind::Compute => pools.compute_sender(),
-        };
-        if let Some(sender) = sender {
-            let _ = sender.send(job);
+        match kind {
+            QueueKind::Collection => {
+                if let Some(sender) = pools.collection_sender() {
+                    let _ = sender.send(job);
+                }
+            }
+            QueueKind::Compute => {
+                pools.compute.push(job);
+            }
         }
     }
     Box::pin(async move {
@@ -641,18 +726,18 @@ pub mod testing {
     /// is driving, then spawn the compute workers.
     fn ensure_started() {
         STARTED.get_or_init(|| {
+            // Mirror production: commit the pool width here so the pool provisions
+            // exactly COMPUTE_THREADS deques and search_fused chunks the lexical
+            // reads across exactly the workers parked below (not at
+            // available_parallelism(), a different count than prod).
             init_driven_runtime(
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("the fixture current_thread runtime builds"),
+                COMPUTE_THREADS,
             )
             .unwrap_or_else(|_| panic!("the test process owns the driven runtime seam"));
-            // Mirror production: record the committed pool width so search_fused
-            // fans the lexical reads out across exactly the workers parked below
-            // (the chunk count is sized to compute_width). Without this, tests
-            // would chunk at available_parallelism() — a different count than prod.
-            set_compute_width(COMPUTE_THREADS);
 
             spawn("shrike-io", || {
                 let _ = drive_io_until_shutdown();
@@ -880,5 +965,36 @@ mod leaf_invariant {
             ran_on, caller,
             "submit_compute ran the job off the calling thread (on the compute pool)"
         );
+    }
+}
+
+#[cfg(test)]
+mod compute_pool {
+    //! The work-stealing compute pool. The shared fixture parks COMPUTE_THREADS
+    //! workers; these tests flood them to pin the pool's load-bearing property.
+
+    use super::*;
+
+    /// Burst far more jobs than workers onto the pool and prove every one runs
+    /// exactly once: each job returns its index and the summed result is exact.
+    /// A lost job (a dropped queue entry) drops a term and fails the sum; a lost
+    /// wakeup (a parked worker never woken for queued work) hangs and is caught by
+    /// the test timeout. Eager dispatch queues all N before the first await, so
+    /// they flood at once — exercising `steal_batch_and_pop` and the park/wake
+    /// cycle under contention.
+    #[test]
+    fn burst_runs_every_job_exactly_once() {
+        let n: u64 = 2_000;
+        let sum: u64 = testing::run(async move {
+            let futs: Vec<_> = (0..n)
+                .map(|i| dispatch_compute(move || Ok::<u64, NativeError>(i)))
+                .collect();
+            let mut total = 0u64;
+            for f in futs {
+                total += f.await.expect("every burst job resolves");
+            }
+            total
+        });
+        assert_eq!(sum, (0..n).sum::<u64>(), "every job ran exactly once");
     }
 }

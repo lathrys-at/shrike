@@ -5214,6 +5214,7 @@ name = "shrike-kernel"
 version = "0.0.0"
 dependencies = [
  "blake2",
+ "crossbeam-deque",
  "futures",
  "serde",
  "serde_json",

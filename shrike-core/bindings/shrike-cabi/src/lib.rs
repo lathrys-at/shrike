@@ -404,7 +404,15 @@ pub extern "C" fn shrike_runtime_init() -> bool {
             // The seam is set-once: an already-installed runtime returns Err
             // carrying the runtime back, so the first install stands. `is_driven`
             // confirms the runtime is installed.
-            let _ = shrike_kernel::init_driven_runtime(rt);
+            //
+            // The C ABI does not carry a worker count (the host commits its own
+            // thread set), so size the compute pool to the machine — the prior
+            // implicit default, since `compute_width` fell back to
+            // `available_parallelism` when no width was set.
+            let workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+            let _ = shrike_kernel::init_driven_runtime(rt, workers);
             shrike_kernel::is_driven()
         }
         #[cfg(not(feature = "anki-core"))]

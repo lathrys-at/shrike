@@ -238,10 +238,10 @@ fn init_driven_runtime(py: Python<'_>, compute_workers: usize) -> PyResult<bool>
         // An already-installed runtime (a second call in one process) returns
         // Err carrying the runtime back; the seam is set-once, so the first
         // install stands. `is_driven` reports whether that install was driven.
-        let _ = shrike_kernel::init_driven_runtime(runtime);
-        // Record the harness's committed compute-pool width so the kernel can fan
-        // parallel work (the chunked lexical reads) across exactly that many workers.
-        shrike_kernel::set_compute_width(compute_workers);
+        // `compute_workers` is the harness's committed compute-pool width: the
+        // pool provisions that many worker deques and the kernel fans parallel
+        // work (the chunked lexical reads) across exactly that many workers.
+        let _ = shrike_kernel::init_driven_runtime(runtime, compute_workers);
         Ok(shrike_kernel::is_driven())
     })
     .map_err(to_py_err)
