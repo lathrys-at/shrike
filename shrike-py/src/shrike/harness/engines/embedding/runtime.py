@@ -122,6 +122,12 @@ class LlamaServerBackend:
         return bool(self._manager.running())
 
     @property
+    def assume_normalized(self) -> bool:
+        # llama-server output is not guaranteed unit (model- and pooling-
+        # dependent), so the kernel's boundary normalize stays on.
+        return False
+
+    @property
     def url(self) -> str:
         return self._base_url
 
@@ -441,6 +447,12 @@ class RemoteBackend:
         # No process to poll: "running" is "start() validated the endpoint".
         # A later outage surfaces as embed errors (and a failed restart).
         return self._remote is not None
+
+    @property
+    def assume_normalized(self) -> bool:
+        # A remote service makes no unit-output guarantee — this is the canonical
+        # non-normalizing backend the kernel's boundary normalize exists to cover.
+        return False
 
     @property
     def url(self) -> str:

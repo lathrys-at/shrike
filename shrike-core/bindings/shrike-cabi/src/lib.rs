@@ -1011,7 +1011,7 @@ pub unsafe extern "C" fn shrike_attach_remote_embedder(
                 // The explicit space key wins; otherwise the tuned engine's
                 // fingerprint (the same key `attach_embedder` would derive).
                 let key = space_key.or(fingerprint);
-                kernel.attach_embedder_space(key, embedder, None);
+                kernel.attach_embedder_space(key, embedder, None, false);
                 Ok("null".to_string())
             })();
             Dispatch::Now(result)

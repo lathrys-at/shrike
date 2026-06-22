@@ -103,6 +103,13 @@ class ClipBackend:
     def running(self) -> bool:
         return self._native_engine is not None
 
+    @property
+    def assume_normalized(self) -> bool:
+        # The native CLIP towers L2-normalize, but the opt-out stays off until a
+        # unit-vector test pins it (a wrong claim silently mis-ranks under the
+        # index's inner-product metric).
+        return False
+
     def _resolve_files(self) -> tuple[Path, Path, Path, Path]:
         """Locate the text graph, vision graph, tokenizer.json, preprocessor_config.json.
 

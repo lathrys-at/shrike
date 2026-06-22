@@ -139,6 +139,13 @@ class OnnxBackend:
     def running(self) -> bool:
         return self._native_engine is not None
 
+    @property
+    def assume_normalized(self) -> bool:
+        # The native engine L2-normalizes when constructed with `normalize`, but
+        # the opt-out stays off until a unit-vector test pins it (a wrong claim
+        # silently mis-ranks under the index's inner-product metric).
+        return False
+
     def _resolve_files(self) -> tuple[Path, Path]:
         """Locate the ``model*.onnx`` graph and its ``tokenizer.json``.
 

@@ -117,9 +117,11 @@ impl AsyncKernel {
         space_key: Option<String>,
         embedder: Arc<dyn shrike_kernel::Embedder>,
         images: Option<shrike_kernel::KernelImages>,
+        assume_normalized: bool,
     ) {
         let key = space_key.or_else(|| embedder.fingerprint());
-        self.inner.attach_embedder_space(key, embedder, images);
+        self.inner
+            .attach_embedder_space(key, embedder, images, assume_normalized);
     }
 }
 
@@ -211,13 +213,19 @@ impl AsyncKernel {
     /// own fingerprint, so an existing single-embedder host attaches exactly as
     /// before (one space, byte-identical). Follow up with `reindex_if_needed`
     /// (a model change is drift).
-    #[pyo3(signature = (embedder, media_read=None, media_exists=None, space_key=None))]
+    ///
+    /// `unsafe_assume_normalized` opts this engine out of the kernel's boundary
+    /// normalize — only safe for a backend that GUARANTEES unit output, and the
+    /// host must apply the same skip to its direct-to-engine query path so
+    /// stored and query vectors stay consistent.
+    #[pyo3(signature = (embedder, media_read=None, media_exists=None, space_key=None, unsafe_assume_normalized=false))]
     fn attach_embedder(
         &self,
         embedder: AnyEmbedder<'_>,
         media_read: Option<Py<PyAny>>,
         media_exists: Option<Py<PyAny>>,
         space_key: Option<String>,
+        unsafe_assume_normalized: bool,
     ) {
         match embedder {
             AnyEmbedder::Native(native) => {
@@ -230,12 +238,12 @@ impl AsyncKernel {
                     _ => None,
                 };
                 let handle = Arc::clone(&native.text);
-                self.attach_space(space_key, handle, images);
+                self.attach_space(space_key, handle, images, unsafe_assume_normalized);
             }
             AnyEmbedder::Captured(captured) => {
                 let handle = Arc::clone(&captured.handle);
                 let images = image_pair(&handle, media_read, media_exists);
-                self.attach_space(space_key, handle, images);
+                self.attach_space(space_key, handle, images, unsafe_assume_normalized);
             }
         }
     }

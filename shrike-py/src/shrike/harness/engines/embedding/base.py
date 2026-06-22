@@ -79,6 +79,21 @@ class EmbedderBackend(Protocol):
         """True once the backend is started/loaded and can embed."""
         ...
 
+    @property
+    def assume_normalized(self) -> bool:
+        """Whether this backend GUARANTEES unit-length output.
+
+        The kernel L2-normalizes every embedder's output at its boundary so the
+        index's inner-product metric equals cosine. A backend that already emits
+        unit vectors can set this to opt out of that redundant per-vector
+        normalize (the ``unsafe_`` prefix on the wire flag is the reminder that a
+        wrong claim silently mis-ranks under inner product). It is read at attach
+        AND on the harness's direct-to-engine query path, so stored and query
+        vectors take the same skip and stay consistent. Default ``False``; a
+        backend that does not implement it is treated as non-unit.
+        """
+        ...
+
     def start(self) -> None:
         """Bring the backend up (spawn the server / load the model + tokenizer)."""
         ...

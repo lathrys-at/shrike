@@ -831,7 +831,7 @@ impl Kernel {
     /// era.
     pub fn attach_embedder(&self, embedder: Arc<dyn Embedder>, images: Option<KernelImages>) {
         let key = embedder.fingerprint();
-        self.attach_embedder_space(key, embedder, images);
+        self.attach_embedder_space(key, embedder, images, false);
     }
 
     /// Attach (or replace) the embedding space keyed by `key` — the
@@ -841,6 +841,14 @@ impl Kernel {
     /// appended in declaration order. `None` is a keyless backend (it never
     /// collides — each keyless attach is a fresh slot).
     ///
+    /// `assume_normalized` is the opt-out for an engine that GUARANTEES unit
+    /// output (an ONNX text/CLIP path that already L2-normalizes): when set, the
+    /// boundary [`NormalizingEmbedder`] wrap is skipped, trusting the engine's
+    /// vectors as-is. The host must only set it for a verified-unit engine, and
+    /// must apply the same skip to any query path that bypasses this wrap
+    /// (the harness's direct-to-engine query helper) so stored and query
+    /// vectors stay consistent under the index's inner-product metric.
+    ///
     /// # Panics
     ///
     /// Panics if the embed-slot lock is poisoned (a prior holder panicked).
@@ -849,21 +857,27 @@ impl Kernel {
         key: Option<String>,
         embedder: Arc<dyn Embedder>,
         images: Option<KernelImages>,
+        assume_normalized: bool,
     ) {
         let has_images = images.is_some();
         // Normalize at the engine boundary: wrap the text + image embedders so EVERY
         // vector (stored notes AND queries — both route through this service) is unit
         // before the kernel or index sees it. The index's inner-product metric then
         // equals cosine without the per-comparison vector norms, and nothing
-        // downstream re-normalizes.
-        let embedder: Arc<dyn Embedder> =
-            Arc::new(shrike_engine_api::NormalizingEmbedder(embedder));
+        // downstream re-normalizes. An engine that guarantees unit output opts out
+        // (`assume_normalized`) and is trusted as-is.
+        let embedder: Arc<dyn Embedder> = if assume_normalized {
+            embedder
+        } else {
+            Arc::new(shrike_engine_api::NormalizingEmbedder(embedder))
+        };
         let images: Option<KernelImages> = images.map(|(img, resolver)| {
-            (
+            let img: Box<dyn ImageEmbedder> = if assume_normalized {
+                img
+            } else {
                 Box::new(shrike_engine_api::NormalizingImageEmbedder(img))
-                    as Box<dyn ImageEmbedder>,
-                resolver,
-            )
+            };
+            (img, resolver)
         });
         self.embed
             .write()
@@ -3619,6 +3633,78 @@ mod no_cpython_smoke {
         }
     }
 
+    /// A non-unit embedder: every vector is `[3, 4]` (norm 5), so the boundary
+    /// normalize is observable — wrapped output is `[0.6, 0.8]`, raw is `[3, 4]`.
+    struct NonUnitText;
+    impl Embedder for NonUnitText {
+        fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            Box::pin(async move { Ok(texts.iter().map(|_| vec![3.0f32, 4.0]).collect()) })
+        }
+        fn fingerprint(&self) -> Option<String> {
+            Some("nonunit-text:v1".into())
+        }
+    }
+
+    #[test]
+    fn assume_normalized_skips_the_boundary_wrap() {
+        // The stored↔query consistency hinge: the kernel's boundary normalize is
+        // the SOLE normalize for everything routed through the embed service
+        // (stored embeds AND queries). `attach_embedder_space(.., true)` must skip
+        // it so a verified-unit engine's vectors pass through untouched; the
+        // default (`false`) must still normalize.
+        crate::runtime::testing::run_with_collection(async {
+            let dir = temp_dir();
+            let kernel = Kernel::open(
+                dir.join("c.anki2").to_str().unwrap(),
+                dir.join("cache").to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+
+            // Default: wrapped, so the service emits the unit form.
+            kernel.attach_embedder_space(
+                Some("nonunit-text:v1".into()),
+                Arc::new(NonUnitText) as Arc<dyn Embedder>,
+                None,
+                false,
+            );
+            let wrapped = kernel
+                .embed_service()
+                .unwrap()
+                .embedder
+                .embed(vec!["x".into()])
+                .await
+                .unwrap();
+            let n = (wrapped[0][0].powi(2) + wrapped[0][1].powi(2)).sqrt();
+            assert!(
+                (n - 1.0).abs() < 1e-6,
+                "default-off normalizes (unit), got {n}"
+            );
+
+            // Opt out: NOT wrapped, so the non-unit output passes through as-is.
+            kernel.attach_embedder_space(
+                Some("nonunit-text:v1".into()),
+                Arc::new(NonUnitText) as Arc<dyn Embedder>,
+                None,
+                true,
+            );
+            let raw = kernel
+                .embed_service()
+                .unwrap()
+                .embedder
+                .embed(vec!["x".into()])
+                .await
+                .unwrap();
+            assert_eq!(
+                raw[0],
+                vec![3.0f32, 4.0],
+                "assume_normalized passes the engine's vectors through unchanged"
+            );
+
+            kernel.close().await.unwrap();
+        });
+    }
+
     #[test]
     fn embed_set_holds_ordered_spaces_primary_is_first_text_space() {
         // The embed slot is an ordered SET keyed by CONTENT fingerprint.
@@ -3898,6 +3984,7 @@ mod no_cpython_smoke {
             Some("clip-primary:v1".into()),
             Arc::clone(&clip) as Arc<dyn Embedder>,
             Some(images),
+            false,
         );
         (kernel, text, clip)
     }

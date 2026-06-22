@@ -173,6 +173,19 @@ class DedupStatsRecorder:
         }
 
 
+def _assume_normalized(backend: Any) -> bool:
+    """Whether ``backend`` guarantees unit-length output (``EmbedderBackend.
+    assume_normalized``, default ``False``).
+
+    Drives the attach-time opt-out: when set, the kernel's boundary normalize
+    wrap is skipped. That single wrap covers the kernel's one ``EmbedService``
+    embedder, which serves BOTH stored embeds and in-kernel query embedding, so
+    the skip keeps stored and query vectors consistent under the index's
+    inner-product metric. A backend predating the property is treated as
+    non-unit."""
+    return bool(getattr(backend, "assume_normalized", False))
+
+
 class KernelIndexView:
     """The search-facing index view, live over the kernel.
 
@@ -835,8 +848,16 @@ class Harness:
         own fingerprint."""
         native = getattr(backend, "native_embedder", None)
         embedder = native() if callable(native) else shrike_native.PyEmbedder.capture(backend)
+        # A backend that guarantees unit output opts out of the kernel's boundary
+        # normalize. The kernel's single EmbedService embedder serves BOTH stored
+        # embeds and in-kernel query embedding, so the one skip keeps stored and
+        # query vectors consistent.
         self.kernel.attach_embedder(
-            embedder, self._media_read, self._media_exists, space_key=space_key
+            embedder,
+            self._media_read,
+            self._media_exists,
+            space_key=space_key,
+            unsafe_assume_normalized=_assume_normalized(backend),
         )
 
     def attach_recognizer(self, backend: Any, purpose: str = RECOGNITION_OCR) -> None:

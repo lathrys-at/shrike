@@ -60,6 +60,13 @@ class SyntheticBackend:
     def running(self) -> bool:
         return self._engine is not None
 
+    @property
+    def assume_normalized(self) -> bool:
+        # The native synthetic embedder emits unit vectors, but the opt-out stays
+        # off until a unit-vector test pins it — the kernel's boundary normalize
+        # is a near-no-op here anyway.
+        return False
+
     def start(self) -> None:
         if self._engine is not None:
             return
