@@ -93,6 +93,13 @@ jobs:
       - name: Run unit + integration under coverage
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/shrike-py/pyproject.toml
+          # tests/conftest.py's native-staleness backstop reads a per-venv stamp
+          # build-native.sh writes only under VIRTUAL_ENV; this lane installs with
+          # `uv pip install --system` (no venv), so no stamp exists and the check
+          # would abort even though the step above just built the extension fresh.
+          # Skip it — the documented bypass the Bazel lane uses, for the same
+          # reason: the build is freshly produced here, not a stale dev leftover.
+          SHRIKE_SKIP_NATIVE_STALE_CHECK: "1"
         run: coverage run --parallel-mode -m pytest shrike-py/tests/unit shrike-py/tests/integration shrike-py/tests/native -q -m "not embedding" -n auto
       - name: Combine
         run: coverage combine
