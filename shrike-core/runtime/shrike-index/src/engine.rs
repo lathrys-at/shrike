@@ -437,11 +437,17 @@ impl MultiModalIndex {
         queries: &[Vec<f32>],
         k: usize,
         modalities: Option<&[String]>,
+        scope: Option<&[i64]>,
     ) -> NativeResult<Vec<BTreeMap<String, ModalityRanking>>> {
         let span = tracing::debug_span!("index.search", queries = queries.len(), k);
         let _enter = span.enter();
         let state = self.lock();
-        let fetch = (k * SEARCH_OVERFETCH).max(k);
+        // A deck/tag scope rides the index walk as a per-candidate predicate (the
+        // keys ARE note ids), so a scoped search returns in-scope neighbours
+        // directly instead of over-fetching the whole index and dropping the rest.
+        // The FxHash set keeps the per-candidate `contains` off SipHash.
+        let scope_set: Option<shrike_store::FxI64Set> =
+            scope.map(|ids| ids.iter().copied().collect());
         let mut out: Vec<BTreeMap<String, ModalityRanking>> =
             (0..queries.len()).map(|_| BTreeMap::new()).collect();
         for (modality, sub) in &state.indexes {
@@ -456,24 +462,38 @@ impl MultiModalIndex {
             if sub.index.size() == 0 {
                 continue;
             }
-            // Clamp the over-fetch to what THIS sub-index can actually return:
-            // usearch's `search(query, count)` reserves AND
-            // zero-fills `count` result slots up front (lib.cpp search_) before
-            // the graph walk, so an unclamped `fetch` allocates work proportional
-            // to `count`, not to the hits. With `limit=0` the caller sets
-            // `k = index.size`, so `fetch = SEARCH_OVERFETCH * index.size` — at
-            // 100k notes that is a ~400k-slot zero-fill per query per modality
-            // for a sub-index that holds at most `size` vectors. A sub-index can
-            // never yield more than `size()` hits, so the clamp is lossless.
-            let fetch = fetch.min(sub.index.size());
+            // The over-fetch covers the per-note dedup of a MULTI-vector modality (a
+            // note's several images deduped to k distinct notes); a single-vector
+            // modality (`size == note count`, e.g. text) has no dupes, so it fetches
+            // exactly k. Then clamp to what THIS sub-index can return: usearch's
+            // `search(query, count)` reserves AND zero-fills `count` result slots up
+            // front (lib.cpp search_) before the graph walk, so an unclamped `fetch`
+            // allocates work proportional to `count`, not to the hits — a `limit=0`
+            // (k = size) query would be a ~400k-slot zero-fill at 100k notes. A
+            // sub-index can never yield more than `size()` hits, so the clamp is
+            // lossless; skipping the over-fetch where there is nothing to dedup is the
+            // rest of the win.
+            let multi_vector = sub.index.size() != sub.counts.len();
+            let base = if multi_vector {
+                (k * SEARCH_OVERFETCH).max(k)
+            } else {
+                k
+            };
+            let fetch = base.min(sub.index.size());
             for (qi, query) in queries.iter().enumerate() {
-                let hits = sub
-                    .index
-                    .search(query, fetch)
-                    .context(ErrorKind::Internal, "usearch search")?;
+                let hits = match &scope_set {
+                    Some(set) => sub
+                        .index
+                        .filtered_search(query, fetch, |key| set.contains(&(key as i64)))
+                        .context(ErrorKind::Internal, "usearch filtered_search")?,
+                    None => sub
+                        .index
+                        .search(query, fetch)
+                        .context(ErrorKind::Internal, "usearch search")?,
+                };
                 let mut keys: Vec<i64> = Vec::new();
                 let mut distances: Vec<f32> = Vec::new();
-                let mut seen = std::collections::HashSet::new();
+                let mut seen = shrike_store::FxI64Set::default();
                 for (key, dist) in hits.keys.iter().zip(hits.distances.iter()) {
                     let nid = *key as i64;
                     if seen.contains(&nid) {
@@ -761,8 +781,9 @@ impl shrike_store::VectorIndex for MultiModalIndex {
         queries: &[Vec<f32>],
         k: usize,
         modalities: Option<&[String]>,
+        scope: Option<&[i64]>,
     ) -> NativeResult<Vec<std::collections::BTreeMap<String, ModalityRanking>>> {
-        Self::search_by_modality(self, queries, k, modalities)
+        Self::search_by_modality(self, queries, k, modalities, scope)
     }
     fn contains(&self, key: i64) -> bool {
         Self::contains(self, key)
@@ -839,7 +860,7 @@ mod tests {
         let e = engine();
         e.add("text", &[1, 2], &[unit(1, 8), unit(2, 8)]).unwrap();
         e.add("image", &[1, 1], &[unit(1, 8), unit(9, 8)]).unwrap();
-        let out = e.search_by_modality(&[unit(1, 8)], 5, None).unwrap();
+        let out = e.search_by_modality(&[unit(1, 8)], 5, None, None).unwrap();
         let (keys, dists) = &out[0]["image"];
         assert_eq!(keys, &vec![1]);
         assert!(dists[0].abs() < 1e-5);
@@ -857,11 +878,39 @@ mod tests {
         e.add("text", &[1, 2, 3], &[unit(1, 8), unit(2, 8), unit(3, 8)])
             .unwrap();
         let out = e
-            .search_by_modality(&[unit(1, 8)], 1_000_000, Some(&["text".to_string()]))
+            .search_by_modality(&[unit(1, 8)], 1_000_000, Some(&["text".to_string()]), None)
             .unwrap();
         let (keys, _dists) = &out[0]["text"];
         assert_eq!(keys.len(), 3, "all stored vectors returned, never more");
         assert_eq!(keys[0], 1, "the self-hit ranks first");
+    }
+
+    #[test]
+    fn search_by_modality_scope_predicate_returns_only_in_scope_keys() {
+        // A scope set rides into the walk as a `filtered_search` predicate (the keys
+        // ARE note ids), so the result is the in-scope nearest neighbours directly —
+        // never an out-of-scope key, no over-fetch-then-drop.
+        let e = engine();
+        e.add(
+            "text",
+            &[1, 2, 3, 4],
+            &[unit(1, 8), unit(2, 8), unit(3, 8), unit(4, 8)],
+        )
+        .unwrap();
+        let scope = vec![2i64, 4];
+        let out = e
+            .search_by_modality(&[unit(1, 8)], 10, Some(&["text".to_string()]), Some(&scope))
+            .unwrap();
+        let (keys, _) = &out[0]["text"];
+        let got: std::collections::HashSet<i64> = keys.iter().copied().collect();
+        assert_eq!(
+            got,
+            scope
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<i64>>(),
+            "filtered_search must return exactly the in-scope keys, got {keys:?}"
+        );
     }
 
     #[test]

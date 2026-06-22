@@ -811,7 +811,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
             list[str],
             Field(
                 default_factory=list,
-                description="Restrict search to notes matching all of these tags.",
+                description="Restrict search to notes matching all of these tags. "
+                "Hierarchical, like Anki's `tag:` — a tag also matches its `::` "
+                "children (`topic` matches `topic::sub`).",
             ),
         ],
         exclude_ids: Annotated[

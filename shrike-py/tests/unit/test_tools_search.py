@@ -440,6 +440,33 @@ class TestUnifiedSearch:
         matches = result["results"][0]["matches"]
         assert [m["id"] for m in matches] == [kbasic_note]
 
+    def test_deck_filter_is_child_inclusive(self, kharness, mcp_sem):
+        """A deck-scoped semantic search includes SUBDECK notes — Anki ``deck:``
+        semantics, what the tool docs promise. Every signal (semantic, lexical,
+        tag) scopes by the SAME child-inclusive note-id set, so a note in
+        ``Test::Child`` surfaces under a ``Test`` filter even though its own deck is
+        not exactly ``Test``; an out-of-tree deck stays filtered out."""
+        child = kharness.seed_note("C", deck="Test::Child", back="A")
+        outside = kharness.seed_note("O", deck="Other", back="A")
+        _plant(kharness, "qry", [(outside, 0.05), (child, 0.20)])
+        result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["qry"], "deck": "Test"})
+        matches = result["results"][0]["matches"]
+        assert [m["id"] for m in matches] == [child]
+
+    def test_tag_filter_is_hierarchical(self, kharness, mcp_sem):
+        """A tag-scoped semantic search includes notes under a CHILD tag — Anki
+        ``tag:`` semantics (hierarchical), the same child-inclusive set every signal
+        scopes by. A note tagged ``topic::sub`` surfaces under a ``topic`` filter; a
+        note with an unrelated tag stays filtered out."""
+        child = kharness.seed_note("C", tags=["topic::sub"], back="A")
+        outside = kharness.seed_note("O", tags=["other"], back="A")
+        _plant(kharness, "qry", [(outside, 0.05), (child, 0.20)])
+        result = kharness.call_tool(
+            mcp_sem, "search_notes", {"queries": ["qry"], "tags": ["topic"]}
+        )
+        matches = result["results"][0]["matches"]
+        assert [m["id"] for m in matches] == [child]
+
     def test_score_rounded_to_3_decimals(self, kharness, mcp_sem, kbasic_note):
         _plant(kharness, "test", [(kbasic_note, 0.12345)])
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["test"]})

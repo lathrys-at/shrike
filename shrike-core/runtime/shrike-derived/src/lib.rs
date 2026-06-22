@@ -2520,49 +2520,11 @@ pub const FUZZY_MIN_SHARED: usize = 2;
 /// has only a handful of trigrams, all kept). A perf/recall dial.
 pub const FUZZY_MAX_TRIGRAMS: usize = 6;
 
-/// A fast non-cryptographic hasher for the search path's `i64`-keyed maps (rowids,
-/// note-ids). `std`'s default is SipHash — DoS-resistant, but slow on small integer
-/// keys; these maps are internal (keys are our own index rowids/note-ids, never
-/// adversarial input), so the FxHash rotate-xor-multiply is the right trade. The
-/// hash cost shows up directly in the search profile (the fuzzy overlap maps here,
-/// the kernel's RRF score maps), so it is shared. Same logic, faster keys.
-#[derive(Default)]
-pub struct FxI64Hasher(u64);
-
-impl FxI64Hasher {
-    const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
-    #[inline]
-    fn add(&mut self, i: u64) {
-        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(Self::K);
-    }
-}
-
-impl std::hash::Hasher for FxI64Hasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    #[inline]
-    fn write_i64(&mut self, i: i64) {
-        self.add(i as u64);
-    }
-    #[inline]
-    fn write_u64(&mut self, i: u64) {
-        self.add(i);
-    }
-    // Required, but the i64/u64-keyed maps never reach it; hash byte-wise as a
-    // correct fallback so the type stays a general `Hasher`.
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.add(u64::from(b));
-        }
-    }
-}
-
-/// `HashMap` keyed on `i64` with [`FxI64Hasher`] — the search path's integer-keyed
-/// map type (fuzzy overlap here, RRF score maps in the kernel).
-pub type FxI64Map<V> =
-    std::collections::HashMap<i64, V, std::hash::BuildHasherDefault<FxI64Hasher>>;
+// The integer-keyed fast-hash types live in `shrike-store` (the only crate the
+// index, derived, and kernel impls all share, so the vector index can use the same
+// hasher); re-exported so existing `shrike_derived::{FxI64Hasher, FxI64Map}` users
+// keep resolving.
+pub use shrike_store::{FxI64Hasher, FxI64Map, FxI64Set};
 
 pub use shrike_store::LexicalRow;
 
@@ -2907,7 +2869,11 @@ impl DerivedEngine {
                 })
             })
             .collect();
-        let mut candidates: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+        // An FxHash set, not a BTreeSet: the candidate set only DEDUPES the rowids it
+        // hands to seg_meta hydration (order is irrelevant — rank_overlap iterates the
+        // overlap map, not this set), so O(1) inserts beat the BTree's O(log n)
+        // pointer-chasing on a set this hot.
+        let mut candidates: FxI64Set = FxI64Set::default();
         for ov in &overlaps {
             for (&rid, &count) in ov {
                 if count >= FUZZY_MIN_SHARED {
@@ -3015,15 +2981,16 @@ impl DerivedEngine {
     /// [`Self::rank_overlap`] skips it — the same effect a `source NOT IN` /
     /// `note_id IN` MATCH predicate would have, off the hot scan.
     ///
-    /// The candidate rowids go in as an INLINE integer `IN` list (the rowids are our
-    /// own `i64`s — no injection), NOT a staged temp table; and the scope is dropped
-    /// in Rust, NOT as a `note_id IN (...)` predicate. Both choices keep this read on
-    /// mmap: a temp table's btree pages — or the ephemeral index SQLite builds for a
-    /// large `note_id IN` set — bypass mmap (it maps only the main DB file), so they
-    /// fault through `pcache1`'s `STATIC_LRU` mutex and serialize the parallel fuzzy
-    /// chunks. `rowmap` lives in the mmap'd main file, so an inline rowid `IN` seeks
-    /// it (rowid is its primary key) with no shared-cache mutex. Chunked so the SQL
-    /// text stays bounded. Reads on the passed [`ReadPool`] connection.
+    /// Each rowid is read by a PREPARE-CACHED single-row PK seek (`rowid = ?1`), and
+    /// the scope is dropped in Rust, NOT as a `note_id IN (...)` predicate. Both keep
+    /// this read on mmap with a statement parsed ONCE: a temp table's btree pages —
+    /// or the ephemeral RHS index SQLite builds for an `IN (…)` set (inline literals
+    /// re-parse the statement every read; bound `?` placeholders rebuild the
+    /// ephemeral) — bypass mmap (it maps only the main DB file), so they fault
+    /// through `pcache1`'s `STATIC_LRU` mutex and serialize the parallel fuzzy
+    /// chunks. `rowmap` lives in the mmap'd main file, so a cached `rowid = ?1` seek
+    /// (rowid is its primary key) is a direct lookup with no shared-cache mutex and
+    /// no per-read parse. Reads on the passed [`ReadPool`] connection.
     ///
     /// # Errors
     ///
@@ -3034,42 +3001,40 @@ impl DerivedEngine {
         exclude_sources: &[&str],
         scope: Option<&[i64]>,
     ) -> NativeResult<FxI64Map<(i64, String, String)>> {
-        let scope_set: Option<std::collections::HashSet<i64>> =
-            scope.map(|ids| ids.iter().copied().collect());
+        let scope_set: Option<FxI64Set> = scope.map(|ids| ids.iter().copied().collect());
         // Sized to the candidate set (minus any source-excluded or out-of-scope rows)
         // so the per-candidate inserts never grow-and-rehash the table.
         let mut seg_meta: FxI64Map<(i64, String, String)> =
             std::collections::HashMap::with_capacity_and_hasher(rowids.len(), Default::default());
-        for chunk in rowids.chunks(Self::INLINE_ID_MAX) {
-            let id_list = chunk
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!(
-                "SELECT m.rowid, m.note_id, m.source, m.ref FROM rowmap m \
-                 WHERE m.rowid IN ({id_list})"
-            );
-            let run = || -> rusqlite::Result<Vec<(i64, i64, String, String)>> {
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt
-                    .query_map([], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(rows)
-            };
-            for (rowid, note_id, source, r) in with_busy_retry(run)? {
-                if exclude_sources.contains(&source.as_str()) {
+        // One PREPARE-CACHED single-row PK seek per rowid, NOT an inline `IN
+        // (literals)` list. The IN's literals vary per call, so SQLite re-parses the
+        // statement every read (the `prepare_with_flags` hotspot); a bound `IN
+        // (?,?,…)` would instead rebuild, per read, the ephemeral RHS index the
+        // parallel fuzzy chunks fault through (the pcache `STATIC_LRU` mutex). A
+        // cached `rowid = ?1` is both: parsed once, and a direct mmap'd PK lookup
+        // with no temp btree.
+        let run = || -> rusqlite::Result<Vec<(i64, i64, String, String)>> {
+            let mut stmt =
+                conn.prepare_cached("SELECT note_id, source, ref FROM rowmap WHERE rowid = ?1")?;
+            let mut out = Vec::with_capacity(rowids.len());
+            for &rowid in rowids {
+                let mut q = stmt.query([rowid])?;
+                if let Some(r) = q.next()? {
+                    out.push((rowid, r.get(0)?, r.get(1)?, r.get(2)?));
+                }
+            }
+            Ok(out)
+        };
+        for (rowid, note_id, source, r) in with_busy_retry(run)? {
+            if exclude_sources.contains(&source.as_str()) {
+                continue;
+            }
+            if let Some(set) = &scope_set {
+                if !set.contains(&note_id) {
                     continue;
                 }
-                if let Some(set) = &scope_set {
-                    if !set.contains(&note_id) {
-                        continue;
-                    }
-                }
-                seg_meta.insert(rowid, (note_id, source, r));
             }
+            seg_meta.insert(rowid, (note_id, source, r));
         }
         Ok(seg_meta)
     }

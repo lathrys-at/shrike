@@ -468,9 +468,9 @@ pub struct SearchArgs {
     pub top_k: usize,
     /// The cosine floor for the text-calibrated semantic signal.
     pub threshold: f64,
-    /// The RESOLVED deck name (semantic candidates filter on exact equality;
-    /// the find_notes fallback uses `deck:` which includes children — the
-    /// Python original's behaviour, ported faithfully).
+    /// The RESOLVED deck name. Every signal scopes by the child-inclusive
+    /// `find_notes("deck:…")` note-id set (Anki `deck:` semantics — includes child
+    /// decks), so a subdeck note is in scope under its parent.
     pub deck: Option<String>,
     /// Restrict candidates to notes carrying all of these tags.
     pub tags: Vec<String>,
@@ -485,8 +485,6 @@ pub struct SearchArgs {
     /// Whether semantic ranking runs (index ready + backend up); `vectors`
     /// carries one query vector per source when true.
     pub semantic: bool,
-    /// The index's current vector count, for the over-fetch clamp.
-    pub index_size: usize,
     /// Derived `source` strings hidden from the lexical (substring/fuzzy)
     /// surfaces: a VectorOnly recognition source (VLM describe) is
     /// stored for provenance + reconcile but never surfaced on a lexical
@@ -580,19 +578,12 @@ impl NoteData {
     }
 }
 
-fn in_scope(note: &Note, deck: Option<&str>, tags: &[String]) -> bool {
-    if let Some(d) = deck {
-        if note.deck != d {
-            return false;
-        }
-    }
-    if !tags.is_empty() {
-        let note_tags: HashSet<&str> = note.tags.iter().map(String::as_str).collect();
-        if !tags.iter().all(|t| note_tags.contains(t.as_str())) {
-            return false;
-        }
-    }
-    true
+/// A candidate passes the deck/tag scope when no scope is set, or its note id is in
+/// the resolved (child-inclusive `find_notes`) scope set. One membership test stands
+/// in for re-deriving deck/tag match per note, and keeps every signal — semantic,
+/// lexical, tag-centroid — on the SAME child-inclusive set the scope push-down uses.
+fn id_in_scope(scope: Option<&shrike_store::FxI64Set>, nid: i64) -> bool {
+    scope.is_none_or(|s| s.contains(&nid))
 }
 
 /// Hydrate candidates from the cross-source `prefetch` map, falling back to ONE
@@ -735,6 +726,10 @@ struct SearchCtx<'a> {
     prefetch: &'a FxI64Map<Note>,
     exclude: &'a HashSet<i64>,
     args: &'a SearchArgs,
+    /// The deck/tag scope note-id set (child-inclusive `find_notes`), or `None` when
+    /// unscoped. Per-candidate membership ([`id_in_scope`]) is the in-scope filter
+    /// every signal applies — the same set the semantic walk and lexical push-down use.
+    scope: Option<&'a shrike_store::FxI64Set>,
 }
 
 /// One modality's `search_by_modality` row as a borrowed pair (note keys +
@@ -776,6 +771,7 @@ fn rank_modality(
         prefetch,
         exclude,
         args,
+        scope,
     } = ctx;
     // Prospective candidates (exclude/threshold pass) hydrate in ONE batch;
     // the loop below then filters scope and ranks.
@@ -803,7 +799,7 @@ fn rank_modality(
                 Some(c) => c,
                 None => continue,
             };
-            if !in_scope(&candidate.note, args.deck.as_deref(), &args.tags) {
+            if !id_in_scope(scope, nid) {
                 continue; // out of scope — keep it out of note_data entirely
             }
             note_data.insert(nid, candidate);
@@ -831,6 +827,7 @@ fn collect_substring_candidates(
         prefetch,
         exclude,
         args,
+        scope,
     } = ctx;
     // `lex` is this source's pre-fetched store result, read in one batched FTS5
     // pass shared with every other query source (the store pushes the deck/tag
@@ -897,7 +894,7 @@ fn collect_substring_candidates(
             Some(c) => c,
             None => continue,
         };
-        if !in_scope(&candidate.note, args.deck.as_deref(), &args.tags) {
+        if !id_in_scope(scope, nid) {
             continue;
         }
         // A derived-source row is its own authority: FTS5
@@ -951,6 +948,7 @@ fn collect_fuzzy(
         prefetch,
         exclude,
         args,
+        scope,
     } = ctx;
     // `hits` is this source's pre-fetched fuzzy rows, read in the batched FTS5
     // pass. The fuzzy signal has no anki-field fallback (it lives only in the
@@ -972,7 +970,7 @@ fn collect_fuzzy(
                 Some(c) => c,
                 None => continue,
             };
-            if !in_scope(&candidate.note, args.deck.as_deref(), &args.tags) {
+            if !id_in_scope(scope, nid) {
                 continue;
             }
             note_data.insert(nid, candidate);
@@ -1281,28 +1279,24 @@ pub(crate) fn compute_lex_scope(
 }
 
 /// The semantic DISCOVERY read: per-modality `search_by_modality` rankings, one
-/// `ModalityHits` per source. No `core`. Over-fetches to cover exclusions and the
-/// post-hoc scope/substring filtering the assembly applies.
+/// `ModalityHits` per source. No `core`. A deck/tag `scope` rides into the index
+/// walk as a predicate (in-scope neighbours only — no over-fetch-then-drop), so
+/// `fetch_k` covers just the exclusions on top of `top_k`.
 pub(crate) fn search_semantic(
     index: &dyn VectorIndex,
     vectors: &[Vec<f32>],
     args: &SearchArgs,
+    scope: Option<&[i64]>,
 ) -> NativeResult<Vec<ModalityHits>> {
     let exclude: HashSet<i64> = args.exclude.iter().copied().collect();
-    let mut fetch_k = args.top_k + exclude.len();
-    if args.deck.is_some() || !args.tags.is_empty() {
-        fetch_k = fetch_k.max(args.top_k * 10);
-        if args.index_size > 0 {
-            fetch_k = fetch_k.min(args.index_size);
-        }
-    }
+    let fetch_k = args.top_k + exclude.len();
     // Scoped to the NOTE-item spaces: tag-centroid spaces share the engine but
     // must never surface a tag key from a note search.
     let note_spaces: Vec<String> = crate::NOTE_MODALITIES
         .iter()
         .map(|m| m.to_string())
         .collect();
-    index.search_by_modality(vectors, fetch_k, Some(&note_spaces))
+    index.search_by_modality(vectors, fetch_k, Some(&note_spaces), scope)
 }
 
 /// The query texts (in source order) and the hidden-source exclusion list shared
@@ -1411,19 +1405,25 @@ pub fn search_notes(
     vectors: &[Vec<f32>],
     args: &SearchArgs,
 ) -> NativeResult<Vec<SearchResultGroup>> {
-    // Semantic first (its `index` precondition is checked before any read), then
-    // the lexical scope — the original monolith's order, so a degenerate
-    // `semantic && index == None` surfaces the precondition error rather than a
-    // later find_notes failure.
-    let sem_by_source = if args.semantic {
-        let index = index.ok_or_else(|| {
+    // The semantic `index` precondition is checked BEFORE any read, so a degenerate
+    // `semantic && index == None` surfaces the precondition error rather than a later
+    // find_notes failure.
+    let sem_index = if args.semantic {
+        Some(index.ok_or_else(|| {
             NativeError::invalid_input("semantic search requested without an index engine")
-        })?;
-        search_semantic(index, vectors, args)?
+        })?)
     } else {
-        Vec::new()
+        None
     };
+    // The deck/tag scope is resolved ONCE and feeds every signal: the semantic walk
+    // (a `filtered_search` predicate — no over-fetch), the lexical store push-down,
+    // and the per-note in-scope membership in assembly. Child-inclusive (Anki
+    // `deck:`/`tag:` semantics) for all of them, so the signals agree.
     let lex_scope = compute_lex_scope(core, args)?;
+    let sem_by_source = match sem_index {
+        Some(idx) => search_semantic(idx, vectors, args, lex_scope.as_deref())?,
+        None => Vec::new(),
+    };
     let (substr_batch, fuzzy_batch) = match derived {
         Some(d) => search_lexical(d, sources, lex_scope.as_deref(), args)?,
         None => (Vec::new(), Vec::new()),
@@ -1435,6 +1435,7 @@ pub fn search_notes(
         sources,
         vectors,
         args,
+        lex_scope.as_deref(),
         Discovery {
             sem_by_source,
             substr_batch,
@@ -1458,6 +1459,7 @@ pub fn search_notes(
 /// Panics only on an internal invariant violation — a candidate key collected
 /// from the assembled note map must still be present when scored
 /// (`expect("ordered key present")`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn search_assemble(
     core: &dyn Collection,
     index: Option<&dyn VectorIndex>,
@@ -1465,9 +1467,14 @@ pub(crate) fn search_assemble(
     sources: &[SearchSource],
     vectors: &[Vec<f32>],
     args: &SearchArgs,
+    scope: Option<&[i64]>,
     discovery: Discovery,
 ) -> NativeResult<Vec<SearchResultGroup>> {
     let exclude: HashSet<i64> = args.exclude.iter().copied().collect();
+    // The deck/tag scope as an FxHash membership set, built once for every signal's
+    // per-note in-scope check (see [`id_in_scope`]) — the same set the semantic walk
+    // and lexical push-down already filtered on.
+    let scope_set: Option<shrike_store::FxI64Set> = scope.map(|ids| ids.iter().copied().collect());
     let Discovery {
         sem_by_source,
         substr_batch,
@@ -1528,6 +1535,7 @@ pub(crate) fn search_assemble(
             prefetch: &prefetch,
             exclude: &exclude,
             args,
+            scope: scope_set.as_ref(),
         };
 
         // Literal-substring candidates (query sources only): a fast pre-filter;
@@ -2159,7 +2167,6 @@ mod search_tests {
 
         let mut a1 = args(10);
         a1.semantic = true;
-        a1.index_size = 2;
         let groups = search_notes(
             &core,
             Some(&index),
@@ -2215,7 +2222,6 @@ mod search_tests {
 
         let mut a1 = args(10);
         a1.semantic = true;
-        a1.index_size = 2;
         a1.threshold = 0.0;
         let groups = search_notes(
             &core,
@@ -2257,7 +2263,6 @@ mod search_tests {
 
         let mut a1 = args(10);
         a1.semantic = true;
-        a1.index_size = 2;
         a1.threshold = 0.0;
         a1.deck = Some("Other".to_owned());
         let groups = search_notes(
@@ -2375,7 +2380,6 @@ mod search_tests {
             top_k,
             threshold: 0.0,
             semantic: true,
-            index_size: 8,
             weights: std::collections::BTreeMap::new(),
             ..Default::default()
         }
