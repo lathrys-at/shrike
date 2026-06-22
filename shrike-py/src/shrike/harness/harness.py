@@ -15,6 +15,7 @@ import contextlib
 import functools
 import json
 import logging
+import math
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -229,7 +230,15 @@ class KernelIndexView:
         backend = self._runtime.backend
         if backend is None or not texts:
             return None
-        return backend.embed_texts(texts)
+        # Unit-normalize: the engine's inner-product metric assumes unit vectors. The
+        # kernel's search path normalizes at the engine boundary; this direct-to-engine
+        # diagnostic helper queries the engine itself, so it normalizes too (a
+        # non-normalizing backend would otherwise mis-rank under IP).
+        out: list[list[float]] = []
+        for v in backend.embed_texts(texts):
+            norm = math.sqrt(sum(x * x for x in v))
+            out.append([x / norm for x in v] if norm > 0 else v)
+        return out
 
     def search(self, texts: list[str], top_k: int = 10) -> list[list[dict[str, Any]]]:
         """Nearest **text** neighbors per query: one list per text of
