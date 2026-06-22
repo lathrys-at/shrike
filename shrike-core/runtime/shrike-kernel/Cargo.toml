@@ -41,7 +41,7 @@ serde_json = "1"
 blake2 = "0.10"
 tracing = "0.1"
 # The compute pool's work-stealing deques (Injector + per-worker Worker/Stealer).
-# Already transitive via tokio, so no new tree weight.
+# Already in the tree (transitive via rayon-core, anki's dep), so no new weight.
 crossbeam-deque = "0.8"
 # futures stays for the channel/future utility types shared with the engine
 # contract (BoxFuture at the dyn seams); the runtime itself is tokio (#374).

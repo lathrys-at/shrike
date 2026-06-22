@@ -360,17 +360,17 @@ pub fn drive_collection() -> NativeResult<()> {
     Ok(())
 }
 
-/// **Driven mode: a CPU-bound engine-compute (and blocking-fs leaf) worker**
-/// The harness spawns N of these; each blocks on the shared compute
-/// queue and runs each job to completion. This is the only place real
-/// parallelism lives (independent batches), so the engine search/batch overlap
-/// property becomes "N ≥ 2", sized by the harness to its cores. Dispatch target
-/// for the `Blocking<E>` adapter, the tag-centroid recompute, the
-/// index file save, the derived FTS5 rebuild, and the store-media decode.
+/// **Driven mode: a CPU-bound engine-compute (and blocking-fs leaf) worker.**
+/// The harness spawns N of these; each runs one of the [`ComputePool`]'s
+/// work-stealing workers. This is the only place real parallelism lives
+/// (independent batches), so the engine search/batch overlap property becomes
+/// "N ≥ 2", sized by the harness to its cores. Dispatch target for the
+/// `Blocking<E>` adapter, the tag-centroid recompute, the index file save, the
+/// derived FTS5 rebuild, and the store-media decode.
 ///
-/// Parks until the queue is closed, then returns. Multiple `drive_compute`
-/// threads share one queue — each `recv` hands a job to exactly one waiter, so N
-/// parkers cooperate.
+/// Claims a local deque, then loops: run every job [`find_task`] can pop or steal
+/// (lock-free), and park on the pool's condvar when the queues run dry. Returns
+/// once shutdown is signalled and the queues have drained.
 ///
 /// # Errors
 ///
@@ -378,7 +378,7 @@ pub fn drive_collection() -> NativeResult<()> {
 ///
 /// # Panics
 ///
-/// Panics if the shared compute-receiver mutex is poisoned (a prior holder
+/// Panics if the pool's `locals` or `park` mutex is poisoned (a prior holder
 /// panicked).
 pub fn drive_compute() -> NativeResult<()> {
     let pools = DRIVEN.get().ok_or_else(driven_missing)?;
