@@ -125,6 +125,13 @@ pub struct DerivedEngine {
     /// Under WAL these read concurrently with each other and with the write
     /// connection without blocking.
     read_pool: ReadPool,
+    /// The per-query rare-trigram cap policy ([`FuzzyCapPolicy`]). Behind a `Mutex`
+    /// for interior mutability — the engine is shared `&self` (and `frozen` in the
+    /// pyo3 binding), but the fuzzy-recall eval sets the policy to A/B a floor sweep
+    /// and the log-growth curve. Read once per fuzzy batch and applied per query
+    /// from that query's own gram count, so a mid-flight set never splits one batch.
+    /// Default: fixed-6, no behaviour change.
+    fuzzy_cap: Mutex<FuzzyCapPolicy>,
 }
 
 /// A pool of read-only (`OPEN_READ_ONLY`) connections to the derived store, so the
@@ -422,6 +429,7 @@ impl DerivedEngine {
         Ok(Self {
             conn: Mutex::new(conn),
             read_pool: ReadPool::new(path),
+            fuzzy_cap: Mutex::new(FuzzyCapPolicy::default()),
         })
     }
 
@@ -516,6 +524,10 @@ impl DerivedEngine {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("derived conn lock poisoned")
+    }
+
+    fn fuzzy_cap_lock(&self) -> std::sync::MutexGuard<'_, FuzzyCapPolicy> {
+        self.fuzzy_cap.lock().expect("fuzzy cap policy poisoned")
     }
 
     /// The stored drift watermark (`col.mod` at last reconcile), or `None`.
@@ -2520,6 +2532,76 @@ pub const FUZZY_MIN_SHARED: usize = 2;
 /// has only a handful of trigrams, all kept). A perf/recall dial.
 pub const FUZZY_MAX_TRIGRAMS: usize = 6;
 
+/// The per-query rare-trigram cap as a clamped log-growth curve in the query's OWN
+/// trigram count `n`: `clamp(floor + round(k·ln(n/floor)), floor, ceiling)`.
+///
+/// The cap has two jobs and the curve serves both. It keeps the RAREST (most
+/// discriminative) trigrams and drops the common ones — the perf win (a common
+/// trigram's posting is huge) and a precision win. On a LONG query a fixed cap can
+/// under-count overlap by ranking on too few of its rare trigrams; growing the cap
+/// recovers that recall. But growth must stay a small FRACTION of `n` or a long
+/// query re-admits the common trigrams the prune deliberately drops — so the
+/// ceiling is an ABSOLUTE constant, not a fraction, and growth is sub-linear (log):
+/// the kept fraction shrinks as the query grows.
+///
+/// The cap derives strictly from `n = grams.len()` for THIS query, never from a
+/// batch-wide aggregate, so `search_fuzzy_batch([…,q,…]) == search_fuzzy(q)`: a
+/// trigram's DF is a collection property, batch-independent, and the cap depends
+/// only on `q`'s own gram count. A batch-wide cap (by the longest query) would
+/// break that invariant and is deliberately not used.
+///
+/// The engine's default is fixed-6 ([`FuzzyCapPolicy::default`], `floor == ceiling
+/// == 6`), so every `n` clamps to 6 and there is no behaviour change from the
+/// historical `FUZZY_MAX_TRIGRAMS` truncate. The `(floor, k, ceiling)` are settable
+/// ([`DerivedEngine::set_fuzzy_cap_policy`]) so the fuzzy-recall eval can A/B a
+/// floor sweep and the log-growth curve against fixed-6 without recompiling.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FuzzyCapPolicy {
+    /// The floor (and, by default, also the ceiling) on the cap — today's fixed
+    /// value. The `ln` term is `<= 0` for `n <= floor`, so the cap pins here for
+    /// short queries.
+    pub floor: usize,
+    /// The log-growth rate of the cap in `n`. Larger `k` admits the next-rarest
+    /// trigrams faster. Inert when `floor == ceiling` (the default).
+    pub k: f64,
+    /// The absolute ceiling on the cap — a constant, NOT a fraction of `n`, so a
+    /// long query can never re-admit the common trigrams the prune drops.
+    pub ceiling: usize,
+}
+
+impl Default for FuzzyCapPolicy {
+    /// Fixed-6: `floor == ceiling == 6`, so [`Self::cap`] returns 6 for every `n`
+    /// — byte-identical to the historical [`FUZZY_MAX_TRIGRAMS`] truncate. `k` is
+    /// the documented default the eval sweeps up from; it is inert while the floor
+    /// and ceiling coincide.
+    fn default() -> Self {
+        Self {
+            floor: FUZZY_MAX_TRIGRAMS,
+            k: 2.7,
+            ceiling: FUZZY_MAX_TRIGRAMS,
+        }
+    }
+}
+
+impl FuzzyCapPolicy {
+    /// The cap for a query of `n` trigrams: `clamp(floor + round(k·ln(n/floor)),
+    /// floor, ceiling)`. For `n <= floor` the `ln` term is `<= 0` so the result
+    /// pins at `floor`. A `ceiling < floor` mis-config degrades to fixed-at-floor:
+    /// the upper bound is `max(floor, ceiling)`, so the cap never returns below the
+    /// floor and `clamp` never sees an inverted range.
+    #[must_use]
+    pub fn cap(&self, n: usize) -> usize {
+        if n <= self.floor {
+            return self.floor;
+        }
+        let grown = self.floor as f64 + (self.k * ((n as f64) / self.floor as f64).ln()).round();
+        // `grown >= floor` here (the `ln` term is positive for `n > floor`), so the
+        // `as usize` cast cannot underflow. `max(floor, ceiling)` keeps the clamp
+        // range valid even if a caller sets a ceiling below the floor.
+        (grown as usize).clamp(self.floor, self.ceiling.max(self.floor))
+    }
+}
+
 /// Ceiling on the rowids one trigram's posting contributes to the overlap basis.
 /// `prune_to_rare_terms` keeps the rarest trigrams, but a query of all-common words
 /// (every trigram is frequent) leaves the pruned set with O(collection)-length
@@ -2562,6 +2644,23 @@ pub fn fts_quote(term: &str) -> String {
 }
 
 impl DerivedEngine {
+    /// Set the per-query rare-trigram cap policy ([`FuzzyCapPolicy`]). The
+    /// fuzzy-recall eval uses this to A/B a floor sweep and the log-growth curve
+    /// against the fixed-6 default without recompiling. Production opens the engine
+    /// with the default and never calls this.
+    ///
+    /// Applied from the NEXT fuzzy batch on (each batch reads the policy once), so
+    /// it never splits a batch in flight. The cap is still derived per query from
+    /// that query's own gram count, so batch==serial is preserved under any policy.
+    pub fn set_fuzzy_cap_policy(&self, policy: FuzzyCapPolicy) {
+        *self.fuzzy_cap_lock() = policy;
+    }
+
+    /// The current per-query rare-trigram cap policy.
+    pub fn fuzzy_cap_policy(&self) -> FuzzyCapPolicy {
+        *self.fuzzy_cap_lock()
+    }
+
     /// One query's trigram set, `None` when it has fewer than [`FUZZY_MIN_SHARED`]
     /// trigram windows (too short to rank). NFC-normalized so the trigrams match
     /// the NFC-normalized index. [`Self::prune_to_rare_terms`] derives the (smaller)
@@ -2576,7 +2675,7 @@ impl DerivedEngine {
     }
 
     /// The fuzzy candidate trigrams the overlap ranker queries and counts: the
-    /// [`FUZZY_MAX_TRIGRAMS`] rarest KNOWN (present in the DF snapshot) trigrams,
+    /// `policy.cap(grams.len())` rarest KNOWN (present in the DF snapshot) trigrams,
     /// PLUS every trigram ABSENT from the snapshot. Common trigrams bloat the match
     /// set and discriminate least, so the rarest known ones are kept; but
     /// absent-from-the-snapshot does NOT mean globally rare. `df` is read from the
@@ -2591,9 +2690,14 @@ impl DerivedEngine {
     fn prune_to_rare_terms(
         grams: &std::collections::BTreeSet<String>,
         df: &std::collections::HashMap<String, i64>,
+        policy: FuzzyCapPolicy,
     ) -> Vec<String> {
-        // The FUZZY_MAX_TRIGRAMS rarest PRESENT trigrams (DF ascending, term as a
-        // deterministic tie-break)...
+        // The cap is derived from THIS query's own gram count (`grams.len()`), never
+        // a batch-wide count, so the pruned set is byte-identical whether the query
+        // runs alone or in a batch — the batch==serial invariant.
+        let cap = policy.cap(grams.len());
+        // The `cap` rarest PRESENT trigrams (DF ascending, term as a deterministic
+        // tie-break)...
         let mut present: Vec<&String> = grams
             .iter()
             .filter(|g| df.get(*g).copied().unwrap_or(0) > 0)
@@ -2602,7 +2706,7 @@ impl DerivedEngine {
             let d = |g: &String| df.get(g).copied().unwrap_or(0);
             d(a).cmp(&d(b)).then_with(|| a.cmp(b))
         });
-        present.truncate(FUZZY_MAX_TRIGRAMS);
+        present.truncate(cap);
         // ...then EVERY absent (DF-0) trigram appended. `grams` is a BTreeSet, so the
         // absent filter yields them in deterministic term order.
         let absent = grams
@@ -2851,9 +2955,17 @@ impl DerivedEngine {
         // as before; the freshness bracket flags a write that lands mid-read.
         let conn = self.read_pool.checkout()?;
         let df = Self::trigram_dfs(&conn, &distinct.into_iter().collect::<Vec<_>>())?;
+        // Read the cap policy ONCE for the whole batch, so every query in this batch
+        // is pruned under one snapshot of the policy (a concurrent set never splits a
+        // batch). The cap is still derived per query from that query's own gram
+        // count inside the map — never batch-wide — so batch==serial holds.
+        let policy = self.fuzzy_cap_policy();
         let pruned: Vec<Option<Vec<String>>> = gram_sets
             .iter()
-            .map(|g| g.as_ref().map(|gs| Self::prune_to_rare_terms(gs, &df)))
+            .map(|g| {
+                g.as_ref()
+                    .map(|gs| Self::prune_to_rare_terms(gs, &df, policy))
+            })
             .collect();
         // Read each DISTINCT pruned trigram's posting once (shared across queries).
         let distinct_terms: std::collections::BTreeSet<&str> = pruned
@@ -3580,14 +3692,26 @@ mod lexical_tests {
         )
         .unwrap();
 
+        // A growth policy (cap > 6 on a long query) so the parity check exercises a
+        // per-query cap that is NOT the fixed floor — proving batch==serial holds
+        // when the cap varies by query length, not just at fixed-6.
+        e.set_fuzzy_cap_policy(FuzzyCapPolicy {
+            floor: 6,
+            k: 2.7,
+            ceiling: 12,
+        });
+
         // literal hit, transposition typo, sub-trigram (None/empty), no-match,
-        // second literal — one of each kind the two paths must agree on.
+        // second literal, and a LONG multi-word query (many trigrams → cap > 6 under
+        // the growth policy, so the pruned set differs from the short queries') — one
+        // of each kind the two paths must agree on.
         let queries = [
             "mitochondria",
             "mitochondira",
             "mi",
             "zzznomatch",
             "momentum",
+            "the mitochondrial dna replication powerhouse momentum velocity",
         ];
         let q_refs: Vec<&str> = queries.to_vec();
         let scope_some: [i64; 2] = [1, 3];
@@ -3852,8 +3976,9 @@ mod lexical_tests {
         .iter()
         .map(|(k, v)| (k.to_string(), *v))
         .collect();
-        let terms = DerivedEngine::prune_to_rare_terms(&grams, &df);
-        // The 6 rarest PRESENT (rarest-first), THEN every absent trigram appended.
+        // Under the default (fixed-6) policy: the 6 rarest PRESENT (rarest-first),
+        // THEN every absent trigram appended.
+        let terms = DerivedEngine::prune_to_rare_terms(&grams, &df, FuzzyCapPolicy::default());
         assert_eq!(terms, ["ddd", "eee", "ccc", "ggg", "bbb", "fff", "zzz"]);
         assert!(
             !terms.iter().any(|t| t == "aaa"),
@@ -3863,6 +3988,119 @@ mod lexical_tests {
             terms.contains(&"zzz".to_string()),
             "KEEPS the absent (DF 0) trigram — it may be written-since-snapshot"
         );
+    }
+
+    #[test]
+    fn fuzzy_cap_default_is_fixed_six() {
+        // The default policy is byte-identical to the historical FUZZY_MAX_TRIGRAMS
+        // truncate: every gram count clamps to 6, so adopting the policy is a no-op
+        // until an eval sets a different one.
+        let p = FuzzyCapPolicy::default();
+        assert_eq!(p.floor, FUZZY_MAX_TRIGRAMS);
+        assert_eq!(p.ceiling, FUZZY_MAX_TRIGRAMS);
+        for n in [0usize, 1, 5, 6, 7, 12, 30, 60, 200] {
+            assert_eq!(p.cap(n), 6, "default cap must stay fixed-6 at n={n}");
+        }
+    }
+
+    #[test]
+    fn fuzzy_cap_curve_table() {
+        // Pin the log-growth curve at the representative trigram counts the eval
+        // sweeps, so a change to the constants or the rounding is caught here. The
+        // curve is `clamp(6 + round(2.7·ln(n/6)), 6, 12)`.
+        let p = FuzzyCapPolicy {
+            floor: 6,
+            k: 2.7,
+            ceiling: 12,
+        };
+        // (n, expected cap): the floor pins n<=6 at 6; growth is slow (log); the
+        // ceiling pins the long tail at 12.
+        let table = [
+            (2usize, 6usize), // below floor → floor
+            (6, 6),           // at floor → floor (ln term is 0)
+            (9, 7),           // 6 + round(2.7·0.405)=6+1
+            (12, 8),          // 6 + round(2.7·0.693)=6+2
+            (18, 9),          // 6 + round(2.7·1.099)=6+3
+            (24, 10),         // 6 + round(2.7·1.386)=6+4
+            (30, 10),         // 6 + round(2.7·1.609)=6+4
+            (45, 11),         // 6 + round(2.7·2.015)=6+5
+            (60, 12),         // 6 + round(2.7·2.303)=6+6 → ceiling
+            (120, 12),        // well past the ceiling → clamped to 12
+        ];
+        for (n, want) in table {
+            assert_eq!(p.cap(n), want, "cap({n}) under k=2.7 ceiling=12");
+        }
+    }
+
+    #[test]
+    fn fuzzy_cap_floor_sweep() {
+        // The floor sweep arms (fixed-6/5/4): floor==ceiling pins the cap flat at
+        // the floor for every n — the simplest lever the eval measures.
+        for floor in [4usize, 5, 6] {
+            let p = FuzzyCapPolicy {
+                floor,
+                k: 2.7,
+                ceiling: floor,
+            };
+            for n in [0usize, 3, floor, floor + 10, 60] {
+                assert_eq!(p.cap(n), floor, "fixed-{floor} cap at n={n}");
+            }
+        }
+    }
+
+    #[test]
+    fn fuzzy_cap_misconfigured_ceiling_below_floor_degrades_to_floor() {
+        // A ceiling below the floor must not panic the clamp (an inverted range) —
+        // the upper bound is taken as max(floor, ceiling), so a mis-config degrades
+        // to "fixed at the floor" rather than aborting.
+        let p = FuzzyCapPolicy {
+            floor: 6,
+            k: 2.7,
+            ceiling: 3,
+        };
+        for n in [2usize, 6, 30, 100] {
+            assert_eq!(p.cap(n), 6, "pins at the floor at n={n}");
+        }
+    }
+
+    #[test]
+    fn prune_grows_cap_under_a_log_policy() {
+        // Under a growth policy a longer gram set keeps MORE of its rarest present
+        // trigrams than fixed-6 — the recall lever the eval measures. With 8 present
+        // grams and cap(8)=7 (6 + round(2.7·ln(8/6))=6+round(0.78)=7), the prune
+        // keeps 7, one more than the fixed-6 default.
+        use std::collections::{BTreeSet, HashMap};
+        let grams: BTreeSet<String> = ["aaa", "bbb", "ccc", "ddd", "eee", "fff", "ggg", "hhh"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let df: HashMap<String, i64> = [
+            ("aaa", 800),
+            ("bbb", 700),
+            ("ccc", 600),
+            ("ddd", 500),
+            ("eee", 400),
+            ("fff", 300),
+            ("ggg", 200),
+            ("hhh", 100),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), *v))
+        .collect();
+        let growth = FuzzyCapPolicy {
+            floor: 6,
+            k: 2.7,
+            ceiling: 12,
+        };
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, growth);
+        assert_eq!(kept.len(), 7, "cap(8)=7 keeps the 7 rarest present");
+        // The 7 rarest (lowest DF first); the commonest one ("aaa", DF 800) is the
+        // only one dropped.
+        assert_eq!(kept, ["hhh", "ggg", "fff", "eee", "ddd", "ccc", "bbb"]);
+        // Default fixed-6 over the same input keeps only 6.
+        let default_kept =
+            DerivedEngine::prune_to_rare_terms(&grams, &df, FuzzyCapPolicy::default());
+        assert_eq!(default_kept.len(), 6, "fixed-6 keeps 6");
     }
 
     #[test]
