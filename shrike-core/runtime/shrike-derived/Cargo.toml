@@ -25,7 +25,11 @@ shrike-error = { workspace = true }
 shrike-store = { path = "../../contracts/shrike-store" }
 # 0.36 to match anki's pin: only one crate may link sqlite3 (the links attr),
 # and the anki workspace (shrike-collection, #278) brings rusqlite 0.36.
-rusqlite = { version = "0.36" }
+# `array` registers the Rust-side `rarray` virtual table (carray): an in-memory
+# vtab over an `Rc<Vec<Value>>`, so `WHERE x IN rarray(?1)` keeps ONE constant
+# (prepare-cached) statement for any candidate count — no per-arity re-parse, and
+# no temp DB table.
+rusqlite = { version = "0.36", features = ["array"] }
 tracing = "0.1"
 # NFC-normalize indexed text + queries so canonically-equivalent forms (NFC/NFD)
 # match. Already in the workspace lock (transitive via anki); pinned here direct.
