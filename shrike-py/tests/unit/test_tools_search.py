@@ -453,6 +453,20 @@ class TestUnifiedSearch:
         matches = result["results"][0]["matches"]
         assert [m["id"] for m in matches] == [child]
 
+    def test_tag_filter_is_hierarchical(self, kharness, mcp_sem):
+        """A tag-scoped semantic search includes notes under a CHILD tag — Anki
+        ``tag:`` semantics (hierarchical), the same child-inclusive set every signal
+        scopes by. A note tagged ``topic::sub`` surfaces under a ``topic`` filter; a
+        note with an unrelated tag stays filtered out."""
+        child = kharness.seed_note("C", tags=["topic::sub"], back="A")
+        outside = kharness.seed_note("O", tags=["other"], back="A")
+        _plant(kharness, "qry", [(outside, 0.05), (child, 0.20)])
+        result = kharness.call_tool(
+            mcp_sem, "search_notes", {"queries": ["qry"], "tags": ["topic"]}
+        )
+        matches = result["results"][0]["matches"]
+        assert [m["id"] for m in matches] == [child]
+
     def test_score_rounded_to_3_decimals(self, kharness, mcp_sem, kbasic_note):
         _plant(kharness, "test", [(kbasic_note, 0.12345)])
         result = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["test"]})

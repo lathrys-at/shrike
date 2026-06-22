@@ -2694,25 +2694,18 @@ impl Kernel {
             // vectors + the lexical/tag signals; cross-space fusion adds
             // each SECONDARY text-capable space's gated image ranking. With one
             // space `cross_space` is empty → byte-identical to the single-space
-            // path. `index_size` sums across every space.
+            // path.
             let primary = self.index_set.primary();
             let cross_space = if semantic {
                 self.build_cross_space(&[query.to_string()], top_k).await?
             } else {
                 Vec::new()
             };
-            let index_size: usize = self
-                .index_set
-                .all_orchestrators()
-                .iter()
-                .map(|o| o.engine().size())
-                .sum();
             let args = actions::SearchArgs {
                 top_k,
                 threshold: 0.0,
                 weights: BTreeMap::new(), // empty = the canonical fusion set
                 semantic,
-                index_size,
                 hidden_lexical_sources: Self::hidden_lexical_sources()
                     .into_iter()
                     .map(str::to_string)
@@ -2811,7 +2804,7 @@ impl Kernel {
             //
             // This is the AGGREGATE size across every space, deliberately wider
             // than a single space's count. It only ever RAISES a ceiling
-            // (`fetch_k`, and `SearchArgs.index_size` at the scoped clamp), and
+            // (`fetch_k` for a `limit=0` query), and
             // each sub-index re-clamps the fetch to its own size in
             // `search_by_modality`, so a larger value never grows a result set —
             // the over-fetch buffer is the only thing it touches. Parity rests on
@@ -2844,7 +2837,6 @@ impl Kernel {
                 image_floor,
                 weights,
                 semantic: semantic_ok,
-                index_size,
                 hidden_lexical_sources: Self::hidden_lexical_sources()
                     .into_iter()
                     .map(str::to_string)

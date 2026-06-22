@@ -468,9 +468,9 @@ pub struct SearchArgs {
     pub top_k: usize,
     /// The cosine floor for the text-calibrated semantic signal.
     pub threshold: f64,
-    /// The RESOLVED deck name (semantic candidates filter on exact equality;
-    /// the find_notes fallback uses `deck:` which includes children — the
-    /// Python original's behaviour, ported faithfully).
+    /// The RESOLVED deck name. Every signal scopes by the child-inclusive
+    /// `find_notes("deck:…")` note-id set (Anki `deck:` semantics — includes child
+    /// decks), so a subdeck note is in scope under its parent.
     pub deck: Option<String>,
     /// Restrict candidates to notes carrying all of these tags.
     pub tags: Vec<String>,
@@ -485,8 +485,6 @@ pub struct SearchArgs {
     /// Whether semantic ranking runs (index ready + backend up); `vectors`
     /// carries one query vector per source when true.
     pub semantic: bool,
-    /// The index's current vector count, for the over-fetch clamp.
-    pub index_size: usize,
     /// Derived `source` strings hidden from the lexical (substring/fuzzy)
     /// surfaces: a VectorOnly recognition source (VLM describe) is
     /// stored for provenance + reconcile but never surfaced on a lexical
@@ -2169,7 +2167,6 @@ mod search_tests {
 
         let mut a1 = args(10);
         a1.semantic = true;
-        a1.index_size = 2;
         let groups = search_notes(
             &core,
             Some(&index),
@@ -2225,7 +2222,6 @@ mod search_tests {
 
         let mut a1 = args(10);
         a1.semantic = true;
-        a1.index_size = 2;
         a1.threshold = 0.0;
         let groups = search_notes(
             &core,
@@ -2267,7 +2263,6 @@ mod search_tests {
 
         let mut a1 = args(10);
         a1.semantic = true;
-        a1.index_size = 2;
         a1.threshold = 0.0;
         a1.deck = Some("Other".to_owned());
         let groups = search_notes(
@@ -2385,7 +2380,6 @@ mod search_tests {
             top_k,
             threshold: 0.0,
             semantic: true,
-            index_size: 8,
             weights: std::collections::BTreeMap::new(),
             ..Default::default()
         }

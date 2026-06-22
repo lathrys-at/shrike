@@ -101,7 +101,7 @@ pub(crate) fn action_collection_query(
 /// semantic ranking is on, and the orchestrator state (image floor, index
 /// size).
 #[pyfunction]
-#[pyo3(signature = (core, index_engine, derived_engine, sources, vectors, top_k, threshold, deck=None, tags=None, exclude=None, image_floor=None, weights=None, semantic=false, index_size=0, kernel=None, cross_space=None))]
+#[pyo3(signature = (core, index_engine, derived_engine, sources, vectors, top_k, threshold, deck=None, tags=None, exclude=None, image_floor=None, weights=None, semantic=false, kernel=None, cross_space=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn action_search_notes(
     py: Python<'_>,
@@ -118,7 +118,6 @@ pub(crate) fn action_search_notes(
     image_floor: Option<f64>,
     weights: Option<std::collections::BTreeMap<String, f64>>,
     semantic: bool,
-    index_size: usize,
     kernel: Option<PyRef<'_, crate::async_kernel::AsyncKernel>>,
     cross_space: Option<String>,
 ) -> PyResult<String> {
@@ -167,7 +166,6 @@ pub(crate) fn action_search_notes(
         image_floor,
         weights: weights.unwrap_or_default(),
         semantic,
-        index_size,
         hidden_lexical_sources: shrike_kernel::Kernel::hidden_lexical_sources()
             .into_iter()
             .map(str::to_string)

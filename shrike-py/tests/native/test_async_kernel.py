@@ -259,7 +259,6 @@ class TestAsyncKernel:
                     0.0,
                     kernel=kernel,
                     semantic=True,
-                    index_size=kernel.engine_handle().size(),
                 )
 
             # Settled: the read saw a stable, drained snapshot → not stale.
@@ -422,7 +421,6 @@ class TestCrossSpaceWiring:
                     0.3,  # threshold (excludes the orthogonal image note from the text signal)
                     kernel=kernel,
                     semantic=True,
-                    index_size=kernel.engine_handle().size(),
                     cross_space=cross_space,
                 )
 
@@ -455,7 +453,6 @@ class TestCrossSpaceWiring:
                     0.3,
                     kernel=kernel,
                     semantic=True,
-                    index_size=kernel.engine_handle().size(),
                 )
 
             raw_n1 = await kernel.run_job(lambda: call_n1(core))
@@ -645,7 +642,6 @@ class TestLiveTwoSpaceEndToEnd:
                     0.3,
                     kernel=kernel,
                     semantic=True,
-                    index_size=kernel.engine_handle().size(),
                     cross_space=cross_space,
                 )
 

@@ -493,7 +493,7 @@ impl MultiModalIndex {
                 };
                 let mut keys: Vec<i64> = Vec::new();
                 let mut distances: Vec<f32> = Vec::new();
-                let mut seen = std::collections::HashSet::new();
+                let mut seen = shrike_store::FxI64Set::default();
                 for (key, dist) in hits.keys.iter().zip(hits.distances.iter()) {
                     let nid = *key as i64;
                     if seen.contains(&nid) {
