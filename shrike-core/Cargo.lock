@@ -4680,6 +4680,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "roaring"
+version = "0.10.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19e8d2cfa184d94d0726d650a9f4a1be7f9b76ac9fdb954219878dc00c1c1e7b"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+]
+
+[[package]]
 name = "rstest"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5140,6 +5150,7 @@ dependencies = [
 name = "shrike-derived"
 version = "0.0.0"
 dependencies = [
+ "roaring",
  "rusqlite",
  "shrike-error",
  "shrike-store",

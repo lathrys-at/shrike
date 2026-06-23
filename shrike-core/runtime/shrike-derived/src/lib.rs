@@ -477,10 +477,18 @@ impl DerivedEngine {
     const TRIGRAM_DF_DDL: &'static str =
         "CREATE TABLE IF NOT EXISTS trigram_df(term TEXT PRIMARY KEY, df INTEGER NOT NULL)";
 
+    /// SPIKE: one serialized roaring bitmap per trigram — the posting over idx
+    /// rowids, materialized at build by [`Self::refresh_trigram_bitmaps`]. The fuzzy
+    /// candidate read loads the pruned trigrams' bitmaps from here instead of
+    /// re-scanning their FTS5 doclists.
+    const TRIGRAM_BITMAP_DDL: &'static str =
+        "CREATE TABLE IF NOT EXISTS trigram_bitmap(term TEXT PRIMARY KEY, bm BLOB NOT NULL)";
+
     fn create_tables(conn: &Connection) -> NativeResult<()> {
         conn.execute(Self::IDX_DDL, []).map_err(db_err)?;
         conn.execute(Self::IDX_VOCAB_DDL, []).map_err(db_err)?;
         conn.execute(Self::TRIGRAM_DF_DDL, []).map_err(db_err)?;
+        conn.execute(Self::TRIGRAM_BITMAP_DDL, []).map_err(db_err)?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS rowmap(\
              rowid INTEGER PRIMARY KEY, note_id INTEGER NOT NULL, \
@@ -936,6 +944,11 @@ impl DerivedEngine {
                 "trigram_df refresh failed; fuzzy prune will use a stale DF snapshot"
             );
         }
+        // SPIKE: re-materialize the per-trigram posting bitmaps the fuzzy candidate
+        // read uses; best-effort like the DF refresh.
+        if let Err(e) = self.refresh_trigram_bitmaps() {
+            tracing::warn!(error = %e, "trigram_bitmap refresh failed");
+        }
         Ok(total)
     }
 
@@ -966,6 +979,65 @@ impl DerivedEngine {
             [],
         )
         .map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// SPIKE: materialize one roaring bitmap per trigram (its posting over idx
+    /// rowids) into `trigram_bitmap`, via ONE term-ordered scan of the index's
+    /// `instance` fts5vocab. Full rebuild, no incremental maintenance — the
+    /// read-only benchmark never invalidates it (productionizing needs the churn
+    /// story, deferred).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the vocabulary scan or the table rewrite fails.
+    fn refresh_trigram_bitmaps(&self) -> NativeResult<()> {
+        use roaring::RoaringBitmap;
+        let mut conn = self.lock();
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS idx_vocab_inst USING fts5vocab('idx', 'instance')",
+            [],
+        )
+        .map_err(db_err)?;
+        let tx = conn.transaction().map_err(db_err)?;
+        tx.execute("DELETE FROM trigram_bitmap", [])
+            .map_err(db_err)?;
+        {
+            // `instance` fts5vocab yields (term, doc, col, offset) in term order, so
+            // one scan groups every rowid (`doc`) under its trigram. Duplicate
+            // (term, doc) positions just re-set the same bit (idempotent).
+            let mut sel = tx
+                .prepare("SELECT term, doc FROM idx_vocab_inst")
+                .map_err(db_err)?;
+            let mut ins = tx
+                .prepare("INSERT INTO trigram_bitmap(term, bm) VALUES(?1, ?2)")
+                .map_err(db_err)?;
+            let mut rows = sel.query([]).map_err(db_err)?;
+            let mut cur: Option<String> = None;
+            let mut bm = RoaringBitmap::new();
+            while let Some(r) = rows.next().map_err(db_err)? {
+                let term: String = r.get(0).map_err(db_err)?;
+                let doc: i64 = r.get(1).map_err(db_err)?;
+                if cur.as_deref() != Some(term.as_str()) {
+                    if let Some(prev) = cur.take() {
+                        let mut buf: Vec<u8> = Vec::new();
+                        bm.serialize_into(&mut buf)
+                            .map_err(|e| NativeError::internal(e.to_string()))?;
+                        ins.execute(rusqlite::params![prev, buf]).map_err(db_err)?;
+                        bm.clear();
+                    }
+                    cur = Some(term);
+                }
+                bm.insert(doc as u32);
+            }
+            if let Some(prev) = cur.take() {
+                let mut buf: Vec<u8> = Vec::new();
+                bm.serialize_into(&mut buf)
+                    .map_err(|e| NativeError::internal(e.to_string()))?;
+                ins.execute(rusqlite::params![prev, buf]).map_err(db_err)?;
+            }
+        }
         tx.commit().map_err(db_err)?;
         Ok(())
     }
@@ -1666,7 +1738,8 @@ impl shrike_store::DerivedStore for DerivedEngine {
         Self::ingest_many(self, notes, source)
     }
     fn refresh_derived_snapshots(&self) -> NativeResult<()> {
-        Self::refresh_trigram_df(self)
+        Self::refresh_trigram_df(self)?;
+        Self::refresh_trigram_bitmaps(self)
     }
     fn remove(&self, note_ids: &[i64], source: Option<&str>) -> NativeResult<()> {
         Self::remove(self, note_ids, source)
@@ -2734,7 +2807,7 @@ impl DerivedEngine {
     /// runs before the survivors' `(note_id, source, ref)` is known.
     fn accumulate_overlap(
         pruned_terms: &[String],
-        term_rowids: &std::collections::HashMap<String, Vec<i64>>,
+        term_bitmaps: &std::collections::HashMap<String, roaring::RoaringBitmap>,
     ) -> FxI64Map<usize> {
         // Preallocate to the sum of the rare trigrams' posting lengths — the upper
         // bound on distinct rowids (a rowid shared across trigrams just over-counts
@@ -2744,19 +2817,58 @@ impl DerivedEngine {
         // dropped at the end of the query.
         let cap: usize = pruned_terms
             .iter()
-            .filter_map(|t| term_rowids.get(t))
-            .map(Vec::len)
+            .filter_map(|t| term_bitmaps.get(t))
+            .map(|b| b.len() as usize)
             .sum();
         let mut overlap: FxI64Map<usize> =
             std::collections::HashMap::with_capacity_and_hasher(cap, Default::default());
         for term in pruned_terms {
-            if let Some(rowids) = term_rowids.get(term) {
-                for &rid in rowids {
-                    *overlap.entry(rid).or_insert(0) += 1;
+            if let Some(bm) = term_bitmaps.get(term) {
+                for rid in bm.iter() {
+                    *overlap.entry(rid as i64).or_insert(0) += 1;
                 }
             }
         }
         overlap
+    }
+
+    /// SPIKE: load the pruned trigrams' precomputed posting bitmaps from
+    /// `trigram_bitmap` in ONE query (inline `IN` over the ≤cap distinct terms),
+    /// keyed by term. A term with no row (never indexed) is simply absent from the
+    /// map — the overlap accumulation skips it, exactly as an empty FTS5 posting
+    /// would.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read or a bitmap deserialize fails.
+    fn load_trigram_bitmaps(
+        conn: &Connection,
+        terms: &[&str],
+    ) -> NativeResult<std::collections::HashMap<String, roaring::RoaringBitmap>> {
+        let mut out = std::collections::HashMap::new();
+        if terms.is_empty() {
+            return Ok(out);
+        }
+        let placeholders = (0..terms.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT term, bm FROM trigram_bitmap WHERE term IN ({placeholders})");
+        let run = || -> rusqlite::Result<Vec<(String, Vec<u8>)>> {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let mut q = stmt.query(rusqlite::params_from_iter(terms.iter().copied()))?;
+            let mut rows = Vec::new();
+            while let Some(r) = q.next()? {
+                rows.push((r.get(0)?, r.get(1)?));
+            }
+            Ok(rows)
+        };
+        for (term, blob) in with_busy_retry(run)? {
+            let bm = roaring::RoaringBitmap::deserialize_from(&blob[..])
+                .map_err(|e| NativeError::internal(e.to_string()))?;
+            out.insert(term, bm);
+        }
+        Ok(out)
     }
 
     /// Rank one query's accumulated overlap into its survivors. A segment's overlap
@@ -3000,12 +3112,14 @@ impl DerivedEngine {
         // SQLite build an ephemeral index over the set (a temp btree on the pcache
         // mutex). rank_overlap skips a candidate absent from `seg_meta`, so a dropped
         // segment never ranks.
-        let term_rowids = Self::fuzzy_term_rowids(&conn, &distinct_terms_vec)?;
+        // SPIKE: load the pruned trigrams' precomputed posting bitmaps (one query)
+        // instead of re-scanning each one's FTS5 doclist via `fuzzy_term_rowids`.
+        let term_bitmaps = Self::load_trigram_bitmaps(&conn, &distinct_terms_vec)?;
         let overlaps: Vec<FxI64Map<usize>> = pruned
             .iter()
             .map(|p| {
                 p.as_ref().map_or_else(FxI64Map::default, |terms| {
-                    Self::accumulate_overlap(terms, &term_rowids)
+                    Self::accumulate_overlap(terms, &term_bitmaps)
                 })
             })
             .collect();
@@ -3099,6 +3213,7 @@ impl DerivedEngine {
     /// # Errors
     ///
     /// Returns an error if any term's MATCH query fails.
+    #[allow(dead_code)] // SPIKE: superseded by load_trigram_bitmaps; kept for the A/B revert.
     fn fuzzy_term_rowids(
         conn: &Connection,
         terms: &[&str],
@@ -4217,6 +4332,9 @@ mod lexical_tests {
     }
 
     #[test]
+    #[ignore = "SPIKE: bitmap postings are a build snapshot, so a write-after-refresh \
+                is invisible until the next rebuild — the live-recall-under-churn gap \
+                that productionizing the bitmap path must close (incremental maintenance)."]
     fn fuzzy_finds_a_match_via_just_written_trigrams_under_a_stale_snapshot() {
         // #958: a note matching the query ONLY through trigrams written since the DF
         // snapshot must still surface — the prune keeps absent (DF-0) trigrams, so

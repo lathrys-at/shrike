@@ -19,6 +19,7 @@ rust_library(
     deps = [
         "//shrike-core/contracts/shrike-error:shrike_error",
         "//shrike-core/contracts/shrike-store:shrike_store",
+        "@crates//:roaring",
         "@crates//:rusqlite",
         "@crates//:tracing",
         "@crates//:unicode-normalization",

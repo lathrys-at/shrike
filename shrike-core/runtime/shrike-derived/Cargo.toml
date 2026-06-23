@@ -30,6 +30,8 @@ shrike-store = { path = "../../contracts/shrike-store" }
 # (prepare-cached) statement for any candidate count — no per-arity re-parse, and
 # no temp DB table.
 rusqlite = { version = "0.36", features = ["array"] }
+# Precomputed per-trigram posting bitmaps for the fuzzy candidate read.
+roaring = "0.10"
 tracing = "0.1"
 # NFC-normalize indexed text + queries so canonically-equivalent forms (NFC/NFD)
 # match. Already in the workspace lock (transitive via anki); pinned here direct.
