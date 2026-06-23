@@ -477,7 +477,7 @@ impl DerivedEngine {
     const TRIGRAM_DF_DDL: &'static str =
         "CREATE TABLE IF NOT EXISTS trigram_df(term TEXT PRIMARY KEY, df INTEGER NOT NULL)";
 
-    /// SPIKE: one serialized roaring bitmap per trigram — the posting over idx
+    /// One serialized roaring bitmap per trigram — the posting over idx
     /// rowids, materialized at build by [`Self::refresh_trigram_bitmaps`]. The fuzzy
     /// candidate read loads the pruned trigrams' bitmaps from here instead of
     /// re-scanning their FTS5 doclists.
@@ -736,6 +736,22 @@ impl DerivedEngine {
         Ok(())
     }
 
+    /// Advance the monotonic derived write generation — the freshness signal the
+    /// bitmap path checks. Every text write (ingest/remove) bumps it, so a build
+    /// stamps the generation it covered and a later query detects ANY write since
+    /// (see [`Self::bitmaps_fresh`]). A counter, NOT a max-rowid high-water mark:
+    /// FTS5 reuses a freed rowid, so `max(rowid)` is not monotonic across a
+    /// delete-then-insert — a generation is.
+    fn bump_write_gen(conn: &Connection) -> NativeResult<()> {
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES('write_gen', 1) \
+             ON CONFLICT(key) DO UPDATE SET value = value + 1",
+            [],
+        )
+        .map_err(db_err)?;
+        Ok(())
+    }
+
     /// Replace a note's text rows for one source (incremental upsert), in one
     /// transaction.
     ///
@@ -752,6 +768,7 @@ impl DerivedEngine {
         let tx = conn.transaction().map_err(db_err)?;
         Self::delete_rows(&tx, &[note_id], Some(source))?;
         Self::insert_rows(&tx, note_id, source, refs_text)?;
+        Self::bump_write_gen(&tx)?;
         tx.commit().map_err(db_err)
     }
 
@@ -787,6 +804,7 @@ impl DerivedEngine {
                 Self::insert_rows(&tx, *note_id, source, refs_text)?;
             }
         }
+        Self::bump_write_gen(&tx)?;
         tx.commit().map_err(db_err)
     }
 
@@ -831,6 +849,7 @@ impl DerivedEngine {
         let tx = conn.transaction().map_err(db_err)?;
         Self::delete_rows(&tx, note_ids, source)?;
         Self::delete_gated(&tx, note_ids, source)?;
+        Self::bump_write_gen(&tx)?;
         tx.commit().map_err(db_err)
     }
 
@@ -944,7 +963,7 @@ impl DerivedEngine {
                 "trigram_df refresh failed; fuzzy prune will use a stale DF snapshot"
             );
         }
-        // SPIKE: re-materialize the per-trigram posting bitmaps the fuzzy candidate
+        // Re-materialize the per-trigram posting bitmaps the fuzzy candidate
         // read uses; best-effort like the DF refresh.
         if let Err(e) = self.refresh_trigram_bitmaps() {
             tracing::warn!(error = %e, "trigram_bitmap refresh failed");
@@ -983,11 +1002,11 @@ impl DerivedEngine {
         Ok(())
     }
 
-    /// SPIKE: materialize one roaring bitmap per trigram (its posting over idx
-    /// rowids) into `trigram_bitmap`, via ONE term-ordered scan of the index's
-    /// `instance` fts5vocab. Full rebuild, no incremental maintenance — the
-    /// read-only benchmark never invalidates it (productionizing needs the churn
-    /// story, deferred).
+    /// Materialize one roaring bitmap per trigram (its posting over idx rowids)
+    /// into `trigram_bitmap`, via ONE term-ordered scan of the index's `instance`
+    /// fts5vocab. A full rebuild, not incremental — a write between rebuilds is
+    /// covered by the freshness gate ([`Self::bitmaps_fresh`]), which routes such a
+    /// query to the live posting read until the next rebuild re-materializes here.
     ///
     /// # Errors
     ///
@@ -1038,12 +1057,12 @@ impl DerivedEngine {
                 ins.execute(rusqlite::params![prev, buf]).map_err(db_err)?;
             }
         }
-        // Stamp the build watermark = the highest rowid these bitmaps cover, so a
-        // fuzzy query can cheaply detect a write since this build (a higher live
-        // rowid) and fall back to the live posting read — the bitmaps are a snapshot.
+        // Stamp the write generation these bitmaps cover, so a fuzzy query can
+        // detect ANY write since this build (a higher generation) and fall back to
+        // the live posting read — the bitmaps are a build snapshot.
         tx.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES('bitmap_watermark', \
-             (SELECT COALESCE(MAX(rowid), 0) FROM rowmap))",
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('bitmap_built_gen', \
+             COALESCE((SELECT value FROM meta WHERE key='write_gen'), 0))",
             [],
         )
         .map_err(db_err)?;
@@ -1051,28 +1070,33 @@ impl DerivedEngine {
         Ok(())
     }
 
-    /// Whether the precomputed bitmaps still cover the live index: true iff no row
-    /// has been written since the build watermark. A missing watermark (never
-    /// built) reads as stale. Deletes don't matter — a deleted rowid the bitmaps
-    /// still carry is dropped by the `seg_meta` hydration, never surfaced — so only
-    /// an INSERT (a higher rowid) invalidates the snapshot for recall.
+    /// Whether the precomputed bitmaps still cover the live index: true iff no text
+    /// write has landed since the generation they were built at. A missing stamp
+    /// (never built) reads as stale. The write generation is monotonic across a
+    /// delete-then-insert — unlike a max-rowid watermark, which FTS5 rowid reuse
+    /// lets a delete-heavy-then-insert batch slip under (deleted slots free high
+    /// rowids the inserts reuse, so max never rises), silently hiding the new notes.
+    /// A delete alone is harmless to recall but still bumps the generation, so the
+    /// fallback engages conservatively until the next rebuild.
     fn bitmaps_fresh(conn: &Connection) -> NativeResult<bool> {
-        let watermark: Option<i64> = conn
+        let built_gen: Option<i64> = conn
             .query_row(
-                "SELECT (SELECT value FROM meta WHERE key='bitmap_watermark')",
+                "SELECT (SELECT value FROM meta WHERE key='bitmap_built_gen')",
                 [],
                 |r| r.get(0),
             )
             .map_err(db_err)?;
-        let Some(watermark) = watermark else {
+        let Some(built_gen) = built_gen else {
             return Ok(false);
         };
-        let live_max: i64 = conn
-            .query_row("SELECT COALESCE(MAX(rowid), 0) FROM rowmap", [], |r| {
-                r.get(0)
-            })
+        let write_gen: i64 = conn
+            .query_row(
+                "SELECT COALESCE((SELECT value FROM meta WHERE key='write_gen'), 0)",
+                [],
+                |r| r.get(0),
+            )
             .map_err(db_err)?;
-        Ok(live_max <= watermark)
+        Ok(write_gen <= built_gen)
     }
 
     /// Drop any leftover shadow tables (a prior aborted rebuild) and create
@@ -2866,7 +2890,7 @@ impl DerivedEngine {
         overlap
     }
 
-    /// SPIKE: load the pruned trigrams' precomputed posting bitmaps from
+    /// Load the pruned trigrams' precomputed posting bitmaps from
     /// `trigram_bitmap` in ONE query (inline `IN` over the ≤cap distinct terms),
     /// keyed by term. A term with no row (never indexed) is simply absent from the
     /// map — the overlap accumulation skips it, exactly as an empty FTS5 posting
@@ -2980,6 +3004,11 @@ impl DerivedEngine {
         exclude_sources: &[&str],
         scope: Option<&[i64]>,
     ) -> NativeResult<Vec<(i64, String, String, i64)>> {
+        // top_k == 0 selects nothing — match rank_overlap's truncate-to-empty (a
+        // huge fetch-all top_k, not 0, is the "return all" sentinel).
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
         let bitmaps: Vec<&roaring::RoaringBitmap> = pruned_terms
             .iter()
             .filter_map(|t| term_bitmaps.get(t))
@@ -4589,6 +4618,51 @@ mod lexical_tests {
             hits.iter().any(|(nid, ..)| *nid == 100),
             "note 100, matched only via just-written trigrams, must surface under a stale snapshot"
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn freshness_gate_catches_delete_insert_rowid_reuse() {
+        // A delete-heavy-then-insert batch reuses the freed high rowids, so a
+        // max-rowid watermark would NOT rise — the gate would read "fresh" and serve
+        // stale bitmaps that never saw the new notes, hiding them. The write
+        // generation bumps on every write, so the gate reads stale → live fallback →
+        // the new notes surface. (Regression for the freshness-gate CRITICAL.)
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-derived-genreuse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
+        let rows: Vec<(i64, String, String, String)> = (1..=10i64)
+            .map(|n| (n, "field".into(), "Front".into(), format!("commonword{n}")))
+            .collect();
+        build_snapshot_live(&e, &rows, 1).unwrap();
+        e.remove(&[6, 7, 8, 9, 10], None).unwrap();
+        e.ingest_many(
+            &[
+                (11, vec![("Front".into(), "xraywhiskey".into())]),
+                (12, vec![("Front".into(), "uniformtango".into())]),
+                (13, vec![("Front".into(), "sierraromeo".into())]),
+            ],
+            "field",
+        )
+        .unwrap();
+        for (nid, q) in [
+            (11, "xraywhiskey"),
+            (12, "uniformtango"),
+            (13, "sierraromeo"),
+        ] {
+            let hits = e.search_fuzzy(q, 10, None, &[]).unwrap();
+            assert!(
+                hits.iter().any(|h| h.0 == nid),
+                "new note {nid} ({q}) must surface — write-gen gate caught the reused-rowid write"
+            );
+        }
         std::fs::remove_dir_all(dir).ok();
     }
 }
