@@ -107,10 +107,23 @@ fn ipv4_is_global(addr: Ipv4Addr) -> bool {
 
 /// Python `ipaddress.is_global` for IPv6 (the private set; an IPv4-mapped
 /// address defers to the IPv4 classifier, like Python's `ipv4_mapped`
-/// handling rejects ::ffff:10.0.0.1).
+/// handling rejects ::ffff:10.0.0.1), hardened to refuse the deprecated
+/// IPv4-compatible block (see below) which `is_global` would permit.
 fn ipv6_is_global(addr: Ipv6Addr) -> bool {
     if let Some(v4) = addr.to_ipv4_mapped() {
         return ipv4_is_global(v4);
+    }
+    // IPv4-compatible ::a.b.c.d (the deprecated ::/96 form, RFC 4291 §2.5.5.1):
+    // the top 96 bits are zero and the low 32 embed a v4 the OS may route to.
+    // `to_ipv4_mapped()` is None for these (it matches only ::ffff:0:0/96), so
+    // without this guard an embedded internal v4 (e.g. ::127.0.0.1 = ::7f00:1)
+    // falls through to the global check and is wrongly permitted — `is_global`
+    // treats ::/96 as global. The format is deprecated with no legitimate
+    // public use, so the whole block is refused (a stricter stance than the
+    // embedded-v4 deferral ::ffff: mapped addresses get). :: and ::1 also land
+    // here; both are non-global regardless.
+    if u128::from(addr) >> 32 == 0 {
+        return false;
     }
     let seg = addr.segments();
     let in_net = |net: [u16; 8], prefix: u32| -> bool {
@@ -990,31 +1003,26 @@ mod tests {
         }
     }
 
-    /// IPv4-COMPATIBLE IPv6 (`::a.b.c.d`, the deprecated RFC4291 form, NOT
-    /// v4-mapped) wrapping an internal v4. `to_ipv4_mapped()` returns None for
-    /// these, so the classifier does NOT defer to the IPv4 check — it follows
-    /// Python's `is_global`, which treats `::127.0.0.1` (= `::7f00:1`) as global.
-    /// The connect on this host fails (the OS rejects the deprecated family), but
-    /// on a host that DOES route it this is a loopback reach the allowlist would
-    /// permit.
-    ///
-    /// This pins the SECURE behaviour (these must be refused). It is parity-
-    /// faithful for `ip_is_allowed` to permit them — Python agrees — so this is a
-    /// hardening gap beyond strict parity, tracked as a DEFECT and left red-but-
-    /// ignored rather than fixed here (trust-boundary change → security review).
+    /// IPv4-COMPATIBLE IPv6 (`::a.b.c.d`, the deprecated RFC 4291 §2.5.5.1 form,
+    /// NOT v4-mapped) wrapping an internal v4. `to_ipv4_mapped()` returns None
+    /// for these (it matches only `::ffff:0:0/96`), so Python's `is_global`
+    /// treats `::127.0.0.1` (= `::7f00:1`) as global — a host that routes the
+    /// deprecated family would then reach loopback. The classifier refuses the
+    /// whole `::/96` block: stricter than parity, justified because the format
+    /// is deprecated with no legitimate public use.
     #[test]
-    #[ignore = "DEFECT #1008: IPv4-compatible ::a.b.c.d (e.g. ::127.0.0.1) is is_global-true per Python parity but reaches an internal v4 where the OS routes it; ip_is_allowed should refuse the whole ::/96 v4-compatible block on top of parity"]
     fn allowlist_should_refuse_ipv4_compatible_internal_addresses() {
         for bad in [
             "::127.0.0.1",       // ::7f00:1 — loopback
             "::10.0.0.1",        // ::a00:1 — RFC1918
             "::192.168.1.1",     // ::c0a8:101 — RFC1918
             "::169.254.169.254", // ::a9fe:a9fe — cloud metadata
+            "::8.8.8.8",         // ::808:808 — a PUBLIC embedded v4 is refused too
         ] {
             let ip: IpAddr = bad.parse().unwrap();
             assert!(
                 !ip_is_allowed(ip),
-                "{bad} (IPv4-compatible) wraps an internal v4 and must be refused"
+                "{bad} (IPv4-compatible ::/96) is deprecated and must be refused"
             );
         }
     }

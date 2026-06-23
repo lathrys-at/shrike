@@ -5,7 +5,9 @@ Three layers, none touching the real network:
 1. **Classifier parity corpus** — the native allowlist against Python's
    `ipaddress.is_global` (plus the explicit multicast rejection) over the
    ranges that matter: an exact-agreement contract, the same style as the
-   embed-text byte-identity test.
+   embed-text byte-identity test. One deliberate hardening beyond `is_global`:
+   the deprecated IPv4-compatible `::/96` block is refused wholesale (see
+   `_python_allowed`), so the reference encodes that, not raw `is_global`.
 2. **Local HTTP server cases** — a loopback server proves the guard refuses
    loopback *by address*, that `allow_private` opt-in works, that redirects
    are re-vetted per hop (a public-looking redirect INTO loopback is refused),
@@ -82,6 +84,13 @@ IP_CORPUS = [
     "::1",
     "::ffff:8.8.8.8",
     "::ffff:10.0.0.1",
+    # IPv4-compatible ::/96 (deprecated, RFC 4291 2.5.5.1): refused wholesale,
+    # even a public embedded v4 — a hardening beyond ipaddress.is_global.
+    "::127.0.0.1",
+    "::10.0.0.1",
+    "::169.254.169.254",
+    "::8.8.8.8",
+    "::1:0:0",  # 2^32 — just ABOVE ::/96, classified normally (global)
     "64:ff9b:1::1",
     "100::1",
     "2001:db8::1",
@@ -114,6 +123,12 @@ IP_CORPUS = [
 
 def _python_allowed(ip: str) -> bool:
     addr = ipaddress.ip_address(ip)
+    # Harden beyond ipaddress.is_global: the deprecated IPv4-compatible ::/96
+    # block (`::a.b.c.d` — NOT the `::ffff:0:0/96` mapped block) embeds a v4 the
+    # OS may route to, so the native classifier refuses the whole block. is_global
+    # would call a public embedded v4 (e.g. `::8.8.8.8`) global; this does not.
+    if isinstance(addr, ipaddress.IPv6Address) and int(addr) >> 32 == 0:
+        return False
     return addr.is_global and not addr.is_multicast
 
 
