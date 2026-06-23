@@ -1045,6 +1045,37 @@ impl AsyncKernel {
         })
     }
 
+    /// Single-query lexical search — the as-you-type fast path. ONE query string,
+    /// no anchors, no semantic ranking: the kernel skips the embed, cross-space,
+    /// and compute-pool chunk fan-out `search_fused` carries for the general case.
+    /// Returns the same `SearchNotesWire` JSON (groups + stale). `limit == 0` =
+    /// all.
+    #[pyo3(signature = (query, limit, deck=None, tags=None, exclude=None))]
+    fn search_lexical_single<'py>(
+        &self,
+        py: Python<'py>,
+        query: String,
+        limit: usize,
+        deck: Option<String>,
+        tags: Option<Vec<String>>,
+        exclude: Option<Vec<i64>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kernel = Arc::clone(&self.inner);
+        kernel_op(py, async move {
+            let (groups, stale) = kernel
+                .search_lexical_single(
+                    query,
+                    limit,
+                    deck,
+                    tags.unwrap_or_default(),
+                    exclude.unwrap_or_default(),
+                )
+                .await?;
+            serde_json::to_string(&crate::kernel_actions::SearchNotesWire { groups, stale })
+                .map_err(|e| shrike_error::NativeError::internal(e.to_string()))
+        })
+    }
+
     fn col_mod<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let kernel = Arc::clone(&self.inner);
         kernel_op(py, async move { kernel.col_mod().await })

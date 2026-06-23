@@ -808,6 +808,43 @@ class TestSearchMode:
         assert result["version"] is None
         assert planted in [m["id"] for m in result["results"][0]["matches"]]
 
+    def test_single_query_lexical_routes_to_the_dedicated_routine(self, kharness, sem_view):
+        # Lock the fast-path routing: ONLY (mode=lexical, exactly one query, no id
+        # anchors) takes the dedicated kernel routine; every other shape takes the
+        # general fused path. Parity makes the results identical either way, so a
+        # spy on which kernel method the action calls is the only thing that pins it.
+        kharness.seed_note("mitochondria powerhouse", back="energy")
+        anchor = kharness.seed_note("anchor note", back="A")
+
+        class _SpyKernel:
+            def __init__(self, real):
+                self._real = real
+                self.calls: list[str] = []
+
+            def search_lexical_single(self, *a, **k):
+                self.calls.append("search_lexical_single")
+                return self._real.search_lexical_single(*a, **k)
+
+            def search_fused(self, *a, **k):
+                self.calls.append("search_fused")
+                return self._real.search_fused(*a, **k)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        cases = [
+            ({"queries": ["mito"], "mode": "lexical"}, "search_lexical_single"),
+            ({"queries": ["mito", "chond"], "mode": "lexical"}, "search_fused"),
+            ({"queries": ["mito"], "mode": "fused"}, "search_fused"),
+            ({"queries": ["mito"], "ids": [anchor], "mode": "lexical"}, "search_fused"),
+        ]
+        for params, expected in cases:
+            spy = _SpyKernel(kharness.kernel)
+            mcp = FastMCP("test")
+            register_tools(mcp, kharness.wrapper, index=sem_view, kernel=spy)
+            kharness.call_tool(mcp, "search_notes", params)
+            assert spy.calls == [expected], f"{params} -> {spy.calls}, expected {expected}"
+
     def test_min_query_gate_skips_semantic_but_is_final(self, kharness, mcp_sem):
         planted = kharness.seed_note("ab gate", back="A")
         _plant(kharness, "ab", [(planted, 0.05)])
