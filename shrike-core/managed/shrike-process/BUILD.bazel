@@ -30,4 +30,7 @@ rust_test(
     name = "shrike_process_test",
     size = "medium",
     crate = ":shrike_process",
+    deps = [
+        "@crates//:proptest",
+    ],
 )

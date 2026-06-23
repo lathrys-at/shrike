@@ -126,6 +126,9 @@ rust_test(
     name = "shrike_engine_test",
     size = "small",
     crate = ":shrike_engine",
+    deps = [
+        "@crates//:proptest",
+    ],
 )
 
 # The APPLE cone: the engine-apple `RecognizeMedia` impls over

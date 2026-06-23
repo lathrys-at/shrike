@@ -1950,6 +1950,7 @@ catalog![
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn catalog_is_complete_and_emits_schemas() {
@@ -2205,22 +2206,6 @@ mod tests {
     // Adversarial wire-boundary tests (#742)
     // ========================================================================
 
-    // SplitMix64 — the house deterministic PRNG (mirrors shrike-store's test
-    // helper). No external dep; reproducible fuzz seeds.
-    struct Rng(u64);
-    impl Rng {
-        fn new(seed: u64) -> Self {
-            Self(seed)
-        }
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-    }
-
     /// A structurally-plausible seed instance per catalog name. The fuzz
     /// mutates these toward malformed input; a seed need not be valid for the
     /// type (the property is "never panics", not "always parses").
@@ -2244,32 +2229,60 @@ mod tests {
         ]
     }
 
+    /// One byte-level corruption of a seed — the adversarial mutation space the
+    /// fuzz sweep draws from. Each variant carries the parameters its strategy
+    /// needs (positions are taken modulo the seed length when applied, so any
+    /// generated index is in range); proptest shrinks a panic-inducing mutation
+    /// to a minimal witness.
+    #[derive(Debug, Clone)]
+    enum Mutation {
+        /// Flip one byte (`pos`) by XOR with `xor`.
+        FlipByte { pos: usize, xor: u8 },
+        /// Delete the byte at `pos`.
+        DeleteByte { pos: usize },
+        /// Insert a structural metacharacter (`meta`) at `pos`.
+        InsertMeta { pos: usize, meta: usize },
+        /// Splice an adversarial token onto the end (null, huge int, unicode, nan).
+        SpliceToken { token: usize },
+        /// Truncate to `len` bytes (clamped ≥1).
+        Truncate { len: usize },
+        /// Duplicate the byte at `pos` (yields unbalanced braces).
+        DuplicateByte { pos: usize },
+    }
+
+    fn mutation() -> impl Strategy<Value = Mutation> {
+        prop_oneof![
+            (any::<usize>(), any::<u8>()).prop_map(|(pos, xor)| Mutation::FlipByte { pos, xor }),
+            any::<usize>().prop_map(|pos| Mutation::DeleteByte { pos }),
+            (any::<usize>(), any::<usize>())
+                .prop_map(|(pos, meta)| Mutation::InsertMeta { pos, meta }),
+            any::<usize>().prop_map(|token| Mutation::SpliceToken { token }),
+            any::<usize>().prop_map(|len| Mutation::Truncate { len }),
+            any::<usize>().prop_map(|pos| Mutation::DuplicateByte { pos }),
+        ]
+    }
+
     /// Byte-level mutation: corrupt a seed in one of several adversarial ways.
-    fn mutate(seed: &str, rng: &mut Rng) -> String {
+    fn mutate(seed: &str, m: &Mutation) -> String {
         let mut bytes = seed.as_bytes().to_vec();
         if bytes.is_empty() {
             return seed.to_owned();
         }
-        match rng.next_u64() % 6 {
-            0 => {
-                // Flip a byte.
-                let i = (rng.next_u64() as usize) % bytes.len();
-                bytes[i] ^= (rng.next_u64() & 0xff) as u8;
+        match m {
+            Mutation::FlipByte { pos, xor } => {
+                let i = pos % bytes.len();
+                bytes[i] ^= xor;
             }
-            1 => {
-                // Delete a byte.
-                let i = (rng.next_u64() as usize) % bytes.len();
+            Mutation::DeleteByte { pos } => {
+                let i = pos % bytes.len();
                 bytes.remove(i);
             }
-            2 => {
-                // Insert a structural metacharacter.
-                let i = (rng.next_u64() as usize) % (bytes.len() + 1);
-                let injected =
-                    [b'{', b'}', b'[', b']', b'"', b':', b',', 0x1f][(rng.next_u64() % 8) as usize];
-                bytes.insert(i, injected);
+            Mutation::InsertMeta { pos, meta } => {
+                let i = pos % (bytes.len() + 1);
+                let metas = [b'{', b'}', b'[', b']', b'"', b':', b',', 0x1f];
+                bytes.insert(i, metas[meta % metas.len()]);
             }
-            3 => {
-                // Splice in an adversarial token (null, huge int, unicode, nan).
+            Mutation::SpliceToken { token } => {
                 let tokens = [
                     "null",
                     "99999999999999999999999999",
@@ -2279,17 +2292,14 @@ mod tests {
                     "1e999",
                     "true",
                 ];
-                let tok = tokens[(rng.next_u64() % tokens.len() as u64) as usize];
-                return format!("{seed}{tok}");
+                return format!("{seed}{}", tokens[token % tokens.len()]);
             }
-            4 => {
-                // Truncate.
-                let cut = 1 + (rng.next_u64() as usize) % bytes.len();
+            Mutation::Truncate { len } => {
+                let cut = 1 + len % bytes.len();
                 bytes.truncate(cut);
             }
-            _ => {
-                // Duplicate a region (unbalanced braces).
-                let i = (rng.next_u64() as usize) % bytes.len();
+            Mutation::DuplicateByte { pos } => {
+                let i = pos % bytes.len();
                 let dup = bytes[i];
                 bytes.insert(i, dup);
             }
@@ -2297,23 +2307,37 @@ mod tests {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
-    #[test]
-    fn roundtrip_never_panics_on_mutated_input() {
-        // The wire boundary's load-bearing robustness property: `roundtrip` is
-        // the parse+emit probe the Python contract test drives over untrusted
-        // JSON. It must ALWAYS terminate as Ok/Err — never unwind — for every
-        // catalog name against arbitrarily-corrupted bytes, or a malformed
-        // payload could crash the binding instead of erroring cleanly.
-        let names: Vec<&str> = schema_catalog().into_iter().map(|(n, _)| n).collect();
-        let mut rng = Rng::new(0xDEAD_BEEF_CAFE_F00D);
-        for name in &names {
-            for seed in fuzz_seeds() {
-                for _ in 0..40 {
-                    let mutated = mutate(seed, &mut rng);
-                    // Must not panic; the result (Ok or Err) is irrelevant.
-                    let _ = roundtrip(name, &mutated);
-                }
-            }
+    /// Every catalog name, computed once — `schema_catalog()` serializes all
+    /// schemas, so the wide sweep below reads the names from here instead of
+    /// rebuilding them per case.
+    static CATALOG_NAMES: std::sync::LazyLock<Vec<&'static str>> =
+        std::sync::LazyLock::new(|| schema_catalog().into_iter().map(|(n, _)| n).collect());
+
+    proptest! {
+        // Many more cases than the default 256: the name × seed grid is ~1000
+        // combinations, so a wide sweep is needed to exercise each catalog
+        // name's mutated parse the way the original exhaustive loop did.
+        #![proptest_config(ProptestConfig::with_cases(8000))]
+
+        /// The wire boundary's load-bearing robustness property: `roundtrip` is
+        /// the parse+emit probe the Python contract test drives over untrusted
+        /// JSON. It must ALWAYS terminate as Ok/Err — never unwind — for every
+        /// catalog name against arbitrarily-corrupted bytes, or a malformed
+        /// payload could crash the binding instead of erroring cleanly. The
+        /// catalog name and seed are drawn from their fixed sets; the mutation
+        /// is generated and shrunk.
+        #[test]
+        fn roundtrip_never_panics_on_mutated_input(
+            name_idx in any::<prop::sample::Index>(),
+            seed_idx in any::<prop::sample::Index>(),
+            m in mutation(),
+        ) {
+            let name = CATALOG_NAMES[name_idx.index(CATALOG_NAMES.len())];
+            let seeds = fuzz_seeds();
+            let seed = seeds[seed_idx.index(seeds.len())];
+            let mutated = mutate(seed, &m);
+            // Must not panic; the result (Ok or Err) is irrelevant.
+            let _ = roundtrip(name, &mutated);
         }
     }
 

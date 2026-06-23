@@ -363,6 +363,7 @@ impl RemoteEmbedder {
 mod tests {
     use super::super::http::test_server::{canned_server, one_shot_server};
     use super::*;
+    use proptest::prelude::*;
 
     fn engine(base_url: String, model: Option<&str>, key: Option<&str>) -> RemoteEmbedder {
         RemoteEmbedder::new(RemoteEmbedderConfig {
@@ -1098,26 +1099,12 @@ mod tests {
 
     // ── Fuzz: panic-freedom over random response bytes on a 200 (#744). Every
     //    response is either a clean Ok or a clean Err — never a panic, even on
-    //    truncated/garbage bytes. SplitMix64 keeps it dependency-free and
-    //    deterministic. ──
+    //    truncated/garbage bytes. ──
 
-    struct SplitMix64(u64);
-    impl SplitMix64 {
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-    }
-
-    #[tokio::test]
-    async fn fuzz_random_bodies_never_panic() {
-        let mut rng = SplitMix64(0xDEAD_BEEF_CAFE);
-        // A pool of structurally-suggestive tokens so the fuzzer reaches deep
-        // parse branches, not just "invalid JSON" at the first byte.
-        let toks = [
+    /// A structurally-suggestive token so the fuzzer reaches deep parse branches,
+    /// not just "invalid JSON" at the first byte.
+    fn json_token() -> impl Strategy<Value = &'static str> {
+        prop::sample::select(vec![
             "{",
             "}",
             "[",
@@ -1137,16 +1124,36 @@ mod tests {
             "\"x\"",
             "NaN",
             " ",
-        ];
-        for _ in 0..200 {
-            let n = (rng.next_u64() % 12) as usize;
-            let mut body = String::new();
-            for _ in 0..n {
-                body.push_str(toks[(rng.next_u64() as usize) % toks.len()]);
-            }
-            let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.clone());
-            // The only contract under fuzz: no panic. Ok or Err both fine.
-            let _ = engine(url, None, None).embed(vec!["a".into()]).await;
+        ])
+    }
+
+    /// A fuzz body: either a concatenation of JSON-shaped tokens (reaching the
+    /// deep parse branches) or arbitrary bytes rendered as a string (the
+    /// first-byte-garbage case). Both ride the 200 response body.
+    fn fuzz_body() -> impl Strategy<Value = String> {
+        prop_oneof![
+            prop::collection::vec(json_token(), 0..12).prop_map(|toks| toks.concat()),
+            prop::collection::vec(any::<u8>(), 0..64)
+                .prop_map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+        ]
+    }
+
+    proptest! {
+        /// The only contract under fuzz: a malformed/garbage 200 body is a clean
+        /// Ok or Err, NEVER a panic. Hermetic — the body is parsed off a canned
+        /// loopback response, no live network. Each case drives the async embed on
+        /// a fresh current-thread runtime.
+        #[test]
+        fn fuzz_random_bodies_never_panic(body in fuzz_body()) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.clone());
+                // Ok or Err both fine; the assertion is the absence of a panic.
+                let _ = engine(url, None, None).embed(vec!["a".into()]).await;
+            });
         }
     }
 }

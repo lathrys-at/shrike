@@ -23,4 +23,7 @@ rust_test(
     name = "shrike_schemas_test",
     size = "small",
     crate = ":shrike_schemas",
+    deps = [
+        "@crates//:proptest",
+    ],
 )

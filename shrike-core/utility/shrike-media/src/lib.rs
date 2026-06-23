@@ -336,6 +336,7 @@ mod tests {
     use std::net::IpAddr;
 
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn allowlist_rejects_the_known_bad_ranges() {
@@ -451,22 +452,6 @@ mod tests {
     // EXACT behavior of the parsing/validation surface so a regression that
     // widens what we accept (or panics on a hostile string) is caught here.
 
-    /// A 15-line SplitMix64, inlined to avoid a dev-dep (copied from
-    /// shrike-store's test PRNG). Deterministic fuzz so a failure reproduces.
-    struct Rng(u64);
-    impl Rng {
-        fn new(seed: u64) -> Self {
-            Self(seed)
-        }
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-    }
-
     /// MIME guessing is case-insensitive on the extension: an attacker can't
     /// dodge or force a content type by varying case. `.PNG`/`.Png`/`.png`
     /// all map to `image/png`.
@@ -537,33 +522,40 @@ mod tests {
         assert_eq!(guess_mime(&long), None);
     }
 
-    /// Fuzz: `guess_mime` is total over arbitrary byte-ish strings — it returns
-    /// Some/None but never panics or hangs, whatever junk an untrusted filename
-    /// carries (control chars, dots, slashes, high code points).
-    #[test]
-    fn guess_mime_is_panic_free_over_fuzzed_names() {
-        let mut rng = Rng::new(0xF11E_0001);
-        let palette = [
-            'a',
-            'Z',
-            '.',
-            '/',
-            '\\',
-            ' ',
-            '\0',
-            '\u{0301}',
-            '\u{1F4A9}',
-            'p',
-            'n',
-            'g',
-        ];
-        for _ in 0..5000 {
-            let len = (rng.next_u64() % 24) as usize;
-            let s: String = (0..len)
-                .map(|_| palette[(rng.next_u64() as usize) % palette.len()])
-                .collect();
+    /// A char palette mixing letters, dots, separators, whitespace, NUL, a
+    /// combining mark, and an astral code point — the junk an untrusted filename
+    /// might carry. `png` chars are included so the sweep also lands on
+    /// near-real extensions.
+    fn fuzzed_filename() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            prop::sample::select(vec![
+                'a',
+                'Z',
+                '.',
+                '/',
+                '\\',
+                ' ',
+                '\0',
+                '\u{0301}',
+                '\u{1F4A9}',
+                'p',
+                'n',
+                'g',
+            ]),
+            0..24,
+        )
+        .prop_map(|cs| cs.into_iter().collect::<String>())
+    }
+
+    proptest! {
+        /// Fuzz: `guess_mime` is total over arbitrary byte-ish strings — it
+        /// returns Some/None but never panics or hangs, whatever junk an
+        /// untrusted filename carries (control chars, dots, slashes, high code
+        /// points).
+        #[test]
+        fn guess_mime_is_panic_free_over_fuzzed_names(s in fuzzed_filename()) {
             // Total function: any Some(&'static str) value is fine; the property
-            // is "no panic", asserted by reaching the next iteration.
+            // is "no panic", asserted by returning normally.
             let _ = guess_mime(&s);
         }
     }
@@ -706,20 +698,20 @@ mod tests {
         }
     }
 
-    /// Fuzz: `decode_media_b64` is total over arbitrary strings — every input
-    /// yields Ok or Err, never a panic, however hostile. This is the core
-    /// promise for an untrusted base64 source.
-    #[test]
-    fn b64_decode_is_panic_free_over_fuzzed_strings() {
-        let mut rng = Rng::new(0xB64_F022);
-        // A palette mixing the alphabet, padding, whitespace, and junk so the
-        // sweep hits canonical, near-miss, and garbage shapes.
+    /// A char palette mixing the base64 alphabet, padding, whitespace, and junk
+    /// so the sweep hits canonical, near-miss, and garbage shapes.
+    fn fuzzed_b64() -> impl Strategy<Value = String> {
         let palette: Vec<char> = "ABCXYZabcxyz0189+/=\n\r\t !@#*\u{00e9}".chars().collect();
-        for _ in 0..20_000 {
-            let len = (rng.next_u64() % 40) as usize;
-            let s: String = (0..len)
-                .map(|_| palette[(rng.next_u64() as usize) % palette.len()])
-                .collect();
+        prop::collection::vec(prop::sample::select(palette), 0..40)
+            .prop_map(|cs| cs.into_iter().collect::<String>())
+    }
+
+    proptest! {
+        /// Fuzz: `decode_media_b64` is total over arbitrary strings — every
+        /// input yields Ok or Err, never a panic, however hostile. This is the
+        /// core promise for an untrusted base64 source.
+        #[test]
+        fn b64_decode_is_panic_free_over_fuzzed_strings(s in fuzzed_b64()) {
             // The property is panic-freedom; Ok|Err are both acceptable.
             let _ = decode_media_b64(&s);
         }
@@ -743,28 +735,35 @@ mod tests {
         assert_eq!(media_name_from_url(""), None);
     }
 
-    /// Fuzz: the two untrusted-name reducers never panic and never emit a name
-    /// containing a path separator (the traversal invariant) over hostile input.
-    #[test]
-    fn name_reducers_never_emit_separators_over_fuzzed_input() {
-        let mut rng = Rng::new(0x5AFE_0003);
+    /// A char palette mixing letters, both separators, dots, whitespace, and a
+    /// CJK code point — the hostile shapes a `store_media` name might carry.
+    fn fuzzed_name() -> impl Strategy<Value = String> {
         let palette: Vec<char> = "ab/\\.. \tCD\u{4f60}".chars().collect();
-        for _ in 0..10_000 {
-            let len = (rng.next_u64() % 20) as usize;
-            let s: String = (0..len)
-                .map(|_| palette[(rng.next_u64() as usize) % palette.len()])
-                .collect();
+        prop::collection::vec(prop::sample::select(palette), 0..20)
+            .prop_map(|cs| cs.into_iter().collect::<String>())
+    }
+
+    proptest! {
+        /// Fuzz: the two untrusted-name reducers never panic and never emit a
+        /// name containing a path separator (the traversal invariant) over
+        /// hostile input.
+        #[test]
+        fn name_reducers_never_emit_separators_over_fuzzed_input(s in fuzzed_name()) {
             let safe = safe_media_name(&s);
-            assert!(
+            prop_assert!(
                 !safe.contains('/') && !safe.contains('\\'),
-                "safe_media_name({s:?}) leaked a separator: {safe:?}"
+                "safe_media_name({:?}) leaked a separator: {:?}",
+                s,
+                safe
             );
             // media_name_from_url only parses absolute URLs; just assert no panic
             // and, when it returns a name, no separator leaked.
             if let Some(n) = media_name_from_url(&format!("http://h/{s}")) {
-                assert!(
+                prop_assert!(
                     !n.contains('/') && !n.contains('\\'),
-                    "media_name_from_url leaked a separator for {s:?}: {n:?}"
+                    "media_name_from_url leaked a separator for {:?}: {:?}",
+                    s,
+                    n
                 );
             }
         }

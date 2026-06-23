@@ -24,4 +24,7 @@ rust_test(
     name = "shrike_image_test",
     size = "small",
     crate = ":shrike_image",
+    deps = [
+        "@crates//:proptest",
+    ],
 )

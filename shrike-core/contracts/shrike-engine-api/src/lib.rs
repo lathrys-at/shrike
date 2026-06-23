@@ -732,6 +732,7 @@ impl<E: RecognizeMedia + 'static> Recognizer for Blocking<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     struct Toy {
         batch_cap: usize,
@@ -1147,25 +1148,6 @@ mod tests {
 
     use shrike_error::ErrorKind;
 
-    /// SplitMix64 — a tiny deterministic PRNG for the generative pins below.
-    /// Inlined (no rand dep): the leaf crate carries no new dependency.
-    struct Rng(u64);
-    impl Rng {
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-        /// A finite f32 in roughly [-1e3, 1e3) — bounded so squares stay finite
-        /// and a non-zero vector's norm never overflows to inf in the property.
-        fn next_f32(&mut self) -> f32 {
-            let u = (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32; // [0, 1)
-            (u - 0.5) * 2.0e3
-        }
-    }
-
     fn norm(v: &[f32]) -> f32 {
         v.iter().map(|x| x * x).sum::<f32>().sqrt()
     }
@@ -1224,24 +1206,24 @@ mod tests {
         assert!(v.iter().all(|x| !x.is_nan()), "no NaN leaks");
     }
 
-    /// Property: ANY non-zero finite input normalizes to unit length (norm ≈ 1).
-    /// This is the contract the index relies on to use inner-product as cosine —
-    /// it must hold across the whole input space, not just the [3,4] hand case.
-    #[test]
-    fn l2_normalize_property_unit_norm_for_nonzero_finite() {
-        let mut rng = Rng(0xC0FFEE_u64);
-        for _ in 0..2000 {
-            let dim = 1 + (rng.next_u64() % 16) as usize;
-            let mut v: Vec<f32> = (0..dim).map(|_| rng.next_f32()).collect();
+    proptest! {
+        /// Property: ANY non-zero finite input normalizes to unit length (norm ≈ 1).
+        /// This is the contract the index relies on to use inner-product as cosine —
+        /// it must hold across the whole input space, not just the [3,4] hand case.
+        /// Components are bounded to [-1e3, 1e3] so squares stay finite and a
+        /// non-zero vector's norm never overflows to inf (the overflow case is
+        /// pinned separately).
+        #[test]
+        fn l2_normalize_property_unit_norm_for_nonzero_finite(
+            mut v in prop::collection::vec(-1.0e3f32..1.0e3f32, 1..=16)
+        ) {
             // Skip a vector whose squared sum underflows to exactly 0 (all tiny);
             // the documented zero-vector branch (left unchanged) owns that case.
             let pre = norm(&v);
-            if pre == 0.0 {
-                continue;
-            }
+            prop_assume!(pre != 0.0);
             l2_normalize(&mut v);
             let n = norm(&v);
-            assert!(
+            prop_assert!(
                 (n - 1.0).abs() < 1e-4,
                 "non-zero finite input must become unit; norm={n} pre={pre} v={v:?}"
             );
@@ -1441,38 +1423,46 @@ mod tests {
 
     // ── NormalizingEmbedder / NormalizingImageEmbedder ─────────────────────
 
-    /// An embedder emitting arbitrary-magnitude vectors (seeded random), to pin
-    /// that the normalizing decorator makes EVERY output unit regardless of the
-    /// inner magnitude — and preserves count and dimension.
-    struct RandomEmbedder(std::sync::Mutex<Rng>);
-    impl Embedder for RandomEmbedder {
+    /// An embedder emitting a fixed, caller-supplied set of arbitrary-magnitude
+    /// vectors — one per input text by index — to pin that the normalizing
+    /// decorator makes EVERY output unit regardless of the inner magnitude, and
+    /// preserves count and dimension. The vectors are the generated witness, so
+    /// a normalization failure shrinks to the smallest offending magnitude.
+    struct FixedEmbedder(Vec<Vec<f32>>);
+    impl Embedder for FixedEmbedder {
         fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
-            let mut rng = self.0.lock().unwrap();
-            let out: Vec<Vec<f32>> = texts
-                .iter()
-                .map(|_| (0..8).map(|_| rng.next_f32()).collect())
-                .collect();
+            let out: Vec<Vec<f32>> = self.0.iter().take(texts.len()).cloned().collect();
             Box::pin(async move { Ok(out) })
         }
     }
 
-    /// Generative: across many random non-zero inner outputs, every vector the
-    /// `NormalizingEmbedder` hands back is unit, with count and dim preserved —
-    /// the boundary guarantee the index's inner-product metric depends on.
-    #[test]
-    fn normalizing_embedder_unit_normalizes_any_magnitude() {
-        let inner =
-            Arc::new(RandomEmbedder(std::sync::Mutex::new(Rng(0xABCD)))) as Arc<dyn Embedder>;
-        let wrapped = NormalizingEmbedder(inner);
-        let rt = test_runtime();
-        let _guard = rt.enter();
-        for batch in 1..=20usize {
-            let texts: Vec<String> = (0..batch).map(|i| format!("t{i}")).collect();
+    proptest! {
+        /// Generative: across arbitrary non-zero inner magnitudes, every vector
+        /// the `NormalizingEmbedder` hands back is unit, with count and dim
+        /// preserved — the boundary guarantee the index's inner-product metric
+        /// depends on. Each component is bounded so its square stays finite and
+        /// no batch vector underflows to the zero-norm branch.
+        #[test]
+        fn normalizing_embedder_unit_normalizes_any_magnitude(
+            vectors in prop::collection::vec(
+                prop::collection::vec((-1.0e3f32..1.0e3f32).prop_filter(
+                    "nonzero so the 8-dim vector never has zero norm",
+                    |x| x.abs() > 1.0e-3,
+                ), 8..=8),
+                1..=20,
+            )
+        ) {
+            let count = vectors.len();
+            let inner = Arc::new(FixedEmbedder(vectors)) as Arc<dyn Embedder>;
+            let wrapped = NormalizingEmbedder(inner);
+            let rt = test_runtime();
+            let _guard = rt.enter();
+            let texts: Vec<String> = (0..count).map(|i| format!("t{i}")).collect();
             let out = rt.block_on(wrapped.embed(texts)).unwrap();
-            assert_eq!(out.len(), batch, "count preserved");
+            prop_assert_eq!(out.len(), count, "count preserved");
             for v in &out {
-                assert_eq!(v.len(), 8, "dim preserved");
-                assert!(
+                prop_assert_eq!(v.len(), 8, "dim preserved");
+                prop_assert!(
                     (norm(v) - 1.0).abs() < 1e-4,
                     "every output unit, got {}",
                     norm(v)
@@ -1484,7 +1474,7 @@ mod tests {
     /// Empty input through the normalizing decorator → empty output, no panic.
     #[test]
     fn normalizing_embedder_empty_input_is_empty() {
-        let inner = Arc::new(RandomEmbedder(std::sync::Mutex::new(Rng(1)))) as Arc<dyn Embedder>;
+        let inner = Arc::new(FixedEmbedder(vec![])) as Arc<dyn Embedder>;
         let wrapped = NormalizingEmbedder(inner);
         let rt = test_runtime();
         let _guard = rt.enter();

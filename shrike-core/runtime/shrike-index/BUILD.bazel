@@ -23,6 +23,9 @@ rust_test(
     name = "shrike_index_test",
     size = "small",
     crate = ":shrike_index",
+    deps = [
+        "@crates//:proptest",
+    ],
 )
 
 # The cross-binding compat check: gated on SHRIKE_USEARCH_COMPAT_DIR

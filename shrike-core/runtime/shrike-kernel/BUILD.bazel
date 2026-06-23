@@ -40,6 +40,9 @@ rust_test(
     name = "shrike_kernel_test",
     size = "medium",
     crate = ":shrike_kernel",
+    deps = [
+        "@crates//:proptest",
+    ],
 )
 
 # The degenerate single-thread proof, in its own test binary: the runtime

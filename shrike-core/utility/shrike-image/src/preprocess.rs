@@ -183,6 +183,7 @@ fn normalize_into_chw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     /// In-memory PNG of an RGB image built per pixel — no fixture files.
     fn png_bytes(w: u32, h: u32, px: impl Fn(u32, u32) -> [u8; 3]) -> Vec<u8> {
@@ -199,22 +200,6 @@ mod tests {
             crop,
             mean,
             std,
-        }
-    }
-
-    /// SplitMix64 — a tiny deterministic PRNG for the malformed-byte fuzz sweep,
-    /// so the adversarial corpus is reproducible without a dev-dep.
-    struct Rng(u64);
-    impl Rng {
-        fn new(seed: u64) -> Self {
-            Self(seed)
-        }
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
         }
     }
 
@@ -479,41 +464,66 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
     }
 
-    /// The fuzz sweep: thousands of random buffers and random truncations of a
-    /// valid fixture. The contract under hostile bytes is total — every call
-    /// returns `Ok | Err`, none panics. (A panic here unwinds the test and fails
-    /// it, which is exactly the regression we guard.)
-    #[test]
-    fn fuzz_random_and_truncated_buffers_never_panic() {
-        let c = cfg(8, 8, [0.48, 0.46, 0.41], [0.27, 0.26, 0.28]);
-        let valid = png_bytes(20, 14, |x, y| {
-            [(x * 13) as u8, (y * 11) as u8, (x + y) as u8]
-        });
-        let mut rng = Rng::new(0xDEAD_BEEF_CAFE_F00D);
+    /// One hostile-byte input shape for the fuzz sweep: either a fully random
+    /// buffer, or a truncated (and optionally bit-flipped) slice of a valid PNG
+    /// fixture — the two ways a note/media byte stream reaches the decode
+    /// boundary corrupted.
+    #[derive(Debug, Clone)]
+    enum FuzzInput {
+        /// A fully random buffer, length 0..256.
+        Random(Vec<u8>),
+        /// A truncation of the valid fixture to `cut` bytes (clamped ≥1), with
+        /// an optional `(index, xor)` byte flip to corrupt an otherwise-whole
+        /// image.
+        Truncated {
+            cut: usize,
+            flip: Option<(usize, u8)>,
+        },
+    }
 
-        for _ in 0..4000 {
-            let pick = rng.next_u64();
-            let bytes: Vec<u8> = if pick & 1 == 0 {
-                // Fully random buffer, length 0..=255.
-                let len = (rng.next_u64() % 256) as usize;
-                (0..len).map(|_| (rng.next_u64() & 0xFF) as u8).collect()
-            } else {
-                // Random truncation of the valid fixture, optionally with a
-                // trailing byte flipped to corrupt an otherwise-whole image.
-                let cut = (rng.next_u64() as usize % valid.len()).max(1);
-                let mut v = valid[..cut].to_vec();
-                if pick & 2 == 0 && !v.is_empty() {
-                    let i = rng.next_u64() as usize % v.len();
-                    v[i] ^= (rng.next_u64() & 0xFF) as u8;
+    fn fuzz_input() -> impl Strategy<Value = FuzzInput> {
+        prop_oneof![
+            prop::collection::vec(any::<u8>(), 0..256).prop_map(FuzzInput::Random),
+            (
+                1usize..2000,
+                prop::option::of((any::<usize>(), any::<u8>()))
+            )
+                .prop_map(|(cut, flip)| FuzzInput::Truncated { cut, flip }),
+        ]
+    }
+
+    proptest! {
+        /// The fuzz sweep: random buffers and random truncations of a valid
+        /// fixture. The contract under hostile bytes is total — every call
+        /// returns `Ok | Err`, none panics — and any Ok is a bounded full-target
+        /// plane with finite values. (A panic here unwinds the test and fails
+        /// it, which is exactly the regression we guard.) proptest shrinks any
+        /// panic-inducing buffer to a minimal witness.
+        #[test]
+        fn fuzz_random_and_truncated_buffers_never_panic(input in fuzz_input()) {
+            let c = cfg(8, 8, [0.48, 0.46, 0.41], [0.27, 0.26, 0.28]);
+            let valid = png_bytes(20, 14, |x, y| {
+                [(x * 13) as u8, (y * 11) as u8, (x + y) as u8]
+            });
+            let bytes: Vec<u8> = match input {
+                FuzzInput::Random(v) => v,
+                FuzzInput::Truncated { cut, flip } => {
+                    let cut = (cut % valid.len()).max(1);
+                    let mut v = valid[..cut].to_vec();
+                    if let Some((i, xor)) = flip {
+                        if !v.is_empty() {
+                            let i = i % v.len();
+                            v[i] ^= xor;
+                        }
+                    }
+                    v
                 }
-                v
             };
             // The only assertion is "did not panic"; an Ok result is acceptable
             // (a corrupted-but-decodable image is fine — it's bounded output).
-            let r = preprocess_to_chw(&bytes, &c);
-            if let Ok(v) = r {
-                assert_eq!(v.len(), 3 * 8 * 8);
-                assert!(v.iter().all(|f| f.is_finite()));
+            if let Ok(v) = preprocess_to_chw(&bytes, &c) {
+                prop_assert_eq!(v.len(), 3 * 8 * 8);
+                prop_assert!(v.iter().all(|f| f.is_finite()));
             }
         }
     }

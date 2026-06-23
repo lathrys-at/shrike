@@ -28,6 +28,9 @@ rust_test(
     name = "shrike_network_test",
     size = "small",
     crate = ":shrike_network",
+    deps = [
+        "@crates//:proptest",
+    ],
 )
 
 # Live-socket SSRF integration tests for the async client: the IP-pin

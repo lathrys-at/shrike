@@ -5053,29 +5053,8 @@ mod adversarial_tests {
     //! says WHY the lexical-search / drift-watermark contracts rely on it.
 
     use super::*;
+    use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet};
-
-    /// SplitMix64 — a tiny deterministic, seed-reproducible generator (inlined
-    /// from `shrike-store`'s contract tests, so the property lane needs no
-    /// `rand`/`proptest` dep). A failure reproduces from its seed; widen the
-    /// loop counts to search harder.
-    struct Rng(u64);
-    impl Rng {
-        fn new(seed: u64) -> Self {
-            Self(seed)
-        }
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-        /// A value in `0..n` (n > 0).
-        fn below(&mut self, n: u64) -> u64 {
-            self.next_u64() % n
-        }
-    }
 
     fn store() -> (DerivedEngine, std::path::PathBuf) {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -5091,17 +5070,39 @@ mod adversarial_tests {
 
     // ── 1. build/ingest round-trip property (generative) ──────────────────────
 
-    #[test]
-    fn build_round_trip_reads_back_exactly_what_was_written() {
-        // PROPERTY: after a build, texts_for_source / refs_for_source /
-        // texts_for_source_for_notes return EXACTLY the non-blank rows written
-        // for that source (set-equal), scoped correctly, and count() equals the
-        // total non-blank rows across sources. This is the bedrock the lexical
-        // signals stand on: a row written but not read back is a note silently
-        // invisible to search; a row read back but never written is a phantom hit.
-        // Generated over random (note_id, source, ref, text) rows, several seeds.
-        for seed in [1u64, 7, 42, 1234, 0xDEAD_BEEF] {
-            let mut rng = Rng::new(seed);
+    /// One generated build row: a note id from a small space (so notes recur),
+    /// a source, a ref from a small space (so `(note,source,ref)` keys collide),
+    /// and text that is either blank (skipped by the insert) or substantive.
+    fn build_row_strategy() -> impl Strategy<Value = (i64, String, String, String)> {
+        let source = prop::sample::select(vec!["field", "ocr", "asr"]);
+        let reference = (0_u32..5).prop_map(|r| format!("r{r}"));
+        // A mix of blank (skipped) and substantive text, weighted ~1/5 blank to
+        // match the original generator.
+        let text = prop_oneof![
+            1 => Just("   ".to_string()),
+            4 => (0_u32..1000, 0_u32..50).prop_map(|(a, b)| format!("body {a} term{b}")),
+        ];
+        (1_i64..=12, source, reference, text).prop_map(|(note_id, source, reference, text)| {
+            (note_id, source.to_string(), reference, text)
+        })
+    }
+
+    proptest! {
+        // Each case spins up a real on-disk FTS5 store and runs a full build, so
+        // cap the cases below the default to keep the I/O bounded while still
+        // searching far wider than a fixed seed set.
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// PROPERTY: after a build, texts_for_source / refs_for_source /
+        /// texts_for_source_for_notes return EXACTLY the non-blank rows written
+        /// for that source (set-equal), scoped correctly, and count() equals the
+        /// total non-blank rows across sources. This is the bedrock the lexical
+        /// signals stand on: a row written but not read back is a note silently
+        /// invisible to search; a row read back but never written is a phantom hit.
+        #[test]
+        fn build_round_trip_reads_back_exactly_what_was_written(
+            generated in prop::collection::vec(build_row_strategy(), 30..70),
+        ) {
             let (e, dir) = store();
             let sources = ["field", "ocr", "asr"];
             // Build the authoritative expectation as we generate. The store skips
@@ -5112,20 +5113,16 @@ mod adversarial_tests {
             // Distinct (note_id, source, ref) keys — a build snapshot has no
             // intra-build duplicate keys (the collection render is per field/ref).
             let mut used: BTreeSet<(i64, String, String)> = BTreeSet::new();
-            let n = 30 + rng.below(40) as usize;
-            for _ in 0..n {
-                let note_id = rng.below(12) as i64 + 1;
-                let source = sources[rng.below(sources.len() as u64) as usize];
-                let reference = format!("r{}", rng.below(5));
-                if !used.insert((note_id, source.to_string(), reference.clone())) {
+            for (note_id, source, reference, text) in generated {
+                if !used.insert((note_id, source.clone(), reference.clone())) {
                     continue; // skip a duplicate key for this build snapshot
                 }
-                // A mix of blank (skipped) and substantive text.
-                let text = if rng.below(5) == 0 {
-                    "   ".to_string() // blank → skipped by the insert
-                } else {
-                    format!("body {} term{}", rng.below(1000), rng.below(50))
-                };
+                // The source is one of the three literals the strategy draws, so
+                // resolve it back to a 'static str for the oracle's key.
+                let source: &'static str = sources
+                    .into_iter()
+                    .find(|s| *s == source)
+                    .expect("strategy draws only known sources");
                 rows.push((note_id, source.to_string(), reference.clone(), text.clone()));
                 if !text.trim().is_empty() {
                     expected.entry(source).or_default().insert((
@@ -5140,23 +5137,20 @@ mod adversarial_tests {
 
             // count() == total non-blank rows across every source.
             let total: i64 = expected.values().map(|s| s.len() as i64).sum();
-            assert_eq!(e.count().unwrap(), total, "seed {seed}: count mismatch");
+            prop_assert_eq!(e.count().unwrap(), total, "count mismatch");
 
             for source in sources {
                 let want = expected.get(source).cloned().unwrap_or_default();
                 // texts_for_source is set-equal to the written non-blank rows.
                 let got_texts: BTreeSet<(i64, String, String)> =
                     e.texts_for_source(source).unwrap().into_iter().collect();
-                assert_eq!(got_texts, want, "seed {seed}: texts_for_source({source})");
+                prop_assert_eq!(got_texts, want.clone(), "texts_for_source({})", source);
                 // refs_for_source is the (note_id, ref) projection of the same set.
                 let got_refs: BTreeSet<(i64, String)> =
                     e.refs_for_source(source).unwrap().into_iter().collect();
                 let want_refs: BTreeSet<(i64, String)> =
                     want.iter().map(|(n, r, _)| (*n, r.clone())).collect();
-                assert_eq!(
-                    got_refs, want_refs,
-                    "seed {seed}: refs_for_source({source})"
-                );
+                prop_assert_eq!(got_refs, want_refs, "refs_for_source({})", source);
 
                 // texts_for_source_for_notes(source, ids) == the in-scope slice,
                 // for an arbitrary id subset — the per-upsert scoped read must equal
@@ -5172,13 +5166,15 @@ mod adversarial_tests {
                     .filter(|(n, _, _)| scope.contains(n))
                     .cloned()
                     .collect();
-                assert_eq!(
-                    got_scoped, want_scoped,
-                    "seed {seed}: texts_for_source_for_notes({source}) scoped slice"
+                prop_assert_eq!(
+                    got_scoped,
+                    want_scoped,
+                    "texts_for_source_for_notes({}) scoped slice",
+                    source
                 );
             }
             // An empty note-id scope is always empty, never the full set.
-            assert!(e
+            prop_assert!(e
                 .texts_for_source_for_notes("field", &[])
                 .unwrap()
                 .is_empty());
@@ -5464,14 +5460,9 @@ mod adversarial_tests {
 
     // ── 5. batch == loop of singular (generative) ─────────────────────────────
 
-    #[test]
-    fn batch_equals_loop_of_singular_generative() {
-        // INVARIANT: the batch override is a perf optimization and MUST equal
-        // mapping the singular method, for ANY mix of queries, scopes, and
-        // excludes. The inline parity test fixes its query set; this generates
-        // random query batches and random scopes/excludes over a fixed corpus and
-        // asserts the override never diverges from the documented default.
-        let (e, dir) = store();
+    /// The fixed corpus the batch==loop parity property runs against: 20 notes
+    /// with two shared terms each, half also carrying a hidden `vlm` source.
+    fn batch_parity_rows() -> Vec<(i64, String, String, String)> {
         let words = [
             "mitochondria",
             "powerhouse",
@@ -5495,37 +5486,71 @@ mod adversarial_tests {
                 rows.push((n, "vlm".into(), "img.png".into(), format!("{a} described")));
             }
         }
-        build_snapshot_live(&e, &rows, 1).unwrap();
+        rows
+    }
 
-        let mut rng = Rng::new(0xA5A5_1234);
-        // A pool of query strings: literal hits, typos, sub-trigram, no-match.
-        let pool = [
-            "mitochondria",
-            "mitochondira", // transposition typo
-            "powerhuse",    // deletion typo
-            "ribosome",
-            "mi",         // sub-trigram → None / empty
-            "zzznomatch", // no match
-            "chloroplast",
-            "cell",
-        ];
-        for _ in 0..40 {
-            // Build a random query batch (1..=5 queries).
-            let k = 1 + rng.below(5) as usize;
-            let queries: Vec<&str> = (0..k)
-                .map(|_| pool[rng.below(pool.len() as u64) as usize])
-                .collect();
-            // A random scope: None, an explicit subset, or empty.
-            let subset: Vec<i64> = (1..=20).filter(|_| rng.below(2) == 0).collect();
-            let empty: [i64; 0] = [];
-            let scope: Option<&[i64]> = match rng.below(3) {
-                0 => None,
-                1 => Some(&subset),
-                _ => Some(&empty),
+    /// A query pool: literal hits, typos, a sub-trigram, and a no-match.
+    const BATCH_PARITY_POOL: [&str; 8] = [
+        "mitochondria",
+        "mitochondira", // transposition typo
+        "powerhuse",    // deletion typo
+        "ribosome",
+        "mi",         // sub-trigram → None / empty
+        "zzznomatch", // no match
+        "chloroplast",
+        "cell",
+    ];
+
+    /// How a generated case scopes the search: whole index, a subset of note
+    /// ids (a per-id keep mask over 1..=20), or the empty scope.
+    #[derive(Debug, Clone)]
+    enum ScopeChoice {
+        None,
+        Subset(Vec<i64>),
+        Empty,
+    }
+
+    fn scope_choice_strategy() -> impl Strategy<Value = ScopeChoice> {
+        prop_oneof![
+            Just(ScopeChoice::None),
+            prop::collection::vec(prop::bool::ANY, 20).prop_map(|keep| {
+                ScopeChoice::Subset((1..=20i64).filter(|n| keep[(*n - 1) as usize]).collect())
+            }),
+            Just(ScopeChoice::Empty),
+        ]
+    }
+
+    proptest! {
+        // One real on-disk store per case; cap below the default to bound the I/O.
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// INVARIANT: the batch override is a perf optimization and MUST equal
+        /// mapping the singular method, for ANY mix of queries, scopes, and
+        /// excludes. The inline parity test fixes its query set; this generates
+        /// random query batches and random scopes/excludes over a fixed corpus and
+        /// asserts the override never diverges from the documented default.
+        #[test]
+        fn batch_equals_loop_of_singular_generative(
+            query_idxs in prop::collection::vec(0_usize..BATCH_PARITY_POOL.len(), 1..=5),
+            scope_choice in scope_choice_strategy(),
+            exclude_vlm in prop::bool::ANY,
+        ) {
+            let (e, dir) = store();
+            build_snapshot_live(&e, &batch_parity_rows(), 1).unwrap();
+
+            let queries: Vec<&str> = query_idxs.iter().map(|i| BATCH_PARITY_POOL[*i]).collect();
+            let subset = match &scope_choice {
+                ScopeChoice::Subset(ids) => ids.clone(),
+                _ => Vec::new(),
             };
-            // A random exclude.
+            let empty: [i64; 0] = [];
+            let scope: Option<&[i64]> = match &scope_choice {
+                ScopeChoice::None => None,
+                ScopeChoice::Subset(_) => Some(&subset),
+                ScopeChoice::Empty => Some(&empty),
+            };
             let excl_vlm: [&str; 1] = ["vlm"];
-            let exclude: &[&str] = if rng.below(2) == 0 { &[] } else { &excl_vlm };
+            let exclude: &[&str] = if exclude_vlm { &excl_vlm } else { &[] };
             let limit = 10i64;
 
             let want_sub: Vec<Option<Vec<LexicalRow>>> = queries
@@ -5535,9 +5560,13 @@ mod adversarial_tests {
             let got_sub = e
                 .search_substring_batch(&queries, limit, scope, exclude)
                 .unwrap();
-            assert_eq!(
-                got_sub, want_sub,
-                "substring batch != loop (queries={queries:?} scope={scope:?} exclude={exclude:?})"
+            prop_assert_eq!(
+                got_sub,
+                want_sub,
+                "substring batch != loop (queries={:?} scope={:?} exclude={:?})",
+                queries,
+                scope,
+                exclude
             );
 
             let want_fz: Vec<Vec<LexicalRow>> = queries
@@ -5547,12 +5576,16 @@ mod adversarial_tests {
             let got_fz = e
                 .search_fuzzy_batch(&queries, limit, scope, exclude)
                 .unwrap();
-            assert_eq!(
-                got_fz, want_fz,
-                "fuzzy batch != loop (queries={queries:?} scope={scope:?} exclude={exclude:?})"
+            prop_assert_eq!(
+                got_fz,
+                want_fz,
+                "fuzzy batch != loop (queries={:?} scope={:?} exclude={:?})",
+                queries,
+                scope,
+                exclude
             );
+            std::fs::remove_dir_all(dir).ok();
         }
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

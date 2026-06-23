@@ -280,6 +280,7 @@ impl From<std::io::Error> for NativeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn kinds_render_stably() {
@@ -364,21 +365,6 @@ mod tests {
     }
 
     // --- Adversarial additions ---------------------------------------------
-    //
-    // Inline SplitMix64 (copied from shrike-store) for generative cases. No deps.
-    struct Rng(u64);
-    impl Rng {
-        fn new(seed: u64) -> Self {
-            Self(seed)
-        }
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-    }
 
     /// Every variant; the count is pinned so adding/removing a kind forces this
     /// test (and the FFI `to_py_err` mapping it stands in for) to be revisited.
@@ -477,30 +463,28 @@ mod tests {
         }
     }
 
-    /// Generative: a constructed error's `message` equals the input and `kind`
-    /// is whatever was requested, across random kind/message combinations. Pins
-    /// "constructor never reinterprets its inputs" beyond the curated cases.
-    #[test]
-    fn constructor_inputs_round_trip_generative() {
-        let mut rng = Rng::new(0xDEAD_BEEF);
-        for _ in 0..256 {
-            let kind = ALL_KINDS[(rng.next_u64() % 4) as usize];
-            // Build a pseudo-random message including some control/unicode bytes.
-            let len = (rng.next_u64() % 40) as usize;
-            // Includes control chars, NULs, and high-plane unicode — message must
-            // survive all of it unchanged.
-            let msg: String = (0..len)
-                .map(|_| char::from_u32((rng.next_u64() % 0x110000) as u32).unwrap_or('\u{fffd}'))
-                .collect();
+    proptest! {
+        /// A constructed error's `message` equals the input and `kind` is whatever
+        /// was requested, across random kind/message combinations — `any::<char>()`
+        /// spans control chars, NUL, and high-plane unicode, all of which the
+        /// message must survive unchanged. Pins "constructor never reinterprets its
+        /// inputs" beyond the curated cases.
+        #[test]
+        fn constructor_inputs_round_trip_generative(
+            kind_idx in 0usize..ALL_KINDS.len(),
+            msg in prop::collection::vec(any::<char>(), 0..40)
+                .prop_map(|cs| cs.into_iter().collect::<String>()),
+        ) {
+            let kind = ALL_KINDS[kind_idx];
             let e = match kind {
                 ErrorKind::InvalidInput => NativeError::invalid_input(msg.clone()),
                 ErrorKind::Unavailable => NativeError::unavailable(msg.clone()),
                 ErrorKind::Busy => NativeError::busy(msg.clone()),
                 ErrorKind::Internal => NativeError::internal(msg.clone()),
             };
-            assert_eq!(e.kind(), kind);
-            assert_eq!(e.message, msg);
-            assert_eq!(e.to_string(), format!("{}: {}", kind.as_str(), msg));
+            prop_assert_eq!(e.kind(), kind);
+            prop_assert_eq!(&e.message, &msg);
+            prop_assert_eq!(e.to_string(), format!("{}: {}", kind.as_str(), msg));
         }
     }
 

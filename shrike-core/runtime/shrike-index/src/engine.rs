@@ -836,6 +836,7 @@ impl shrike_store::VectorIndex for MultiModalIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn unit(seed: u64, ndim: usize) -> Vec<f32> {
         let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(99);
@@ -1071,41 +1072,19 @@ mod tests {
         assert_eq!(*count, 40.0);
     }
 
-    // ---- Adversarial: a deterministic generative Rng (SplitMix64) ----------
-    //
-    // Copied from `shrike-store`'s test Rng so the generative round-trip tests
-    // ride the existing `rust_test` target without an external `rand`/`proptest`
-    // dependency (the crate forbids new deps; SIMD-less usearch core only). A
-    // failure is reproducible from its fixed seed.
-
-    struct Rng(u64);
-    impl Rng {
-        fn new(seed: u64) -> Self {
-            Self(seed)
-        }
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-    }
-
-    /// A deterministic unit vector drawn from the generative Rng (distinct from
-    /// the seed-indexed `unit` helper — this one consumes the shared stream so a
-    /// property loop draws fresh vectors per key).
-    fn rng_unit(rng: &mut Rng, ndim: usize) -> Vec<f32> {
-        let mut v: Vec<f32> = (0..ndim)
-            .map(|_| (rng.next_u64() >> 40) as f32 / (1u64 << 24) as f32 - 0.5)
-            .collect();
-        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        // A zero vector can't be unit-normalized; nudge it (vanishingly rare).
-        let norm = if norm > 0.0 { norm } else { 1.0 };
-        for x in &mut v {
-            *x /= norm;
-        }
-        v
+    /// A unit-normalized `ndim`-vector strategy: draws each component from
+    /// `[-1, 1)` and normalizes. usearch's IP/cosine metrics need unit vectors;
+    /// a generated raw `Vec<f32>` would otherwise have an arbitrary magnitude.
+    fn unit_vec(ndim: usize) -> impl Strategy<Value = Vec<f32>> {
+        prop::collection::vec(-1.0f32..1.0, ndim).prop_map(|mut v| {
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            // A zero vector can't be unit-normalized; nudge it (vanishingly rare).
+            let norm = if norm > 0.0 { norm } else { 1.0 };
+            for x in &mut v {
+                *x /= norm;
+            }
+            v
+        })
     }
 
     fn tmp(tag: &str) -> std::path::PathBuf {
@@ -1561,122 +1540,122 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn save_then_restore_round_trips_get_and_keys_for_every_key() {
-        // The reconcile-rebuild path saves then restores; size/keys/get must be
-        // bit-stable across the round trip (get returns the stored vectors, so
-        // an exact compare pins the on-disk fidelity for the dedup/centroid
-        // reads that follow a restore).
-        let dir = tmp("rt-get");
-        let dirs = dir.to_str().unwrap();
-        let mut rng = Rng::new(0xA5A5_1234);
-        let ndim = 6usize;
-        let keys: Vec<i64> = (1..=15).collect();
-        let tvecs: Vec<Vec<f32>> = keys.iter().map(|_| rng_unit(&mut rng, ndim)).collect();
-        let ivecs: Vec<Vec<f32>> = keys.iter().map(|_| rng_unit(&mut rng, ndim)).collect();
+    proptest! {
+        /// The reconcile-rebuild path saves then restores; size/keys/get must be
+        /// bit-stable across the round trip (get returns the stored vectors, so
+        /// an exact compare pins the on-disk fidelity for the dedup/centroid
+        /// reads that follow a restore).
+        #[test]
+        fn save_then_restore_round_trips_get_and_keys_for_every_key(
+            tvecs in prop::collection::vec(unit_vec(6), 15),
+            ivecs in prop::collection::vec(unit_vec(6), 15),
+        ) {
+            let dir = tmp("rt-get");
+            let dirs = dir.to_str().unwrap();
+            let keys: Vec<i64> = (1..=15).collect();
 
-        let e = engine();
-        e.add("text", &keys, &tvecs).unwrap();
-        e.add("image", &keys, &ivecs).unwrap();
-        let before_text: Vec<Vec<Vec<f32>>> = keys.iter().map(|k| e.get(*k).unwrap()).collect();
-        e.save(dirs).unwrap();
+            let e = engine();
+            e.add("text", &keys, &tvecs).unwrap();
+            e.add("image", &keys, &ivecs).unwrap();
+            let before_text: Vec<Vec<Vec<f32>>> = keys.iter().map(|k| e.get(*k).unwrap()).collect();
+            e.save(dirs).unwrap();
 
-        let fresh = engine();
-        assert!(fresh.restore(dirs, Some(&keys)));
-        assert_eq!(fresh.size(), e.size());
-        assert_eq!(fresh.keys(), e.keys());
-        for (k, before) in keys.iter().zip(&before_text) {
-            assert_eq!(
-                fresh.get(*k).as_ref(),
-                Some(before),
-                "text get drift on key {k}"
-            );
-            assert!(fresh.modality_contains("image", *k));
-        }
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    // ---- generative round-trip property -----------------------------------
-
-    #[test]
-    fn property_add_get_contains_round_trip_over_random_keys() {
-        // Over a deterministic random key/vector set: every added key is
-        // contained, its text get() returns exactly the stored vector, and a
-        // modality_get for image likewise — the invariant the whole read surface
-        // (dedup, centroid, calibration) relies on.
-        let mut rng = Rng::new(0xDEAD_C0DE);
-        let ndim = 5usize;
-        let e = engine();
-        // Distinct keys (a set) so each holds exactly one vector.
-        let mut keys: Vec<i64> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        while keys.len() < 40 {
-            let k = (rng.next_u64() % 10_000) as i64;
-            if seen.insert(k) {
-                keys.push(k);
+            let fresh = engine();
+            prop_assert!(fresh.restore(dirs, Some(&keys)));
+            prop_assert_eq!(fresh.size(), e.size());
+            prop_assert_eq!(fresh.keys(), e.keys());
+            for (k, before) in keys.iter().zip(&before_text) {
+                let got = fresh.get(*k);
+                prop_assert_eq!(got.as_ref(), Some(before), "text get drift on key {}", k);
+                prop_assert!(fresh.modality_contains("image", *k));
             }
+            std::fs::remove_dir_all(&dir).ok();
         }
-        let tvecs: Vec<Vec<f32>> = keys.iter().map(|_| rng_unit(&mut rng, ndim)).collect();
-        let ivecs: Vec<Vec<f32>> = keys.iter().map(|_| rng_unit(&mut rng, ndim)).collect();
-        e.add("text", &keys, &tvecs).unwrap();
-        e.add("image", &keys, &ivecs).unwrap();
 
-        // size() sums every sub-index (text + image), pinned by
-        // `add_remove_contains_keys`.
-        assert_eq!(e.size(), keys.len() * 2);
-        for (i, k) in keys.iter().enumerate() {
-            assert!(e.contains(*k), "missing key {k}");
-            assert_eq!(e.get(*k), Some(vec![tvecs[i].clone()]), "text get on {k}");
-            assert_eq!(
-                e.modality_get("image", *k),
-                Some(vec![ivecs[i].clone()]),
-                "image get on {k}"
-            );
-        }
-        // get on an absent key is None, never a panic.
-        let absent = (0..i64::MAX).find(|k| !seen.contains(k)).unwrap();
-        assert_eq!(e.get(absent), None);
-        assert!(!e.contains(absent));
-    }
+        // ---- generative round-trip property ---------------------------------
 
-    #[test]
-    fn property_remove_drops_all_modalities_and_reports_text_count() {
-        // Remove a random subset; every removed key vanishes from BOTH
-        // modalities, the survivors stay, and the reported count equals the
-        // number of those keys that had a text vector (here all do — one text
-        // vector each).
-        let mut rng = Rng::new(0x000F_F1CE);
-        let ndim = 4usize;
-        let e = engine();
-        let keys: Vec<i64> = (1..=50).collect();
-        let tvecs: Vec<Vec<f32>> = keys.iter().map(|_| rng_unit(&mut rng, ndim)).collect();
-        let ivecs: Vec<Vec<f32>> = keys.iter().map(|_| rng_unit(&mut rng, ndim)).collect();
-        e.add("text", &keys, &tvecs).unwrap();
-        e.add("image", &keys, &ivecs).unwrap();
+        /// Over a generated distinct-key/vector set: every added key is
+        /// contained, its text get() returns exactly the stored vector, and a
+        /// modality_get for image likewise — the invariant the whole read surface
+        /// (dedup, centroid, calibration) relies on.
+        #[test]
+        fn property_add_get_contains_round_trip_over_random_keys(
+            // A set of 1..=40 distinct keys, each holding exactly one vector.
+            keys in prop::collection::hash_set(0i64..10_000, 1..=40),
+        ) {
+            let ndim = 5usize;
+            let keys: Vec<i64> = keys.into_iter().collect();
+            // One unit vector per key, drawn deterministically from each key so
+            // the per-key get() compare below has an exact expected value.
+            let tvecs: Vec<Vec<f32>> = keys.iter().map(|k| unit(*k as u64, ndim)).collect();
+            let ivecs: Vec<Vec<f32>> = keys.iter().map(|k| unit(*k as u64 + 7919, ndim)).collect();
+            let e = engine();
+            e.add("text", &keys, &tvecs).unwrap();
+            e.add("image", &keys, &ivecs).unwrap();
 
-        let to_remove: Vec<i64> = keys
-            .iter()
-            .copied()
-            .filter(|_| rng.next_u64().is_multiple_of(2))
-            .collect();
-        let expected = to_remove.len();
-        assert_eq!(e.remove(&to_remove).unwrap(), expected);
-        for k in &to_remove {
-            assert!(!e.contains(*k), "removed key {k} still in text");
-            assert!(
-                !e.modality_contains("image", *k),
-                "removed key {k} still in image"
-            );
+            // size() sums every sub-index (text + image), pinned by
+            // `add_remove_contains_keys`.
+            prop_assert_eq!(e.size(), keys.len() * 2);
+            for (i, k) in keys.iter().enumerate() {
+                prop_assert!(e.contains(*k), "missing key {}", k);
+                prop_assert_eq!(e.get(*k), Some(vec![tvecs[i].clone()]), "text get on {}", k);
+                prop_assert_eq!(
+                    e.modality_get("image", *k),
+                    Some(vec![ivecs[i].clone()]),
+                    "image get on {}",
+                    k
+                );
+            }
+            // get on an absent key is None, never a panic.
+            let present: std::collections::HashSet<i64> = keys.iter().copied().collect();
+            let absent = (0..i64::MAX).find(|k| !present.contains(k)).unwrap();
+            prop_assert_eq!(e.get(absent), None);
+            prop_assert!(!e.contains(absent));
         }
-        for k in keys.iter().filter(|k| !to_remove.contains(k)) {
-            assert!(e.contains(*k), "survivor key {k} dropped");
-            assert!(
-                e.modality_contains("image", *k),
-                "survivor image {k} dropped"
-            );
+
+        /// Remove a generated subset; every removed key vanishes from BOTH
+        /// modalities, the survivors stay, and the reported count equals the
+        /// number of those keys that had a text vector (here all do — one text
+        /// vector each). The mask picks each of keys 1..=50 in or out.
+        #[test]
+        fn property_remove_drops_all_modalities_and_reports_text_count(
+            mask in prop::collection::vec(any::<bool>(), 50),
+        ) {
+            let ndim = 4usize;
+            let e = engine();
+            let keys: Vec<i64> = (1..=50).collect();
+            let tvecs: Vec<Vec<f32>> = keys.iter().map(|k| unit(*k as u64, ndim)).collect();
+            let ivecs: Vec<Vec<f32>> = keys.iter().map(|k| unit(*k as u64 + 7919, ndim)).collect();
+            e.add("text", &keys, &tvecs).unwrap();
+            e.add("image", &keys, &ivecs).unwrap();
+
+            let to_remove: Vec<i64> = keys
+                .iter()
+                .copied()
+                .zip(&mask)
+                .filter_map(|(k, &m)| m.then_some(k))
+                .collect();
+            let expected = to_remove.len();
+            prop_assert_eq!(e.remove(&to_remove).unwrap(), expected);
+            for k in &to_remove {
+                prop_assert!(!e.contains(*k), "removed key {} still in text", k);
+                prop_assert!(
+                    !e.modality_contains("image", *k),
+                    "removed key {} still in image",
+                    k
+                );
+            }
+            for k in keys.iter().filter(|k| !to_remove.contains(k)) {
+                prop_assert!(e.contains(*k), "survivor key {} dropped", k);
+                prop_assert!(
+                    e.modality_contains("image", *k),
+                    "survivor image {} dropped",
+                    k
+                );
+            }
+            // size() sums both modalities; the survivors keep one text + one image
+            // vector each.
+            prop_assert_eq!(e.size(), (keys.len() - expected) * 2);
         }
-        // size() sums both modalities; the survivors keep one text + one image
-        // vector each.
-        assert_eq!(e.size(), (keys.len() - expected) * 2);
     }
 }

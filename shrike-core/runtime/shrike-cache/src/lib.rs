@@ -321,6 +321,7 @@ fn lexical_absolute(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn namespace_is_stable_and_path_distinguishing() {
@@ -614,40 +615,23 @@ mod tests {
     // pins one such invariant.
     // ===================================================================
 
-    /// Inlined SplitMix64 for generative tests (no external dep). Copied from
-    /// `shrike-store`'s test Rng.
-    struct Rng(u64);
-    impl Rng {
-        fn new(seed: u64) -> Self {
-            Self(seed)
-        }
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-    }
-
-    /// Build a pseudo-random *absolute* path string. Absolute so the result is
-    /// cwd-independent: the only filesystem-touching step is `canonicalize`,
-    /// which fails for these never-created paths, so derivation is a pure
-    /// function of the string (lexical absolutize) and the test is hermetic.
-    fn random_abs_path(rng: &mut Rng) -> String {
-        let alphabet: &[u8] = b"abcdef0123456789-_.XY";
-        let depth = (rng.next_u64() % 5) as usize + 1;
-        let mut s = String::from("/adv");
-        for _ in 0..depth {
-            s.push('/');
-            let seg_len = (rng.next_u64() % 8) as usize + 1;
-            for _ in 0..seg_len {
-                let idx = (rng.next_u64() as usize) % alphabet.len();
-                s.push(alphabet[idx] as char);
+    /// A strategy for pseudo-random *absolute* path strings. Absolute so the
+    /// result is cwd-independent: the only filesystem-touching step is
+    /// `canonicalize`, which fails for these never-created paths, so derivation
+    /// is a pure function of the string (lexical absolutize) and the test is
+    /// hermetic. Segments draw from an alphabet that includes `.` and `-`, so
+    /// the corpus exercises dot-segment and separator-adjacent shapes.
+    fn abs_path() -> impl Strategy<Value = String> {
+        let segment = "[abcdef0123456789\\-_.XY]{1,8}";
+        prop::collection::vec(segment, 1..=5).prop_map(|segs| {
+            let mut s = String::from("/adv");
+            for seg in segs {
+                s.push('/');
+                s.push_str(&seg);
             }
-        }
-        s.push_str("/c.anki2");
-        s
+            s.push_str("/c.anki2");
+            s
+        })
     }
 
     // -- 2. Determinism / stability pin -------------------------------------
@@ -880,73 +864,80 @@ mod tests {
         }
     }
 
-    /// The namespace digest, on its own, can never contain a path separator or
-    /// `..` regardless of input — the hash output alphabet is hex. This is the
-    /// load-bearing reason `index_dir`/`derived_db_path` cannot be steered out
-    /// of the namespace by crafting the collection path. Fuzz it to be sure no
-    /// input ever produces a non-hex namespace.
-    #[test]
-    fn namespace_alphabet_is_hex_only_under_fuzz() {
-        let mut rng = Rng::new(0xCACE_F00D_1234_5678);
-        for _ in 0..5000 {
-            // Mix structured random paths with raw random byte-ish strings.
-            let p = if rng.next_u64() & 1 == 0 {
-                random_abs_path(&mut rng)
-            } else {
-                // Build a string from arbitrary (but valid UTF-8) chars,
-                // including separators and dots, to stress the alphabet.
-                let len = (rng.next_u64() % 40) as usize;
-                let pool: &[char] = &['/', '.', '.', '\\', ':', 'a', 'Z', '9', '-', ' ', '\u{e9}'];
-                let mut s = String::new();
-                for _ in 0..len {
-                    let i = (rng.next_u64() as usize) % pool.len();
-                    s.push(pool[i]);
-                }
-                s
-            };
+    /// Mix structured random paths with raw byte-ish strings built from a pool
+    /// of separators, dots, and assorted chars, to stress the namespace alphabet
+    /// with arbitrary (but valid UTF-8) input.
+    fn alphabet_stress_path() -> impl Strategy<Value = String> {
+        prop_oneof![
+            abs_path(),
+            prop::collection::vec(
+                prop::sample::select(vec!['/', '.', '\\', ':', 'a', 'Z', '9', '-', ' ', '\u{e9}',]),
+                0..40,
+            )
+            .prop_map(|cs| cs.into_iter().collect::<String>()),
+        ]
+    }
+
+    proptest! {
+        /// The namespace digest, on its own, can never contain a path separator
+        /// or `..` regardless of input — the hash output alphabet is hex. This
+        /// is the load-bearing reason `index_dir`/`derived_db_path` cannot be
+        /// steered out of the namespace by crafting the collection path. Fuzz it
+        /// to be sure no input ever produces a non-hex namespace.
+        #[test]
+        fn namespace_alphabet_is_hex_only_under_fuzz(p in alphabet_stress_path()) {
             let ns = index_namespace(&p);
-            assert_eq!(ns.len(), 32);
-            assert!(
+            prop_assert_eq!(ns.len(), 32);
+            prop_assert!(
                 ns.chars().all(|c| c.is_ascii_hexdigit()),
-                "non-hex namespace {ns:?} for input {p:?}"
+                "non-hex namespace {:?} for input {:?}",
+                ns,
+                p
             );
         }
     }
 
     // -- 6. Generative injectivity + containment fuzz -----------------------
 
-    /// Feed thousands of distinct random absolute paths through the full
-    /// derivation. Asserts, together: (a) panic-freedom, (b) injectivity —
-    /// distinct lexical identities map to distinct namespaces (no collision
-    /// across the corpus), and (c) containment — every produced index/derived
-    /// path nests under the cache root. This is the broad net for the
-    /// cache-sharing and path-escape hazards combined.
-    #[test]
-    fn generative_paths_are_injective_and_contained() {
-        let root = Path::new("/cache");
-        let mut rng = Rng::new(0x5EED_1357_9BDF_2468);
-        // Map namespace -> the canonical identity string that produced it, so a
-        // collision (two different identities, one namespace) is caught while a
-        // legitimate same-identity repeat (two spellings of one file) is not.
-        let mut by_ns: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        for _ in 0..8000 {
-            let p = random_abs_path(&mut rng);
-            let ns = index_namespace(&p);
-            let identity = owner_identity(&p); // the canonicalized string hashed
+    proptest! {
+        /// Feed batches of distinct random absolute paths through the full
+        /// derivation. Asserts, together: (a) panic-freedom, (b) injectivity —
+        /// distinct lexical identities map to distinct namespaces (no collision
+        /// across the corpus), and (c) containment — every produced
+        /// index/derived path nests under the cache root. This is the broad net
+        /// for the cache-sharing and path-escape hazards combined; the corpus is
+        /// a generated *set* of paths so the injectivity check sees collisions
+        /// within one case, not just across cases.
+        #[test]
+        fn generative_paths_are_injective_and_contained(
+            paths in prop::collection::vec(abs_path(), 1..200)
+        ) {
+            let root = Path::new("/cache");
+            // Map namespace -> the canonical identity string that produced it,
+            // so a collision (two different identities, one namespace) is caught
+            // while a legitimate same-identity repeat (two spellings of one
+            // file) is not.
+            let mut by_ns: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for p in paths {
+                let ns = index_namespace(&p);
+                let identity = owner_identity(&p); // the canonicalized string hashed
 
-            // Containment.
-            let idx = index_dir("/cache", &p);
-            let der = derived_db_path("/cache", &p);
-            assert!(idx.starts_with(root.join(INDEX_SUBDIR)));
-            assert!(der.starts_with(root.join(DERIVED_SUBDIR)));
+                // Containment.
+                let idx = index_dir("/cache", &p);
+                let der = derived_db_path("/cache", &p);
+                prop_assert!(idx.starts_with(root.join(INDEX_SUBDIR)));
+                prop_assert!(der.starts_with(root.join(DERIVED_SUBDIR)));
 
-            // Injectivity: same namespace must mean same identity.
-            if let Some(prev_identity) = by_ns.insert(ns.clone(), identity.clone()) {
-                assert_eq!(
-                    prev_identity, identity,
-                    "namespace collision: distinct identities {prev_identity:?} and \
-                     {identity:?} share namespace {ns}"
-                );
+                // Injectivity: same namespace must mean same identity.
+                if let Some(prev_identity) = by_ns.insert(ns.clone(), identity.clone()) {
+                    prop_assert_eq!(
+                        prev_identity,
+                        identity,
+                        "namespace collision: distinct identities share namespace {}",
+                        ns
+                    );
+                }
             }
         }
     }

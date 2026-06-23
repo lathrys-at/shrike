@@ -468,6 +468,7 @@ pub fn which(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::path::PathBuf;
 
     /// A minimal in-test policy: no real binary, a sleeper argv, configurable
@@ -1107,8 +1108,7 @@ mod tests {
     // 5. `which`/`is_executable` are exposed binary-resolution helpers. A
     //    well-known executable resolves to an executable absolute path; a
     //    guaranteed-absent name resolves to None; a non-executable file is not
-    //    executable. Fuzz `which` with random non-name strings — it must never
-    //    panic and must never resolve garbage.
+    //    executable.
     #[cfg(unix)]
     #[test]
     fn which_and_is_executable_resolve_and_reject() {
@@ -1125,35 +1125,27 @@ mod tests {
         std::fs::write(&f, b"x").unwrap();
         assert!(!is_executable(&f), "a 0644 file is not executable");
         let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        // Fuzz: random strings (including ones with separators / NULs avoided)
-        // never panic and never spuriously resolve. Deterministic SplitMix64.
-        struct Rng(u64);
-        impl Rng {
-            fn next_u64(&mut self) -> u64 {
-                self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-                let mut z = self.0;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-                z ^ (z >> 31)
-            }
-        }
-        let mut rng = Rng(0xDEAD_BEEF);
-        for _ in 0..200 {
-            let len = (rng.next_u64() % 20) as usize;
-            let name: String = (0..len)
-                .map(|_| {
-                    // printable ASCII excluding NUL and '/', which would make it
-                    // a path rather than a PATH lookup name.
-                    let c = 33 + (rng.next_u64() % 94) as u8;
-                    (if c == b'/' { b'_' } else { c }) as char
-                })
-                .collect();
-            // Must not panic; a random junk name must not resolve to a real exe
-            // (vanishingly unlikely, but assert the contract: if it DID resolve,
-            // the path must actually be executable — never a false positive).
+    proptest! {
+        /// FUZZ: `which` over arbitrary PATH-lookup names must never panic and
+        /// must never spuriously resolve garbage. Names are drawn from printable
+        /// ASCII with `/` mapped away (a `/` would make it a path rather than a
+        /// PATH lookup), so the sweep stays a pure PATH search — no spawn, no live
+        /// I/O. If a junk name DID resolve, the contract still holds: the path
+        /// must actually be executable (never a false positive).
+        #[cfg(unix)]
+        #[test]
+        fn which_never_panics_or_resolves_garbage(
+            name in prop::collection::vec(33u8..127, 0..20).prop_map(|bytes| {
+                bytes
+                    .into_iter()
+                    .map(|c| (if c == b'/' { b'_' } else { c }) as char)
+                    .collect::<String>()
+            })
+        ) {
             if let Some(p) = which(&name) {
-                assert!(is_executable(Path::new(&p)));
+                prop_assert!(is_executable(Path::new(&p)));
             }
         }
     }

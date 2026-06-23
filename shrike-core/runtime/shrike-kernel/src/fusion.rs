@@ -103,6 +103,7 @@ pub fn rrf_fuse(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn fuse_simple(rankings: &[(&str, &[i64])]) -> Vec<FusedHit> {
         let owned: Vec<(String, Vec<i64>)> = rankings
@@ -228,67 +229,52 @@ mod tests {
     // on the per-PR cargo lane, before the cross-language suite runs.
     // ====================================================================
 
-    /// Seed-reproducible SplitMix64 (the inline-test generator; see
-    /// `docs/dev/testing.md`). A failure reproduces from its seed.
-    struct Rng(u64);
-    impl Rng {
-        fn new(seed: u64) -> Self {
-            Self(seed)
-        }
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-        fn below(&mut self, n: u64) -> u64 {
-            self.next_u64() % n
-        }
-    }
+    const SIGNALS: [&str; 5] = ["text", "image", "tag", "exact", "fuzzy"];
 
     /// A random fusion input: signals drawn from a small alphabet (so signal
     /// sets overlap), each a list of note ids from a small id space (so notes
     /// recur across AND within signals — exercising dedup), with occasional
-    /// empty id lists.
-    fn gen_rankings(rng: &mut Rng) -> Vec<(String, Vec<i64>)> {
-        const SIGNALS: [&str; 5] = ["text", "image", "tag", "exact", "fuzzy"];
-        let n_sig = rng.below(6); // 0..=5, including the empty-input edge
-        let mut out = Vec::new();
-        let mut used = HashSet::new();
-        for _ in 0..n_sig {
-            let sig = SIGNALS[rng.below(SIGNALS.len() as u64) as usize];
-            if !used.insert(sig) {
-                continue; // one entry per signal name (the caller's contract)
-            }
-            let len = rng.below(8); // 0..=7, including empty id lists
-            let ids = (0..len).map(|_| (rng.below(6) as i64) + 1).collect();
-            out.push((sig.to_string(), ids));
-        }
-        out
+    /// empty id lists. The dedup-by-signal-name (one entry per signal, the
+    /// caller's contract) is applied after generation.
+    fn rankings_strategy() -> impl Strategy<Value = Vec<(String, Vec<i64>)>> {
+        // ids in 1..=6 so notes recur across AND within signals; 0..8 lengths
+        // include the empty id-list edge; 0..6 signal slots include the
+        // empty-input edge and let signal names collide for the dedup contract.
+        let signal = prop::sample::select(SIGNALS.as_slice());
+        let ids = prop::collection::vec(1_i64..=6, 0..8);
+        prop::collection::vec((signal, ids), 0..6).prop_map(|entries| {
+            let mut used: HashSet<&str> = HashSet::new();
+            entries
+                .into_iter()
+                .filter(|(sig, _)| used.insert(sig))
+                .map(|(sig, ids)| (sig.to_string(), ids))
+                .collect()
+        })
     }
 
-    fn gen_weights(rng: &mut Rng) -> BTreeMap<String, f64> {
-        const SIGNALS: [&str; 5] = ["text", "image", "tag", "exact", "fuzzy"];
-        let mut w = BTreeMap::new();
-        for sig in SIGNALS {
-            match rng.below(5) {
-                0 => {} // unlisted → defaults to 1.0
-                1 => {
-                    w.insert(sig.to_string(), 0.0);
-                }
-                2 => {
-                    w.insert(sig.to_string(), (rng.below(400) as f64) / 100.0);
-                }
-                3 => {
-                    w.insert(sig.to_string(), -((rng.below(200) as f64) / 100.0));
-                }
-                _ => {
-                    w.insert(sig.to_string(), 1.0);
-                }
-            }
-        }
-        w
+    /// Per-signal weights: each signal is unlisted (defaults to 1.0), or carries
+    /// 0.0, a positive scale, a negative scale, or exactly 1.0 — the finite-weight
+    /// space the sanitizer must pass through untouched.
+    fn weights_strategy() -> impl Strategy<Value = BTreeMap<String, f64>> {
+        let per_signal = prop_oneof![
+            Just(None),
+            Just(Some(0.0_f64)),
+            (0_u32..=400).prop_map(|n| Some(f64::from(n) / 100.0)),
+            (0_u32..=200).prop_map(|n| Some(-(f64::from(n) / 100.0))),
+            Just(Some(1.0_f64)),
+        ];
+        prop::collection::vec(per_signal, SIGNALS.len()).prop_map(|choices| {
+            SIGNALS
+                .iter()
+                .zip(choices)
+                .filter_map(|(sig, w)| w.map(|w| (sig.to_string(), w)))
+                .collect()
+        })
+    }
+
+    /// A non-finite f64 — the value the sanitizer must coerce to 1.0.
+    fn non_finite_strategy() -> impl Strategy<Value = f64> {
+        prop_oneof![Just(f64::NAN), Just(f64::INFINITY), Just(f64::NEG_INFINITY),]
     }
 
     /// The independent oracle: per note, the (signal, best-rank) contributions
@@ -343,38 +329,43 @@ mod tests {
         hits
     }
 
-    #[test]
-    fn matches_independent_oracle_bit_for_bit() {
-        let mut rng = Rng::new(0x0F11_5104);
-        for _ in 0..20_000 {
-            let rankings = gen_rankings(&mut rng);
-            let weights = gen_weights(&mut rng);
-            let priority: HashSet<String> = if rng.below(2) == 0 {
+    /// A priority set: either `{exact}` or empty.
+    fn priority_strategy() -> impl Strategy<Value = HashSet<String>> {
+        prop::bool::ANY.prop_map(|on| {
+            if on {
                 [PRIORITY_SIGNAL.to_string()].into_iter().collect()
             } else {
                 HashSet::new()
-            };
-            let got = rrf_fuse(&rankings, &weights, RRF_K, &priority);
-            let want = oracle(&rankings, &weights, RRF_K, &priority);
-            assert_eq!(got.len(), want.len());
-            for (g, w) in got.iter().zip(want.iter()) {
-                assert_eq!(g.0, w.0, "note id");
-                assert_eq!(g.1.to_bits(), w.1.to_bits(), "score (bit-exact)");
-                assert_eq!(g.2, w.2, "contributions (signal, rank)");
             }
-        }
+        })
     }
 
-    #[test]
-    fn fused_output_is_invariant_to_input_signal_order() {
-        // rrf_fuse sorts signals canonically before accumulating, so the order
-        // the host hands signals in must not change the result at all — ids,
-        // scores, AND contribution lists. This is what makes float-accumulation
-        // deterministic across callers.
-        let mut rng = Rng::new(0x0DDE_4001);
-        for _ in 0..10_000 {
-            let rankings = gen_rankings(&mut rng);
-            let weights = gen_weights(&mut rng);
+    proptest! {
+        #[test]
+        fn matches_independent_oracle_bit_for_bit(
+            rankings in rankings_strategy(),
+            weights in weights_strategy(),
+            priority in priority_strategy(),
+        ) {
+            let got = rrf_fuse(&rankings, &weights, RRF_K, &priority);
+            let want = oracle(&rankings, &weights, RRF_K, &priority);
+            prop_assert_eq!(got.len(), want.len());
+            for (g, w) in got.iter().zip(want.iter()) {
+                prop_assert_eq!(g.0, w.0, "note id");
+                prop_assert_eq!(g.1.to_bits(), w.1.to_bits(), "score (bit-exact)");
+                prop_assert_eq!(&g.2, &w.2, "contributions (signal, rank)");
+            }
+        }
+
+        /// rrf_fuse sorts signals canonically before accumulating, so the order
+        /// the host hands signals in must not change the result at all — ids,
+        /// scores, AND contribution lists. This is what makes float-accumulation
+        /// deterministic across callers.
+        #[test]
+        fn fused_output_is_invariant_to_input_signal_order(
+            rankings in rankings_strategy(),
+            weights in weights_strategy(),
+        ) {
             let priority: HashSet<String> = [PRIORITY_SIGNAL.to_string()].into_iter().collect();
             let base = rrf_fuse(&rankings, &weights, RRF_K, &priority);
             // Reverse, then a rotation — two non-trivial permutations.
@@ -384,50 +375,48 @@ mod tests {
                 shuffled.rotate_left(1);
             }
             let other = rrf_fuse(&shuffled, &weights, RRF_K, &priority);
-            assert_eq!(base.len(), other.len());
+            prop_assert_eq!(base.len(), other.len());
             for (a, b) in base.iter().zip(other.iter()) {
-                assert_eq!(a.0, b.0);
-                assert_eq!(a.1.to_bits(), b.1.to_bits());
-                assert_eq!(a.2, b.2);
+                prop_assert_eq!(a.0, b.0);
+                prop_assert_eq!(a.1.to_bits(), b.1.to_bits());
+                prop_assert_eq!(&a.2, &b.2);
             }
         }
-    }
 
-    #[test]
-    fn output_respects_the_tier_score_id_total_order() {
-        // The global sort contract: priority-tier ascending, then score
-        // descending, then note id ascending — checked pairwise across the whole
-        // result for random inputs (a sort bug shows as an out-of-order pair).
-        let mut rng = Rng::new(0x0050_4A07);
-        for _ in 0..10_000 {
-            let rankings = gen_rankings(&mut rng);
-            let weights = gen_weights(&mut rng);
+        /// The global sort contract: priority-tier ascending, then score
+        /// descending, then note id ascending — checked pairwise across the whole
+        /// result for random inputs (a sort bug shows as an out-of-order pair).
+        #[test]
+        fn output_respects_the_tier_score_id_total_order(
+            rankings in rankings_strategy(),
+            weights in weights_strategy(),
+        ) {
             let priority: HashSet<String> = [PRIORITY_SIGNAL.to_string()].into_iter().collect();
             let hits = rrf_fuse(&rankings, &weights, RRF_K, &priority);
             let tier = |h: &FusedHit| i32::from(!h.2.iter().any(|(s, _)| priority.contains(s)));
             for pair in hits.windows(2) {
                 let (a, b) = (&pair[0], &pair[1]);
                 let (ta, tb) = (tier(a), tier(b));
-                assert!(ta <= tb, "tier order violated: {a:?} before {b:?}");
+                prop_assert!(ta <= tb, "tier order violated: {:?} before {:?}", a, b);
                 if ta == tb {
                     // within a tier: score non-increasing, ties by ascending id
-                    assert!(
+                    prop_assert!(
                         a.1 > b.1 || (a.1.to_bits() == b.1.to_bits() && a.0 < b.0),
-                        "within-tier order violated: {a:?} before {b:?}"
+                        "within-tier order violated: {:?} before {:?}",
+                        a,
+                        b
                     );
                 }
             }
         }
-    }
 
-    #[test]
-    fn every_input_note_appears_exactly_once() {
-        // Completeness + dedup-across-signals: the result set is exactly the
-        // union of note ids across all signals, each once.
-        let mut rng = Rng::new(0x000C_0117);
-        for _ in 0..10_000 {
-            let rankings = gen_rankings(&mut rng);
-            let weights = gen_weights(&mut rng);
+        /// Completeness + dedup-across-signals: the result set is exactly the
+        /// union of note ids across all signals, each once.
+        #[test]
+        fn every_input_note_appears_exactly_once(
+            rankings in rankings_strategy(),
+            weights in weights_strategy(),
+        ) {
             let hits = rrf_fuse(&rankings, &weights, RRF_K, &HashSet::new());
             let mut expected: HashSet<i64> = HashSet::new();
             for (_, ids) in &rankings {
@@ -435,22 +424,19 @@ mod tests {
             }
             let got: Vec<i64> = hits.iter().map(|h| h.0).collect();
             let got_set: HashSet<i64> = got.iter().copied().collect();
-            assert_eq!(got.len(), got_set.len(), "a note appeared twice");
-            assert_eq!(got_set, expected, "result set != union of inputs");
+            prop_assert_eq!(got.len(), got_set.len(), "a note appeared twice");
+            prop_assert_eq!(got_set, expected, "result set != union of inputs");
         }
-    }
 
-    #[test]
-    fn non_finite_weight_orders_like_one_generatively() {
-        // The frozen-reference parity hinge, generatively: replacing any signal's
-        // weight with NaN/±inf yields the IDENTICAL fused output as weight 1.0.
-        let mut rng = Rng::new(0x05A1_712E);
-        const SIGNALS: [&str; 5] = ["text", "image", "tag", "exact", "fuzzy"];
-        for _ in 0..10_000 {
-            let rankings = gen_rankings(&mut rng);
+        /// The frozen-reference parity hinge, generatively: replacing any signal's
+        /// weight with NaN/±inf yields the IDENTICAL fused output as weight 1.0.
+        #[test]
+        fn non_finite_weight_orders_like_one_generatively(
+            rankings in rankings_strategy(),
+            target in prop::sample::select(SIGNALS.as_slice()),
+            bad in non_finite_strategy(),
+        ) {
             let priority: HashSet<String> = [PRIORITY_SIGNAL.to_string()].into_iter().collect();
-            let target = SIGNALS[rng.below(SIGNALS.len() as u64) as usize];
-            let bad = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY][rng.below(3) as usize];
 
             let mut w_bad = BTreeMap::new();
             w_bad.insert(target.to_string(), bad);
@@ -459,11 +445,11 @@ mod tests {
 
             let got = rrf_fuse(&rankings, &w_bad, RRF_K, &priority);
             let want = rrf_fuse(&rankings, &w_one, RRF_K, &priority);
-            assert_eq!(got.len(), want.len());
+            prop_assert_eq!(got.len(), want.len());
             for (g, w) in got.iter().zip(want.iter()) {
-                assert_eq!(g.0, w.0);
-                assert_eq!(g.1.to_bits(), w.1.to_bits());
-                assert_eq!(g.2, w.2);
+                prop_assert_eq!(g.0, w.0);
+                prop_assert_eq!(g.1.to_bits(), w.1.to_bits());
+                prop_assert_eq!(&g.2, &w.2);
             }
         }
     }

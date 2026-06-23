@@ -508,6 +508,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn allowlist_rejects_the_known_bad_ranges() {
@@ -743,24 +744,6 @@ mod tests {
     // hand back an internal address. Each test states the property it pins and
     // names the asset the evasion would otherwise reach.
     // ════════════════════════════════════════════════════════════════════
-
-    /// A tiny deterministic SplitMix64 — the inline property lane's PRNG, in
-    /// place of an external `rand`/`proptest` dependency, so the fuzz test rides
-    /// the existing `rust_test` target with no crate-graph churn. A failure is
-    /// reproducible from its seed.
-    struct Rng(u64);
-    impl Rng {
-        fn new(seed: u64) -> Self {
-            Self(seed)
-        }
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-    }
 
     fn v4(s: &str) -> IpAddr {
         IpAddr::V4(s.parse().unwrap())
@@ -1199,43 +1182,38 @@ mod tests {
 
     // ── generative panic-freedom fuzz ───────────────────────────────────
 
-    /// FUZZ: `ip_is_allowed` over random v4 AND v6 bit patterns must be total —
-    /// always a clean bool, never a panic (a panic in the classifier is a
-    /// fail-open DoS on the media path). 20k random addresses per family.
-    #[test]
-    fn fuzz_ip_is_allowed_is_total_over_random_addresses() {
-        let mut rng = Rng::new(0xD15E_A5E0_5512_F00D);
-        for _ in 0..20_000 {
-            let v4bits = rng.next_u64() as u32;
-            let _ = ip_is_allowed(IpAddr::V4(Ipv4Addr::from(v4bits)));
-            let hi = rng.next_u64() as u128;
-            let lo = rng.next_u64() as u128;
-            let v6bits = (hi << 64) | lo;
-            let _ = ip_is_allowed(IpAddr::V6(Ipv6Addr::from(v6bits))); // never panics
-        }
+    /// A hostile Location-header string: a charset rich in the bytes that trip
+    /// URL parsers (brackets, colons, `@`, `%`, dots, slashes, control bytes).
+    fn hostile_string() -> impl Strategy<Value = String> {
+        const CHARSET: &[u8] = b"0123456789abcdefABCDEF.:/[]@%-_xX vfF\t\n";
+        prop::collection::vec(0usize..CHARSET.len(), 0..40)
+            .prop_map(|idxs| idxs.into_iter().map(|i| CHARSET[i] as char).collect())
     }
 
-    /// FUZZ: the parsing/vetting surface must be panic-free on hostile strings.
-    /// Builds random host/URL strings from a charset rich in the bytes that
-    /// trip parsers (brackets, colons, `@`, `%`, dots, slashes, control bytes)
-    /// and drives them through `resolve_public_ip` and `same_host_redirect` —
-    /// every outcome must be Ok or Err, never a panic.
-    #[test]
-    fn fuzz_parsing_surface_is_panic_free_on_hostile_input() {
-        const CHARSET: &[u8] = b"0123456789abcdefABCDEF.:/[]@%-_xX vfF\t\n";
-        let mut rng = Rng::new(0x0FF1_CEBA_D5EE_D001);
-        let from = url::Url::parse("http://base.example.com/v1").unwrap();
-        // Hermetic: drives only the pure URL parser/classifier. `resolve_public_ip`
-        // and `pinned_endpoint_async_client` are deliberately NOT swept here —
-        // they call `getaddrinfo`, so fuzzing them is live-network I/O (slow,
-        // flaky, blocks offline), which has no place in the unit lane.
-        for _ in 0..5_000 {
-            let len = (rng.next_u64() % 40) as usize;
-            let mut s = String::with_capacity(len);
-            for _ in 0..len {
-                let b = CHARSET[(rng.next_u64() as usize) % CHARSET.len()];
-                s.push(b as char);
-            }
+    proptest! {
+        /// FUZZ: `ip_is_allowed` over arbitrary v4 AND v6 bit patterns must be
+        /// total — always a clean bool, never a panic (a panic in the classifier
+        /// is a fail-open DoS on the media path).
+        #[test]
+        fn fuzz_ip_is_allowed_is_total_over_random_addresses(
+            v4bits: u32,
+            v6bits: u128,
+        ) {
+            let _ = ip_is_allowed(IpAddr::V4(Ipv4Addr::from(v4bits)));
+            let _ = ip_is_allowed(IpAddr::V6(Ipv6Addr::from(v6bits))); // never panics
+        }
+
+        /// FUZZ: the parsing/vetting surface must be panic-free on hostile
+        /// strings. Drives hostile garbage through `same_host_redirect` as a
+        /// Location header — every outcome must be Ok or Err, never a panic.
+        ///
+        /// Hermetic: drives only the pure URL parser/classifier. `resolve_public_ip`
+        /// and `pinned_endpoint_async_client` are deliberately NOT swept here —
+        /// they call `getaddrinfo`, so fuzzing them is live-network I/O (slow,
+        /// flaky, blocks offline), which has no place in the unit lane.
+        #[test]
+        fn fuzz_parsing_surface_is_panic_free_on_hostile_input(s in hostile_string()) {
+            let from = url::Url::parse("http://base.example.com/v1").unwrap();
             // The redirect vet over hostile garbage as a Location header: every
             // outcome is Ok or Err, never a panic.
             let _ = same_host_redirect(&from, &s);

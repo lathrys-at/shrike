@@ -30,4 +30,7 @@ rust_test(
     name = "shrike_derived_test",
     size = "small",
     crate = ":shrike_derived",
+    deps = [
+        "@crates//:proptest",
+    ],
 )

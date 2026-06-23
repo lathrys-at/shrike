@@ -25,4 +25,7 @@ rust_test(
     name = "shrike_cache_test",
     size = "small",
     crate = ":shrike_cache",
+    deps = [
+        "@crates//:proptest",
+    ],
 )

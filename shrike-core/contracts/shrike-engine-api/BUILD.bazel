@@ -23,6 +23,7 @@ rust_test(
     size = "small",
     crate = ":shrike_engine_api",
     deps = [
+        "@crates//:proptest",
         # Test-only: decode the pure-Rust BMP probe images to verify validity
         # (production code emits raw bytes — no image dep in the leaf).
         "@crates//:image",

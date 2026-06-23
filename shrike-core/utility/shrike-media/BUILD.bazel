@@ -31,7 +31,10 @@ rust_test(
     name = "shrike_media_test",
     size = "small",
     crate = ":shrike_media",
-    deps = ["@crates//:tokio"],
+    deps = [
+        "@crates//:proptest",
+        "@crates//:tokio",
+    ],
 )
 
 # SSRF classifier parity regression: the allowlist must refuse 6to4 (2002::/16)
