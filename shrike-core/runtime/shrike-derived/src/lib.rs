@@ -374,7 +374,7 @@ fn with_busy_retry_write<T>(mut write: impl FnMut() -> NativeResult<T>) -> Nativ
 }
 
 /// One `trigram_delta` row as read off the wire: `(term, added blob, removed blob)`.
-type DeltaBlobRow = (String, Vec<u8>, Vec<u8>);
+type DeltaBlobRow = (Trigram, Vec<u8>, Vec<u8>);
 
 impl DerivedEngine {
     /// Open (or create) the store and ensure the schema, resetting the derived
@@ -914,9 +914,9 @@ impl DerivedEngine {
             return Ok(());
         }
         // Per trigram, the rowids this write gained and lost.
-        let mut add_by_term: std::collections::HashMap<String, Vec<u32>> =
+        let mut add_by_term: std::collections::HashMap<Trigram, Vec<u32>> =
             std::collections::HashMap::new();
-        let mut rm_by_term: std::collections::HashMap<String, Vec<u32>> =
+        let mut rm_by_term: std::collections::HashMap<Trigram, Vec<u32>> =
             std::collections::HashMap::new();
         for (rowid, text) in removed {
             for t in trigrams(text) {
@@ -928,10 +928,10 @@ impl DerivedEngine {
                 add_by_term.entry(t).or_default().push(*rowid as u32);
             }
         }
-        let touched: std::collections::BTreeSet<&str> = add_by_term
+        let touched: std::collections::BTreeSet<Trigram> = add_by_term
             .keys()
             .chain(rm_by_term.keys())
-            .map(String::as_str)
+            .copied()
             .collect();
         if touched.is_empty() {
             return Ok(());
@@ -942,20 +942,19 @@ impl DerivedEngine {
                 .prepare_cached("INSERT OR IGNORE INTO trigram_dirty(term) VALUES(?1)")
                 .map_err(db_err)?;
             for t in &touched {
-                ins.execute([t]).map_err(db_err)?;
+                ins.execute(rusqlite::params![t]).map_err(db_err)?;
             }
         }
         // The materialized subset of the touched trigrams — only these carry a delta.
-        let touched_vec: Vec<&str> = touched.iter().copied().collect();
-        let materialized: std::collections::HashSet<String> = {
-            let want = Self::term_array(touched_vec.iter().copied());
+        let materialized: std::collections::HashSet<Trigram> = {
+            let want = Self::term_array(touched.iter().map(Trigram::as_str));
             let mut stmt = conn
                 .prepare_cached("SELECT term FROM trigram_bitmap WHERE term IN rarray(?1)")
                 .map_err(db_err)?;
             let mut q = stmt.query(rusqlite::params![want]).map_err(db_err)?;
             let mut set = std::collections::HashSet::new();
             while let Some(r) = q.next().map_err(db_err)? {
-                set.insert(r.get::<_, String>(0).map_err(db_err)?);
+                set.insert(r.get::<_, Trigram>(0).map_err(db_err)?);
             }
             set
         };
@@ -963,8 +962,8 @@ impl DerivedEngine {
             return Ok(());
         }
         // Existing deltas for the materialized touched trigrams (absent → empty).
-        let mut deltas: std::collections::HashMap<String, (RoaringBitmap, RoaringBitmap)> = {
-            let want = Self::term_array(materialized.iter().map(String::as_str));
+        let mut deltas: std::collections::HashMap<Trigram, (RoaringBitmap, RoaringBitmap)> = {
+            let want = Self::term_array(materialized.iter().map(Trigram::as_str));
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT term, added, removed FROM trigram_delta WHERE term IN rarray(?1)",
@@ -973,7 +972,7 @@ impl DerivedEngine {
             let mut q = stmt.query(rusqlite::params![want]).map_err(db_err)?;
             let mut m = std::collections::HashMap::new();
             while let Some(r) = q.next().map_err(db_err)? {
-                let term: String = r.get(0).map_err(db_err)?;
+                let term: Trigram = r.get(0).map_err(db_err)?;
                 let added_blob: Vec<u8> = r.get(1).map_err(db_err)?;
                 let removed_blob: Vec<u8> = r.get(2).map_err(db_err)?;
                 let added_bm = RoaringBitmap::deserialize_from(&added_blob[..])
@@ -990,7 +989,7 @@ impl DerivedEngine {
             )
             .map_err(db_err)?;
         for term in &materialized {
-            let (added_bm, removed_bm) = deltas.entry(term.clone()).or_default();
+            let (added_bm, removed_bm) = deltas.entry(*term).or_default();
             // REMOVE ops first, then ADD ops → last-writer-wins per (term, rowid).
             if let Some(rids) = rm_by_term.get(term) {
                 for &r in rids {
@@ -1321,7 +1320,7 @@ impl DerivedEngine {
             // freshness gate that desync surfaces as wrong results. Keying base, delta,
             // and query by one tokenizer makes the tier self-consistent regardless of
             // how `trigrams()` relates to FTS5's fold.
-            let mut postings: std::collections::HashMap<String, RoaringBitmap> =
+            let mut postings: std::collections::HashMap<Trigram, RoaringBitmap> =
                 std::collections::HashMap::new();
             {
                 let mut sel = tx.prepare("SELECT rowid, txt FROM idx").map_err(db_err)?;
@@ -1383,7 +1382,7 @@ impl DerivedEngine {
         // Keep trigram_df fresh for the query prune (it ranks query trigrams by DF).
         Self::refresh_trigram_df_in(&tx)?;
         // Candidate set: only touched trigrams can have a pending delta or a tier flip.
-        let dirty: Vec<String> = {
+        let dirty: Vec<Trigram> = {
             let mut stmt = tx
                 .prepare("SELECT term FROM trigram_dirty")
                 .map_err(db_err)?;
@@ -2082,28 +2081,23 @@ impl DerivedEngine {
     /// Returns an error if the lookup fails.
     fn trigram_dfs(
         conn: &Connection,
-        terms: &[&str],
-    ) -> NativeResult<std::collections::HashMap<String, i64>> {
+        terms: &[Trigram],
+    ) -> NativeResult<std::collections::HashMap<Trigram, i64>> {
         if terms.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let run = || -> rusqlite::Result<std::collections::HashMap<String, i64>> {
+        let run = || -> rusqlite::Result<std::collections::HashMap<Trigram, i64>> {
             // The whole trigram set as an in-memory carray, so the term→df lookup is
             // ONE prepare-cached `IN rarray(?1)` statement over one implicit
             // transaction, versus a `query`/`reset` per trigram. Terms absent from
             // the table never come back — the caller reads a missing term as DF 0.
-            let want: std::rc::Rc<Vec<rusqlite::types::Value>> = std::rc::Rc::new(
-                terms
-                    .iter()
-                    .map(|&t| rusqlite::types::Value::Text(t.to_string()))
-                    .collect(),
-            );
+            let want = Self::term_array(terms.iter().map(Trigram::as_str));
             let mut stmt =
                 conn.prepare_cached("SELECT term, df FROM trigram_df WHERE term IN rarray(?1)")?;
             let mut m = std::collections::HashMap::new();
             let mut q = stmt.query(rusqlite::params![want])?;
             while let Some(r) = q.next()? {
-                m.insert(r.get::<_, String>(0)?, r.get::<_, i64>(1)?);
+                m.insert(r.get::<_, Trigram>(0)?, r.get::<_, i64>(1)?);
             }
             Ok(m)
         };
@@ -3222,15 +3216,152 @@ pub use shrike_store::{FxI64Hasher, FxI64Map, FxI64Set};
 
 pub use shrike_store::LexicalRow;
 
+/// A single trigram — exactly [`MIN_TRIGRAM`] (3) Unicode code points, so at most 12
+/// UTF-8 bytes — stored INLINE with no heap allocation. The fuzzy path materializes
+/// one per 3-char window of every indexed and queried string, so a `String` per
+/// window was a hot allocation on both writes and queries; `Trigram` is a `Copy`
+/// value that lives on the stack and keys the bitmap maps directly.
+///
+/// `Hash`/`Eq`/`Ord` delegate to the string slice, so they agree with `str` — which
+/// is what makes the [`Borrow<str>`] impl sound and lets `HashMap<Trigram, _>` /
+/// `BTreeSet<Trigram>` be probed with a plain `&str`.
+#[derive(Clone, Copy)]
+pub struct Trigram {
+    /// UTF-8 bytes of the trigram, left-aligned; only `buf[..len]` is meaningful.
+    buf: [u8; Self::MAX_LEN],
+    len: u8,
+}
+
+impl Trigram {
+    /// 3 code points × up to 4 UTF-8 bytes each.
+    const MAX_LEN: usize = 4 * MIN_TRIGRAM;
+
+    /// The trigram as a string slice.
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        // SAFETY: `buf[..len]` is only ever filled from valid UTF-8 — `from_chars`
+        // encodes `char`s (always valid UTF-8), and `try_from_str` copies the bytes of
+        // an existing `&str` after a length check — so the slice is always valid UTF-8.
+        unsafe { std::str::from_utf8_unchecked(&self.buf[..self.len as usize]) }
+    }
+
+    /// Build from exactly [`MIN_TRIGRAM`] code points, encoding them inline (no
+    /// allocation). Caller guarantees the slice length; surplus codepoints would
+    /// overflow `MAX_LEN` and are a bug, so the encode is debug-asserted to fit.
+    #[inline]
+    fn from_chars(chars: &[char]) -> Self {
+        let mut buf = [0u8; Self::MAX_LEN];
+        let mut len = 0usize;
+        for &c in chars {
+            len += c.encode_utf8(&mut buf[len..]).len();
+        }
+        Self {
+            buf,
+            len: len as u8,
+        }
+    }
+
+    /// Build from a string slice that is one trigram (≤ [`MAX_LEN`] bytes). Returns
+    /// `None` if it is longer — the bound the inline buffer guarantees.
+    fn try_from_str(s: &str) -> Option<Self> {
+        let bytes = s.as_bytes();
+        if bytes.len() > Self::MAX_LEN {
+            return None;
+        }
+        let mut buf = [0u8; Self::MAX_LEN];
+        buf[..bytes.len()].copy_from_slice(bytes);
+        Some(Self {
+            buf,
+            len: bytes.len() as u8,
+        })
+    }
+}
+
+impl std::ops::Deref for Trigram {
+    type Target = str;
+    #[inline]
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for Trigram {
+    #[inline]
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::borrow::Borrow<str> for Trigram {
+    #[inline]
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq for Trigram {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+impl Eq for Trigram {}
+
+impl std::hash::Hash for Trigram {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Delegate to the `str` hash so it matches a `&str` probe through `Borrow`.
+        self.as_str().hash(state);
+    }
+}
+
+impl PartialOrd for Trigram {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Trigram {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl std::fmt::Debug for Trigram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+impl std::fmt::Display for Trigram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl rusqlite::ToSql for Trigram {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(rusqlite::types::ToSqlOutput::from(self.as_str()))
+    }
+}
+
+impl rusqlite::types::FromSql for Trigram {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        let s = value.as_str()?;
+        Trigram::try_from_str(s).ok_or(rusqlite::types::FromSqlError::InvalidType)
+    }
+}
+
 /// Lowercased char-level trigrams (mirrors the Python `_trigrams`: code-point
-/// windows over `text.lower()`).
-pub fn trigrams(text: &str) -> Vec<String> {
+/// windows over `text.lower()`), each an inline [`Trigram`] — no per-window
+/// allocation.
+pub fn trigrams(text: &str) -> Vec<Trigram> {
     let lowered: Vec<char> = text.to_lowercase().chars().collect();
     if lowered.len() < MIN_TRIGRAM {
         return Vec::new();
     }
     (0..=lowered.len() - MIN_TRIGRAM)
-        .map(|i| lowered[i..i + MIN_TRIGRAM].iter().collect())
+        .map(|i| Trigram::from_chars(&lowered[i..i + MIN_TRIGRAM]))
         .collect()
 }
 
@@ -3276,7 +3407,7 @@ impl DerivedEngine {
     /// trigram windows (too short to rank). NFC-normalized so the trigrams match
     /// the NFC-normalized index. [`Self::prune_to_rare_terms`] derives the (smaller)
     /// rare-trigram set the overlap ranker actually queries and counts.
-    fn fuzzy_grams(query: &str) -> Option<std::collections::BTreeSet<String>> {
+    fn fuzzy_grams(query: &str) -> Option<std::collections::BTreeSet<Trigram>> {
         let normalized = nfc(query);
         let grams = trigrams(normalized.trim());
         if grams.len() < FUZZY_MIN_SHARED {
@@ -3299,22 +3430,22 @@ impl DerivedEngine {
     /// new trigrams the prune must scan to keep recall. The floor is over this kept
     /// set, not the full query gram set.
     fn prune_to_rare_terms(
-        grams: &std::collections::BTreeSet<String>,
-        df: &std::collections::HashMap<String, i64>,
+        grams: &std::collections::BTreeSet<Trigram>,
+        df: &std::collections::HashMap<Trigram, i64>,
         policy: FuzzyCapPolicy,
-    ) -> Vec<String> {
+    ) -> Vec<Trigram> {
         // The cap is derived from THIS query's own gram count (`grams.len()`), never
         // a batch-wide count, so the pruned set is byte-identical whether the query
         // runs alone or in a batch — the batch==serial invariant.
         let cap = policy.cap(grams.len());
         // The `cap` rarest PRESENT trigrams (DF ascending, term as a deterministic
         // tie-break)...
-        let mut present: Vec<&String> = grams
+        let mut present: Vec<&Trigram> = grams
             .iter()
             .filter(|g| df.get(*g).copied().unwrap_or(0) > 0)
             .collect();
         present.sort_by(|a, b| {
-            let d = |g: &String| df.get(g).copied().unwrap_or(0);
+            let d = |g: &Trigram| df.get(g).copied().unwrap_or(0);
             d(a).cmp(&d(b)).then_with(|| a.cmp(b))
         });
         present.truncate(cap);
@@ -3323,7 +3454,7 @@ impl DerivedEngine {
         let absent = grams
             .iter()
             .filter(|g| df.get(*g).copied().unwrap_or(0) == 0);
-        present.into_iter().chain(absent).cloned().collect()
+        present.into_iter().chain(absent).copied().collect()
     }
 
     /// Accumulate one query's per-segment trigram overlap: how many of its pruned
@@ -3332,8 +3463,8 @@ impl DerivedEngine {
     /// runs before the survivors' `(note_id, source, ref)` is known.
     #[allow(dead_code)] // reference for the bit-sliced fuzzy_rank_query cross-check + revert.
     fn accumulate_overlap(
-        pruned_terms: &[String],
-        term_bitmaps: &std::collections::HashMap<String, roaring::RoaringBitmap>,
+        pruned_terms: &[Trigram],
+        term_bitmaps: &std::collections::HashMap<Trigram, roaring::RoaringBitmap>,
     ) -> FxI64Map<usize> {
         // Preallocate to the sum of the rare trigrams' posting lengths — the upper
         // bound on distinct rowids (a rowid shared across trigrams just over-counts
@@ -3369,8 +3500,8 @@ impl DerivedEngine {
     /// Returns an error if the read or a bitmap deserialize fails.
     fn load_trigram_bitmaps(
         conn: &Connection,
-        terms: &[&str],
-    ) -> NativeResult<std::collections::HashMap<String, roaring::RoaringBitmap>> {
+        terms: &[Trigram],
+    ) -> NativeResult<std::collections::HashMap<Trigram, roaring::RoaringBitmap>> {
         let mut out = std::collections::HashMap::new();
         if terms.is_empty() {
             return Ok(out);
@@ -3380,9 +3511,9 @@ impl DerivedEngine {
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!("SELECT term, bm FROM trigram_bitmap WHERE term IN ({placeholders})");
-        let run = || -> rusqlite::Result<Vec<(String, Vec<u8>)>> {
+        let run = || -> rusqlite::Result<Vec<(Trigram, Vec<u8>)>> {
             let mut stmt = conn.prepare_cached(&sql)?;
-            let mut q = stmt.query(rusqlite::params_from_iter(terms.iter().copied()))?;
+            let mut q = stmt.query(rusqlite::params_from_iter(terms.iter()))?;
             let mut rows = Vec::new();
             while let Some(r) = q.next()? {
                 rows.push((r.get(0)?, r.get(1)?));
@@ -3411,16 +3542,16 @@ impl DerivedEngine {
     /// Returns an error if a read or a bitmap deserialize fails.
     fn effective_term_bitmaps(
         conn: &Connection,
-        terms: &[&str],
-    ) -> NativeResult<std::collections::HashMap<String, roaring::RoaringBitmap>> {
+        terms: &[Trigram],
+    ) -> NativeResult<std::collections::HashMap<Trigram, roaring::RoaringBitmap>> {
         use roaring::RoaringBitmap;
         // load_trigram_bitmaps returns a row ONLY for a materialized term, so its keys
         // ARE the materialized subset of `terms`.
         let mut out = Self::load_trigram_bitmaps(conn, terms)?;
         // Fold each materialized term's pending delta into its base.
         if !out.is_empty() {
-            let materialized: Vec<String> = out.keys().cloned().collect();
-            let want = Self::term_array(materialized.iter().map(String::as_str));
+            let materialized: Vec<Trigram> = out.keys().copied().collect();
+            let want = Self::term_array(materialized.iter().map(Trigram::as_str));
             let run = || -> rusqlite::Result<Vec<DeltaBlobRow>> {
                 let mut stmt = conn.prepare_cached(
                     "SELECT term, added, removed FROM trigram_delta WHERE term IN rarray(?1)",
@@ -3444,10 +3575,10 @@ impl DerivedEngine {
             }
         }
         // The unmaterialized terms fall to the live posting read.
-        let live_terms: Vec<&str> = terms
+        let live_terms: Vec<Trigram> = terms
             .iter()
             .copied()
-            .filter(|t| !out.contains_key(*t))
+            .filter(|t| !out.contains_key(t))
             .collect();
         if !live_terms.is_empty() {
             for (term, rids) in Self::fuzzy_term_rowids(conn, &live_terms)? {
@@ -3526,8 +3657,8 @@ impl DerivedEngine {
     /// every bucket.
     fn fuzzy_rank_query(
         conn: &Connection,
-        pruned_terms: &[String],
-        term_bitmaps: &std::collections::HashMap<String, roaring::RoaringBitmap>,
+        pruned_terms: &[Trigram],
+        term_bitmaps: &std::collections::HashMap<Trigram, roaring::RoaringBitmap>,
         top_k: usize,
         exclude_sources: &[&str],
         scope: Option<&[i64]>,
@@ -3779,27 +3910,27 @@ impl DerivedEngine {
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
     ) -> NativeResult<Vec<Vec<LexicalRow>>> {
-        let gram_sets: Vec<Option<std::collections::BTreeSet<String>>> =
+        let gram_sets: Vec<Option<std::collections::BTreeSet<Trigram>>> =
             queries.iter().map(|q| Self::fuzzy_grams(q)).collect();
         // One batched DF lookup over every distinct trigram, then prune each served
         // query to its rarest (most discriminative) trigrams.
-        let distinct: std::collections::BTreeSet<&str> = gram_sets
+        let distinct: std::collections::BTreeSet<Trigram> = gram_sets
             .iter()
             .flatten()
-            .flat_map(|g| g.iter().map(String::as_str))
+            .flat_map(|g| g.iter().copied())
             .collect();
         // One pool connection for the whole fuzzy read: the DF lookup, the posting
         // reads, and the snippet reads all run on it. Each sub-read is its own
         // statement (its own committed snapshot) — the same per-sub-read freshness
         // as before; the freshness bracket flags a write that lands mid-read.
         let conn = self.read_pool.checkout()?;
-        let df = Self::trigram_dfs(&conn, &distinct.into_iter().collect::<Vec<_>>())?;
+        let df = Self::trigram_dfs(&conn, &distinct.into_iter().collect::<Vec<Trigram>>())?;
         // Read the cap policy ONCE for the whole batch, so every query in this batch
         // is pruned under one snapshot of the policy (a concurrent set never splits a
         // batch). The cap is still derived per query from that query's own gram
         // count inside the map — never batch-wide — so batch==serial holds.
         let policy = self.fuzzy_cap_policy();
-        let pruned: Vec<Option<Vec<String>>> = gram_sets
+        let pruned: Vec<Option<Vec<Trigram>>> = gram_sets
             .iter()
             .map(|g| {
                 g.as_ref()
@@ -3807,16 +3938,12 @@ impl DerivedEngine {
             })
             .collect();
         // Read each DISTINCT pruned trigram's posting once (shared across queries).
-        let distinct_terms: std::collections::BTreeSet<&str> = pruned
-            .iter()
-            .flatten()
-            .flatten()
-            .map(String::as_str)
-            .collect();
+        let distinct_terms: std::collections::BTreeSet<Trigram> =
+            pruned.iter().flatten().flatten().copied().collect();
         if distinct_terms.is_empty() {
             return Ok(queries.iter().map(|_| Vec::new()).collect());
         }
-        let distinct_terms_vec: Vec<&str> = distinct_terms.into_iter().collect();
+        let distinct_terms_vec: Vec<Trigram> = distinct_terms.into_iter().collect();
         // Read each pruned trigram's posting rowid-ONLY (no per-posting JOIN, no
         // string allocs over the full lists), accumulate per-query overlap, then
         // hydrate `(note_id, source, ref)` once for the candidate set (overlap >= the
@@ -3848,11 +3975,11 @@ impl DerivedEngine {
         // Build snippets for the surviving rowids only, from text read by a plain
         // rowid lookup (no MATCH re-scan) and windowed in Rust around the query's
         // own rare trigrams.
-        let snippet_jobs: Vec<(&[String], Vec<i64>)> = pruned
+        let snippet_jobs: Vec<(&[Trigram], Vec<i64>)> = pruned
             .iter()
             .zip(&survivors)
             .map(|(p, surv)| {
-                let terms: &[String] = match p {
+                let terms: &[Trigram] = match p {
                     Some(t) if !surv.is_empty() => t.as_slice(),
                     _ => &[],
                 };
@@ -3915,9 +4042,9 @@ impl DerivedEngine {
     /// Returns an error if any term's MATCH query fails.
     fn fuzzy_term_rowids(
         conn: &Connection,
-        terms: &[&str],
-    ) -> NativeResult<std::collections::HashMap<String, Vec<i64>>> {
-        let mut term_rowids: std::collections::HashMap<String, Vec<i64>> =
+        terms: &[Trigram],
+    ) -> NativeResult<std::collections::HashMap<Trigram, Vec<i64>>> {
+        let mut term_rowids: std::collections::HashMap<Trigram, Vec<i64>> =
             std::collections::HashMap::new();
         if terms.is_empty() {
             return Ok(term_rowids);
@@ -3950,7 +4077,7 @@ impl DerivedEngine {
                 Ok(Ok(rids))
             };
             let rids = Self::sample_posting(with_busy_retry(run)??);
-            term_rowids.insert((*term).to_string(), rids);
+            term_rowids.insert(*term, rids);
         }
         Ok(term_rowids)
     }
@@ -4045,7 +4172,7 @@ impl DerivedEngine {
     /// Returns an error if a text lookup fails.
     fn fuzzy_snippets_batch(
         conn: &Connection,
-        jobs: &[(&[String], Vec<i64>)],
+        jobs: &[(&[Trigram], Vec<i64>)],
     ) -> NativeResult<Vec<std::collections::HashMap<i64, String>>> {
         let mut out: Vec<std::collections::HashMap<i64, String>> = Vec::with_capacity(jobs.len());
         if jobs.iter().all(|(_, rids)| rids.is_empty()) {
@@ -4106,7 +4233,7 @@ impl DerivedEngine {
     /// match position indexes the ORIGINAL text and the slice preserves its case;
     /// `SNIPPET_TOKENS` chars of context flank the match. `None` if nothing matched
     /// (no snippet rather than a misleading head-of-text slice).
-    fn window_snippet(txt: &str, terms: &[String]) -> Option<String> {
+    fn window_snippet(txt: &str, terms: &[Trigram]) -> Option<String> {
         let chars: Vec<char> = txt.chars().collect();
         if chars.len() < MIN_TRIGRAM {
             return None;
@@ -4117,7 +4244,7 @@ impl DerivedEngine {
                 .iter()
                 .collect::<String>()
                 .to_lowercase();
-            terms.contains(&tri)
+            terms.iter().any(|t| t.as_str() == tri)
         })?;
         let start = hit.saturating_sub(ctx);
         let end = (hit + MIN_TRIGRAM + ctx).min(chars.len());
@@ -4136,6 +4263,15 @@ impl DerivedEngine {
 #[cfg(test)]
 mod lexical_tests {
     use super::*;
+
+    /// A `Trigram` from a literal (panics if not ≤ MAX_LEN — test-only).
+    fn tg(s: &str) -> Trigram {
+        Trigram::try_from_str(s).unwrap()
+    }
+    /// `&[&str]` literals → `Vec<Trigram>`.
+    fn tgs(ss: &[&str]) -> Vec<Trigram> {
+        ss.iter().map(|s| tg(s)).collect()
+    }
 
     fn store() -> DerivedEngine {
         let dir = std::env::temp_dir().join(format!(
@@ -4254,11 +4390,10 @@ mod lexical_tests {
             let Some(grams) = DerivedEngine::fuzzy_grams(q) else {
                 continue;
             };
-            let gram_strs: Vec<&str> = grams.iter().map(String::as_str).collect();
-            let df = DerivedEngine::trigram_dfs(&conn, &gram_strs).unwrap();
+            let gram_vec: Vec<Trigram> = grams.iter().copied().collect();
+            let df = DerivedEngine::trigram_dfs(&conn, &gram_vec).unwrap();
             let pruned = DerivedEngine::prune_to_rare_terms(&grams, &df, policy);
-            let distinct: Vec<&str> = pruned.iter().map(String::as_str).collect();
-            let bitmaps = DerivedEngine::load_trigram_bitmaps(&conn, &distinct).unwrap();
+            let bitmaps = DerivedEngine::load_trigram_bitmaps(&conn, &pruned).unwrap();
             for &top_k in &[1usize, 2, 3, 5, 10, 100] {
                 // Reference: accumulate_overlap → candidates(≥2) → seg_meta → rank.
                 let overlap = DerivedEngine::accumulate_overlap(&pruned, &bitmaps);
@@ -4740,7 +4875,7 @@ mod lexical_tests {
         )
         .unwrap();
         let conn = e.read_pool.checkout().unwrap();
-        let df = DerivedEngine::trigram_dfs(&conn, &["abc", "xyz", "qqq"]).unwrap();
+        let df = DerivedEngine::trigram_dfs(&conn, &tgs(&["abc", "xyz", "qqq"])).unwrap();
         assert_eq!(df.get("abc"), Some(&2), "'abc' is in both docs");
         assert_eq!(df.get("xyz"), Some(&1), "'xyz' is in one doc");
         assert_eq!(df.get("qqq"), None, "absent trigram has no row (DF 0)");
@@ -4840,7 +4975,7 @@ mod lexical_tests {
             // new trigram is absent (DF 0) — the fuzzy prune would mis-rank it.
             let conn = e.read_pool.checkout().unwrap();
             assert_eq!(
-                DerivedEngine::trigram_dfs(&conn, &["zqw"])
+                DerivedEngine::trigram_dfs(&conn, &[tg("zqw")])
                     .unwrap()
                     .get("zqw"),
                 None,
@@ -4851,7 +4986,7 @@ mod lexical_tests {
         {
             let conn = e.read_pool.checkout().unwrap();
             assert_eq!(
-                DerivedEngine::trigram_dfs(&conn, &["zqw"])
+                DerivedEngine::trigram_dfs(&conn, &[tg("zqw")])
                     .unwrap()
                     .get("zqw"),
                 Some(&1),
@@ -4864,11 +4999,11 @@ mod lexical_tests {
     #[test]
     fn prune_to_rare_keeps_rarest_present_plus_all_absent_drops_common() {
         use std::collections::{BTreeSet, HashMap};
-        let grams: BTreeSet<String> = ["aaa", "bbb", "ccc", "ddd", "eee", "fff", "ggg", "zzz"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let df: HashMap<String, i64> = [
+        let grams: BTreeSet<Trigram> =
+            tgs(&["aaa", "bbb", "ccc", "ddd", "eee", "fff", "ggg", "zzz"])
+                .into_iter()
+                .collect();
+        let df: HashMap<Trigram, i64> = [
             ("aaa", 1000),
             ("bbb", 500),
             ("ccc", 3),
@@ -4879,18 +5014,21 @@ mod lexical_tests {
             ("zzz", 0), // absent from the snapshot (a typo, OR written since #958)
         ]
         .iter()
-        .map(|(k, v)| (k.to_string(), *v))
+        .map(|(k, v)| (tg(k), *v))
         .collect();
         // Under the default (fixed-6) policy: the 6 rarest PRESENT (rarest-first),
         // THEN every absent trigram appended.
         let terms = DerivedEngine::prune_to_rare_terms(&grams, &df, FuzzyCapPolicy::default());
-        assert_eq!(terms, ["ddd", "eee", "ccc", "ggg", "bbb", "fff", "zzz"]);
+        assert_eq!(
+            terms,
+            tgs(&["ddd", "eee", "ccc", "ggg", "bbb", "fff", "zzz"])
+        );
         assert!(
-            !terms.iter().any(|t| t == "aaa"),
+            !terms.iter().any(|t| t.as_str() == "aaa"),
             "dropped the commonest PRESENT (DF 1000, beyond the rarest 6)"
         );
         assert!(
-            terms.contains(&"zzz".to_string()),
+            terms.iter().any(|t| t.as_str() == "zzz"),
             "KEEPS the absent (DF 0) trigram — it may be written-since-snapshot"
         );
     }
@@ -4975,11 +5113,11 @@ mod lexical_tests {
         // grams and cap(8)=7 (6 + round(2.7·ln(8/6))=6+round(0.78)=7), the prune
         // keeps 7, one more than the fixed-6 default.
         use std::collections::{BTreeSet, HashMap};
-        let grams: BTreeSet<String> = ["aaa", "bbb", "ccc", "ddd", "eee", "fff", "ggg", "hhh"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let df: HashMap<String, i64> = [
+        let grams: BTreeSet<Trigram> =
+            tgs(&["aaa", "bbb", "ccc", "ddd", "eee", "fff", "ggg", "hhh"])
+                .into_iter()
+                .collect();
+        let df: HashMap<Trigram, i64> = [
             ("aaa", 800),
             ("bbb", 700),
             ("ccc", 600),
@@ -4990,7 +5128,7 @@ mod lexical_tests {
             ("hhh", 100),
         ]
         .iter()
-        .map(|(k, v)| (k.to_string(), *v))
+        .map(|(k, v)| (tg(k), *v))
         .collect();
         let growth = FuzzyCapPolicy {
             floor: 6,
@@ -5001,7 +5139,10 @@ mod lexical_tests {
         assert_eq!(kept.len(), 7, "cap(8)=7 keeps the 7 rarest present");
         // The 7 rarest (lowest DF first); the commonest one ("aaa", DF 800) is the
         // only one dropped.
-        assert_eq!(kept, ["hhh", "ggg", "fff", "eee", "ddd", "ccc", "bbb"]);
+        assert_eq!(
+            kept,
+            tgs(&["hhh", "ggg", "fff", "eee", "ddd", "ccc", "bbb"])
+        );
         // Default fixed-6 over the same input keeps only 6.
         let default_kept =
             DerivedEngine::prune_to_rare_terms(&grams, &df, FuzzyCapPolicy::default());
