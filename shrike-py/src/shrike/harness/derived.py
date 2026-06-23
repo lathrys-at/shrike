@@ -40,8 +40,9 @@ from shrike.harness.index import IndexState
 
 logger = logging.getLogger("shrike.derived")
 
-# v2: segments table + recognition meta. Must match DerivedEngine::SCHEMA_VERSION.
-SCHEMA_VERSION = 2
+# v3: incremental bitmap tier (trigram_delta + trigram_dirty) + segments/recognition
+# meta. Must match DerivedEngine::SCHEMA_VERSION (a mismatch resets the sidecar).
+SCHEMA_VERSION = 3
 FUZZY_MIN_SHARED = 2  # a fuzzy candidate must share at least this many query trigrams (noise floor)
 DEFAULT_FUZZY_TOP_K = 20
 

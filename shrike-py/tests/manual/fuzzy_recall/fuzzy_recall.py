@@ -69,8 +69,9 @@ from tests.manual.search_quality.metrics import (  # noqa: E402
     evaluate_query,
 )
 
-#: The schema version the derived store opens at (must match the facade / native).
-_DERIVED_SCHEMA_VERSION = 2
+#: The schema version the derived store opens at (must match the facade / native:
+#: shrike.harness.derived.SCHEMA_VERSION / DerivedEngine::SCHEMA_VERSION).
+_DERIVED_SCHEMA_VERSION = 3
 #: recall@k / MRR are computed at this k (the eval's headline cut).
 TOP_K = 10
 #: The as-you-type single-query round-trip budget (#977): a lexical search must

@@ -89,11 +89,12 @@ def _lexical_hits(tmp_path, query: str) -> list:
     committed to. This is the surface an import's derived rebuild must populate,
     rather than leaving empty until an unrelated drift trigger."""
     from shrike.harness import cache_layout
+    from shrike.harness.derived import SCHEMA_VERSION
 
     db_path = cache_layout.derived_db_path(
         str(tmp_path / "cache"), str(tmp_path / "collection.anki2")
     )
-    engine = shrike_native.DerivedTextEngine(db_path, 2)
+    engine = shrike_native.DerivedTextEngine(db_path, SCHEMA_VERSION)
     try:
         return engine.search_substring(query, 10)
     finally:

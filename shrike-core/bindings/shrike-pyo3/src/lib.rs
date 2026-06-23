@@ -1011,6 +1011,20 @@ impl DerivedTextEngine {
             (p.floor, p.k, p.ceiling)
         })
     }
+
+    /// Set the materialization DF ceiling `C`: a trigram in fewer than `C` idx rows
+    /// is materialized as an incrementally-maintained base bitmap, commoner trigrams
+    /// fall to the live posting read. A pure performance dial (results are
+    /// path-invariant). The perf harness sweeps it to find the per-write-cost /
+    /// query-coverage knee; production opens with the default and never calls it.
+    fn set_materialize_ceiling(&self, py: Python<'_>, ceiling: usize) {
+        py.detach(|| self.inner.set_materialize_ceiling(ceiling));
+    }
+
+    /// The current materialization DF ceiling `C`.
+    fn materialize_ceiling(&self, py: Python<'_>) -> usize {
+        py.detach(|| self.inner.materialize_ceiling())
+    }
 }
 
 // ── Index engine ─────────────────────────────────────────────────────

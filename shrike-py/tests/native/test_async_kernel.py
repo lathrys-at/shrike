@@ -82,7 +82,9 @@ class TestRebuildDerived:
             # namespaced per collection, so resolve the path the kernel
             # wrote, not the flat cache root.
             db_path = cache_layout.derived_db_path(str(tmp_path / "cache"), collection_path)
-            engine = shrike_native.DerivedTextEngine(db_path, 2)
+            from shrike.harness.derived import SCHEMA_VERSION
+
+            engine = shrike_native.DerivedTextEngine(db_path, SCHEMA_VERSION)
             try:
                 assert engine.get_col_mod() == dmod
                 hits = engine.search_substring("krebs", 10)
