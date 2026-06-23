@@ -189,6 +189,10 @@ impl ReadPool {
         // lock traffic the pooled concurrent readers otherwise serialize on.
         conn.pragma_update(None, "mmap_size", MMAP_SIZE_BYTES)
             .map_err(db_err)?;
+        // Register the `rarray` virtual table on this connection so candidate-set
+        // reads (e.g. seg_meta hydration) can bind a whole id list to ONE
+        // prepare-cached `IN rarray(?1)` statement.
+        rusqlite::vtab::array::load_module(&conn).map_err(db_err)?;
         Ok(conn)
     }
 
@@ -1588,9 +1592,9 @@ impl DerivedEngine {
     /// snapshot — the fuzzy path reads it to prune common trigrams. A term absent
     /// from the result is absent from the SNAPSHOT (treated as DF 0, sorting last in
     /// the prune); see [`Self::refresh_trigram_df`] for the freshness contract.
-    /// Per-term `term = ?` primary-key seek on the plain table (mmap-served, one
-    /// cached statement), NOT a doclist count through fts5vocab. Reads on the passed
-    /// [`ReadPool`] connection.
+    /// ONE prepare-cached `term IN rarray(?1)` primary-key seek over the plain table
+    /// (the in-memory carray binds the whole trigram set; mmap-served), NOT a doclist
+    /// count through fts5vocab. Reads on the passed [`ReadPool`] connection.
     ///
     /// # Errors
     ///
@@ -1603,13 +1607,22 @@ impl DerivedEngine {
             return Ok(std::collections::HashMap::new());
         }
         let run = || -> rusqlite::Result<std::collections::HashMap<String, i64>> {
-            let mut stmt = conn.prepare_cached("SELECT df FROM trigram_df WHERE term = ?1")?;
+            // The whole trigram set as an in-memory carray, so the term→df lookup is
+            // ONE prepare-cached `IN rarray(?1)` statement over one implicit
+            // transaction, versus a `query`/`reset` per trigram. Terms absent from
+            // the table never come back — the caller reads a missing term as DF 0.
+            let want: std::rc::Rc<Vec<rusqlite::types::Value>> = std::rc::Rc::new(
+                terms
+                    .iter()
+                    .map(|&t| rusqlite::types::Value::Text(t.to_string()))
+                    .collect(),
+            );
+            let mut stmt =
+                conn.prepare_cached("SELECT term, df FROM trigram_df WHERE term IN rarray(?1)")?;
             let mut m = std::collections::HashMap::new();
-            for &term in terms {
-                let mut q = stmt.query([term])?;
-                if let Some(r) = q.next()? {
-                    m.insert(term.to_string(), r.get::<_, i64>(0)?);
-                }
+            let mut q = stmt.query(rusqlite::params![want])?;
+            while let Some(r) = q.next()? {
+                m.insert(r.get::<_, String>(0)?, r.get::<_, i64>(1)?);
             }
             Ok(m)
         };
@@ -3162,35 +3175,29 @@ impl DerivedEngine {
         // so the per-candidate inserts never grow-and-rehash the table.
         let mut seg_meta: FxI64Map<(i64, String, String)> =
             std::collections::HashMap::with_capacity_and_hasher(rowids.len(), Default::default());
-        // One PREPARE-CACHED single-row PK seek per rowid, NOT an inline `IN
-        // (literals)` list. The IN's literals vary per call, so SQLite re-parses the
-        // statement every read (the `prepare_with_flags` hotspot); a bound `IN
-        // (?,?,…)` would instead rebuild, per read, the ephemeral RHS index the
-        // parallel fuzzy chunks fault through (the pcache `STATIC_LRU` mutex). A
-        // cached `rowid = ?1` is both: parsed once, and a direct mmap'd PK lookup
-        // with no temp btree.
-        //
-        // The whole batch rides ONE explicit read transaction: without it, each
-        // single-row `query`/`reset` runs its own implicit auto-transaction, and the
-        // per-candidate begin/commit pairs serialize on SQLite's btree transaction
-        // mutex (`sqlite3BtreeBeginTrans` / `CommitPhaseTwo` under `sqlite3_reset`) on
-        // the parallel chunks. One transaction = one begin/commit per call — the
-        // single-statement `IN`'s profile — over a consistent snapshot (the candidate
-        // set is fixed; the search's freshness bracket still flags a mid-read write).
+        // Bind the whole candidate set to ONE prepare-cached `IN rarray(?1)`
+        // statement — the `rarray` carray vtab is an in-memory view over `ids` — so
+        // the read is a single statement (one `query`/`reset`) over one implicit
+        // transaction, versus a `query`/`reset` per candidate rowid. The statement
+        // text is constant, so it parses once (no per-arity re-parse an inline
+        // `IN (literals)` would pay), and `rarray` is not a temp DB table, so it
+        // stages no pages through the pcache `STATIC_LRU` mutex the parallel fuzzy
+        // chunks otherwise serialize on.
         let run = || -> rusqlite::Result<Vec<(i64, i64, String, String)>> {
-            let tx = conn.unchecked_transaction()?;
+            let ids: std::rc::Rc<Vec<rusqlite::types::Value>> = std::rc::Rc::new(
+                rowids
+                    .iter()
+                    .map(|&r| rusqlite::types::Value::Integer(r))
+                    .collect(),
+            );
+            let mut stmt = conn.prepare_cached(
+                "SELECT rowid, note_id, source, ref FROM rowmap WHERE rowid IN rarray(?1)",
+            )?;
             let mut out = Vec::with_capacity(rowids.len());
-            {
-                let mut stmt =
-                    tx.prepare_cached("SELECT note_id, source, ref FROM rowmap WHERE rowid = ?1")?;
-                for &rowid in rowids {
-                    let mut q = stmt.query([rowid])?;
-                    if let Some(r) = q.next()? {
-                        out.push((rowid, r.get(0)?, r.get(1)?, r.get(2)?));
-                    }
-                }
+            let mut q = stmt.query(rusqlite::params![ids])?;
+            while let Some(r) = q.next()? {
+                out.push((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?));
             }
-            tx.commit()?;
             Ok(out)
         };
         for (rowid, note_id, source, r) in with_busy_retry(run)? {
