@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use shrike_error::{ErrorKind, NativeError, NativeResult, ResultExt};
 use usearch::Index;
@@ -73,7 +73,17 @@ pub struct MultiModalIndex {
     /// index.usearch filename). Mirrors `_INDEX_MODALITIES`.
     modalities: Vec<String>,
     text: String,
-    state: Mutex<State>,
+    /// The per-modality sub-indexes behind a reader/writer lock: concurrent
+    /// searches share a READ guard (the per-query usearch walks then run in
+    /// parallel — a K-query batch fans `K/compute_width` mini-batches across the
+    /// compute pool, each taking its own read guard), while `add`/`remove`/
+    /// `restore`/`clear` take the exclusive WRITE guard. This is the engine's
+    /// documented safety model made explicit: usearch's `Index` is trusted for
+    /// read-vs-read concurrency only (see [`Self::calibrate_activation`]), so a
+    /// search holds the read guard across its whole walk to exclude the in-place
+    /// mutators (`add`/`remove`/`reserve` are `&self` on usearch but mutate in
+    /// place — the exclusion comes from this guard, not the receiver).
+    state: RwLock<State>,
     /// Serializes [`save`](Self::save) against the in-place byte mutators
     /// ([`add`](Self::add)/[`remove`](Self::remove)) **without** gating
     /// [`search_by_modality`](Self::search_by_modality). `save` clones a
@@ -129,7 +139,7 @@ impl MultiModalIndex {
         Ok(Self {
             modalities,
             text,
-            state: Mutex::new(State {
+            state: RwLock::new(State {
                 indexes: BTreeMap::new(),
                 ndim: None,
             }),
@@ -137,8 +147,18 @@ impl MultiModalIndex {
         })
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().expect("index state lock poisoned")
+    /// A shared READ guard — concurrent holders are allowed (read-vs-read on the
+    /// usearch `Index` is the trusted-safe case), so parallel searches proceed
+    /// without serializing.
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, State> {
+        self.state.read().expect("index state lock poisoned")
+    }
+
+    /// The exclusive WRITE guard — excludes both other writers and every reader,
+    /// so an `add`/`remove`/`restore`/`clear` never mutates a sub-index a search
+    /// is walking.
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, State> {
+        self.state.write().expect("index state lock poisoned")
     }
 
     fn lock_save_mutation(&self) -> std::sync::MutexGuard<'_, ()> {
@@ -149,17 +169,17 @@ impl MultiModalIndex {
 
     /// Total vectors across all sub-indexes.
     pub fn size(&self) -> usize {
-        self.lock().indexes.values().map(|s| s.index.size()).sum()
+        self.read().indexes.values().map(|s| s.index.size()).sum()
     }
 
     /// The index dimensionality, or `None` before any vectors land.
     pub fn ndim(&self) -> Option<usize> {
-        self.lock().ndim
+        self.read().ndim
     }
 
     /// Per-modality `(name, vector count)`.
     pub fn modality_sizes(&self) -> Vec<(String, usize)> {
-        self.lock()
+        self.read()
             .indexes
             .iter()
             .map(|(m, s)| (m.clone(), s.index.size()))
@@ -171,7 +191,7 @@ impl MultiModalIndex {
     /// is `None` for an empty sub-index (usearch reports 0 dimensions before the
     /// first vector sets the width; surface that as "unknown", not 0).
     pub fn modality_stats(&self) -> Vec<(String, usize, Option<usize>)> {
-        self.lock()
+        self.read()
             .indexes
             .iter()
             .map(|(m, s)| {
@@ -184,7 +204,7 @@ impl MultiModalIndex {
 
     /// The names of the loaded modalities.
     pub fn modality_names(&self) -> Vec<String> {
-        self.lock().indexes.keys().cloned().collect()
+        self.read().indexes.keys().cloned().collect()
     }
 
     /// Create `modality`'s sub-index at `ndim` if absent (idempotent).
@@ -193,7 +213,7 @@ impl MultiModalIndex {
     ///
     /// Returns an error if the sub-index cannot be created.
     pub fn ensure(&self, modality: &str, ndim: usize) -> NativeResult<()> {
-        let mut state = self.lock();
+        let mut state = self.write();
         if !state.indexes.contains_key(modality) {
             state
                 .indexes
@@ -205,14 +225,14 @@ impl MultiModalIndex {
 
     /// Drop every sub-index.
     pub fn clear(&self) {
-        let mut state = self.lock();
+        let mut state = self.write();
         state.indexes.clear();
         state.ndim = None;
     }
 
     /// Drop one modality's sub-index.
     pub fn drop_modality(&self, modality: &str) {
-        self.lock().indexes.remove(modality);
+        self.write().indexes.remove(modality);
     }
 
     /// Load the per-modality sub-index files under `dir`.
@@ -271,7 +291,7 @@ impl MultiModalIndex {
             }
             loaded.insert(modality.clone(), sub);
         }
-        let mut state = self.lock();
+        let mut state = self.write();
         state.ndim = loaded.get(&self.text).map(|s| s.index.dimensions());
         state.indexes = loaded;
         true
@@ -316,7 +336,7 @@ impl MultiModalIndex {
             .with_context(ErrorKind::Internal, || format!("mkdir {dir}"))?;
         // Snapshot under the state lock, then release it before any I/O.
         let (to_write, loaded): (Vec<(String, Arc<Index>)>, std::collections::HashSet<String>) = {
-            let state = self.lock();
+            let state = self.read();
             let to_write = state
                 .indexes
                 .iter()
@@ -375,7 +395,7 @@ impl MultiModalIndex {
         let ndim = vectors[0].len();
         // Exclude a concurrent save's serialization read of this Index.
         let _mutation = self.lock_save_mutation();
-        let mut state = self.lock();
+        let mut state = self.write();
         if !state.indexes.contains_key(modality) {
             state
                 .indexes
@@ -402,7 +422,7 @@ impl MultiModalIndex {
     pub fn remove(&self, keys: &[i64]) -> NativeResult<usize> {
         // Exclude a concurrent save's serialization read of this Index.
         let _mutation = self.lock_save_mutation();
-        let mut state = self.lock();
+        let mut state = self.write();
         if keys.is_empty() || state.indexes.is_empty() {
             return Ok(0);
         }
@@ -441,7 +461,7 @@ impl MultiModalIndex {
     ) -> NativeResult<Vec<BTreeMap<String, ModalityRanking>>> {
         let span = tracing::debug_span!("index.search", queries = queries.len(), k);
         let _enter = span.enter();
-        let state = self.lock();
+        let state = self.read();
         // A deck/tag scope rides the index walk as a per-candidate predicate (the
         // keys ARE note ids), so a scoped search returns in-scope neighbours
         // directly instead of over-fetching the whole index and dropping the rest.
@@ -521,7 +541,7 @@ impl MultiModalIndex {
 
     /// Distinct note ids in the text sub-index, sorted.
     pub fn keys(&self) -> Vec<i64> {
-        let state = self.lock();
+        let state = self.read();
         state
             .indexes
             .get(&self.text)
@@ -536,7 +556,7 @@ impl MultiModalIndex {
 
     /// Whether `modality`'s sub-index holds a vector for `key`.
     pub fn modality_contains(&self, modality: &str, key: i64) -> bool {
-        let state = self.lock();
+        let state = self.read();
         state
             .indexes
             .get(modality)
@@ -547,7 +567,7 @@ impl MultiModalIndex {
     /// All keys in a modality's sub-index, one entry per *vector* (multi keys
     /// repeat) — mirroring the Python binding's `Index.keys` view.
     pub fn modality_keys(&self, modality: &str) -> Vec<i64> {
-        let state = self.lock();
+        let state = self.read();
         let Some(sub) = state.indexes.get(modality) else {
             return Vec::new();
         };
@@ -567,7 +587,7 @@ impl MultiModalIndex {
     /// in low-millisecond territory — unlike calibration, which holds per-search
     /// because its total runs much longer.
     pub fn dot_scores(&self, modality: &str, keys: &[i64], query: &[f32]) -> Vec<(i64, f32)> {
-        let state = self.lock();
+        let state = self.read();
         let Some(sub) = state.indexes.get(modality) else {
             return Vec::new();
         };
@@ -595,7 +615,7 @@ impl MultiModalIndex {
 
     /// A key's vector(s) in `modality`, 2D row-major, or `None`.
     pub fn modality_get(&self, modality: &str, key: i64) -> Option<Vec<Vec<f32>>> {
-        let state = self.lock();
+        let state = self.read();
         let sub = state.indexes.get(modality)?;
         Self::vectors_of(&sub.index, key as u64)
     }
@@ -626,13 +646,15 @@ impl MultiModalIndex {
     /// search each non-text modality, record the best non-self match.
     ///
     /// Lock discipline: the sample keys and their query vectors are snapshotted
-    /// under ONE short hold, then each search takes its own brief hold — so a
-    /// calibration over hundreds of samples never stalls the whole index behind
-    /// a single multi-hundred-millisecond lock. Fully lock-free searching is
-    /// deliberately NOT used: writers may interleave, and the engine's safety
-    /// model trusts usearch's `Sync` only for read-vs-read — every usearch call
-    /// stays under the mutex. The stats are statistical, so an interleaved write
-    /// skewing one sample is fine.
+    /// under ONE short read hold, then each search takes its own brief read hold —
+    /// so a calibration over hundreds of samples never stalls the whole index
+    /// behind a single multi-hundred-millisecond hold, and a writer can take the
+    /// exclusive guard between samples. Fully lock-free searching is deliberately
+    /// NOT used: writers may interleave, and the engine's safety model trusts
+    /// usearch's `Sync` only for read-vs-read — every usearch call stays under a
+    /// `state` guard (a read guard for searches, so they stay mutually concurrent
+    /// but exclude the in-place mutators). The stats are statistical, so an
+    /// interleaved write skewing one sample is fine.
     ///
     /// # Errors
     ///
@@ -646,7 +668,7 @@ impl MultiModalIndex {
         // Phase 1 — one short hold: pick the sample and copy out its query
         // vectors; list the live non-text modalities.
         let (queries, modalities) = {
-            let state = self.lock();
+            let state = self.read();
             let Some(text_sub) = state.indexes.get(&self.text) else {
                 return Ok(Vec::new());
             };
@@ -698,7 +720,7 @@ impl MultiModalIndex {
             let mut best_sims: Vec<f64> = Vec::new();
             for (key, qvec) in &queries {
                 let best = {
-                    let state = self.lock();
+                    let state = self.read();
                     let Some(sub) = state.indexes.get(modality) else {
                         break; // modality vanished mid-run (clear/rebuild)
                     };

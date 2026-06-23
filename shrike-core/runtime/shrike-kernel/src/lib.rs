@@ -2976,44 +2976,55 @@ impl Kernel {
                 .map(|s| s.text.clone())
                 .collect();
 
-            // Phase 2 (compute): the semantic read as ONE job (the per-modality
-            // USearch lookups are fast — not worth subdividing), and the two lexical
-            // reads CHUNKED across the compute pool. `search-batch` carries the whole
-            // query bank in one call, so a single substring (or fuzzy) job would grind
-            // every query serially on one thread while the rest of the pool idles.
-            // Splitting the query batch into ~`compute_width` chunks per read spreads
-            // the per-query work across the workers (each chunk checks out its own
-            // derived read connection, concurrent under WAL). All jobs are scheduled
-            // eagerly and run concurrently; results are collected BY INDEX (chunk then
-            // source order), never completion order, so RRF position and the exact-tier
-            // insertion order stay deterministic.
+            // Phase 2 (compute): the semantic read AND the two lexical reads CHUNKED
+            // across the compute pool. `search-batch` carries the whole query bank in
+            // ONE call, so a single job per read would grind every query serially on one
+            // thread while the rest of the pool idles. Splitting each read's batch into
+            // ~`compute_width` mini-batches spreads the per-query work across the
+            // workers: the semantic chunks each take a usearch READ guard (concurrent
+            // HNSW walks), the lexical chunks each check out their own derived read
+            // connection (concurrent under WAL). All jobs are scheduled eagerly and run
+            // concurrently; results are collected BY INDEX (chunk then source order),
+            // never completion order, so RRF position and the exact-tier insertion order
+            // stay deterministic.
             let discover = {
                 let engine = Arc::clone(&engine);
                 let d_args = args.clone();
                 let d_vectors = vectors.clone();
                 move |lex_scope: Arc<Option<Vec<i64>>>| async move {
-                    let sem_fut = {
-                        let engine = Arc::clone(&engine);
-                        let vectors = d_vectors;
-                        let args = d_args.clone();
-                        let lex_scope = Arc::clone(&lex_scope);
-                        crate::runtime::dispatch_compute(move || {
-                            if args.semantic {
-                                actions::search_semantic(
-                                    &*engine,
-                                    &vectors,
-                                    &args,
-                                    lex_scope.as_deref(),
-                                )
-                            } else {
-                                Ok(Vec::new())
-                            }
-                        })
-                    };
                     // The hidden set, scope, and args are shared by Arc so a chunk job
                     // clones a pointer, not the (potentially large) data.
                     let hidden = Arc::new(d_args.hidden_lexical_sources.clone());
                     let lex_args = Arc::new(d_args);
+                    // Semantic over ALL source vectors (queries + anchors), aligned with
+                    // `sources` by index; chunked like the lexical reads. Empty (no
+                    // dispatch) when the request isn't semantic.
+                    let sem_futs: Vec<_> = if lex_args.semantic {
+                        let sem_chunk_size = d_vectors
+                            .len()
+                            .div_ceil(crate::runtime::compute_width().max(1))
+                            .max(1);
+                        (0..d_vectors.len())
+                            .step_by(sem_chunk_size)
+                            .map(|start| {
+                                let end = (start + sem_chunk_size).min(d_vectors.len());
+                                let chunk = d_vectors[start..end].to_vec();
+                                let engine = Arc::clone(&engine);
+                                let lex_scope = Arc::clone(&lex_scope);
+                                let args = Arc::clone(&lex_args);
+                                crate::runtime::dispatch_compute(move || {
+                                    actions::search_semantic(
+                                        &*engine,
+                                        &chunk,
+                                        &args,
+                                        lex_scope.as_deref(),
+                                    )
+                                })
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let chunk_size = query_texts
                         .len()
                         .div_ceil(crate::runtime::compute_width().max(1))
@@ -3064,7 +3075,10 @@ impl Kernel {
                             })
                         })
                         .collect();
-                    let sem_by_source = sem_fut.await?;
+                    let mut sem_by_source = Vec::with_capacity(d_vectors.len());
+                    for fut in sem_futs {
+                        sem_by_source.extend(fut.await?);
+                    }
                     let mut substr_batch = Vec::with_capacity(query_texts.len());
                     for fut in substr_futs {
                         substr_batch.extend(fut.await?);
