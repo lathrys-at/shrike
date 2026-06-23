@@ -740,12 +740,24 @@ the crate's `rust_test` `deps`; then a `./bazel` run re-splices `MODULE.bazel.lo
 The first adoption regenerates the lock; later crates ride the already-resolved
 graph (no further lock change).
 
-- **`cargo-fuzz`/`libFuzzer` and `miri`** (the SSRF/decode trust boundaries; FFI
-  soundness in `shrike-cabi`/`shrike-pyo3`) remain **cargo-only** tools, off the
-  per-PR `bazel test //...` critical path — they are slow and need their own
-  toolchain. The posture: a scheduled/manual cargo lane, off `//...`, added when a
-  boundary's value justifies it; the `proptest` panic-freedom sweeps cover the
-  common case until then.
+- **`cargo-fuzz`/`libFuzzer`** stays a **cargo-only** tool, off the per-PR `bazel
+  test //...` critical path (slow, own toolchain) — a scheduled/manual lane added
+  when a decode/parse boundary's value justifies it; the `proptest` panic-freedom
+  sweeps cover the common case until then.
+- **miri was evaluated for FFI soundness (#744) and found NOT viable for the
+  binding crates.** miri interprets MIR and cannot execute foreign code — and the
+  `shrike-cabi`/`shrike-pyo3` dependency cone is exactly that: a tokio runtime
+  (real syscalls), usearch (linked C++ via cxx), anki, and the CPython FFI. miri
+  runs cleanly on a pure-Rust crate (verified on `shrike-store`) but a `cargo miri
+  test` on cabi/pyo3 dies the moment a test touches the runtime or a C/C++ symbol,
+  and the pure-Rust crates miri *can* run carry almost no `unsafe` to check. So
+  there is no useful miri lane to stand up here. FFI soundness is instead pinned
+  **behaviourally, under real execution**: the six `shrike-cabi` integration
+  binaries (C-ABI lifecycle, panic-across-boundary, fire-once, op-racing-shutdown,
+  post-shutdown, reinit, no-driven-runtime) plus the Python `native` suite
+  (ErrorKind→PyException mapping, the facades, teardown). A future miri pass would
+  need the cabi pointer/lifetime helpers (`cstr`, `UserData`, `Completion`,
+  `ShrikeHandle`) factored into a C-stack-free unit so miri has something to run.
 - **Hermeticity is non-negotiable in the unit lane.** A property/fuzz test sweeps
   inputs through *pure* code only — it must not perform live I/O (no `getaddrinfo`,
   no sockets, no disk beyond a tempdir). The SSRF classifier is fuzzed as the pure
