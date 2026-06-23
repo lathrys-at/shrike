@@ -1129,8 +1129,13 @@ mod tests {
         let e = engine();
         e.add("text", &[1, 2], &[unit(1, 8), unit(2, 8)]).unwrap();
         let bad = unit(1, 16);
-        let res = e.search_by_modality(&[bad], 5, Some(&["text".to_string()]), None);
-        assert!(res.is_err(), "wrong-dim query must error, got {res:?}");
+        let err = e
+            .search_by_modality(&[bad], 5, Some(&["text".to_string()]), None)
+            .expect_err("wrong-dim query must error, not return garbage distances");
+        // The search path surfaces a usearch failure as Internal (the add path
+        // maps the same dimension class to InvalidInput — an asymmetry, but both
+        // are hard errors, never a silent truncated/padded result).
+        assert_eq!(err.kind(), ErrorKind::Internal);
     }
 
     #[test]
@@ -1140,11 +1145,12 @@ mod tests {
         let e = engine();
         e.add("text", &[1, 2], &[unit(1, 8), unit(2, 8)]).unwrap();
         let bad = unit(1, 4);
-        let res = e.search_by_modality(&[bad], 5, Some(&["text".to_string()]), Some(&[1i64, 2]));
-        assert!(
-            res.is_err(),
-            "wrong-dim scoped query must error, got {res:?}"
-        );
+        let err = e
+            .search_by_modality(&[bad], 5, Some(&["text".to_string()]), Some(&[1i64, 2]))
+            .expect_err("wrong-dim scoped query must error");
+        // The filtered-search path must not bypass usearch's dimension check;
+        // it surfaces the same Internal failure as the unscoped walk.
+        assert_eq!(err.kind(), ErrorKind::Internal);
     }
 
     #[test]

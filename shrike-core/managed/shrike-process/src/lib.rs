@@ -1020,7 +1020,10 @@ mod tests {
         };
         // After drop the child must be dead (Drop waited it via stop()). A
         // direct child becomes a zombie until waited, but stop() inside Drop
-        // does the wait, so `kill(pid,0)` should no longer report it.
+        // does the wait, so `kill(pid,0)` should no longer report it. (The probe
+        // is checked immediately; a PID-reuse race in the microsecond window is
+        // theoretically possible but negligible — Linux allocates PIDs
+        // sequentially across a >32k space.)
         assert!(
             !pid_alive(pid),
             "a dropped supervisor must reap its child, not leak it"

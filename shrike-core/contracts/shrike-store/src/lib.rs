@@ -537,23 +537,12 @@ mod tests {
         for k in -5_000_i64..=5_000 {
             push(k, &mut seen);
         }
-        for k in [i64::MIN, i64::MAX, i64::MIN + 1, i64::MAX - 1, 0, -1] {
-            // these may already be in the sequential range; only assert distinctness
-            seen.insert(hash_one_i64(k));
+        for k in [i64::MIN, i64::MAX, i64::MIN + 1, i64::MAX - 1] {
+            assert!(seen.insert(hash_one_i64(k)), "boundary key {k} collided");
         }
-        let mut rng = Rng::new(0xDEAD_BEEF);
-        let before = seen.len();
-        let mut inserted = 0;
-        for _ in 0..50_000 {
-            let k = rng.next_i64();
-            if hash_one_i64(k) != hash_one_i64(k.wrapping_add(1)) {
-                inserted += 1;
-            }
-            seen.insert(hash_one_i64(k));
-        }
-        assert!(inserted > 0);
-        assert!(seen.len() >= before, "hash set should only grow");
-        // The bijection, stated directly: equal hashes imply equal keys.
+        // The bijection, stated directly: equal hashes imply equal keys, over a
+        // random sweep of the full i64 range (this subsumes a weaker "set only
+        // grows" check — it is the actual injectivity property).
         let mut rng = Rng::new(7);
         for _ in 0..50_000 {
             let a = rng.next_i64();

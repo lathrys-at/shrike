@@ -996,7 +996,13 @@ mod tests {
     /// index built before first save is not orphaned the moment the file lands.
     #[test]
     fn lexical_and_canonical_legs_agree_for_a_plain_absolute_path() {
-        let tmp = std::env::temp_dir().join(format!(
+        // Canonicalize the temp base first: on macOS `temp_dir()` is itself a
+        // symlink (/var → /private/var), which would make the lexical leg differ
+        // from the canonicalized leg for a reason unrelated to what we test. The
+        // base must already be the real path so the only variable is the missing
+        // → present transition of the leaf file.
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let tmp = base.join(format!(
             "shrike-fresh-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()

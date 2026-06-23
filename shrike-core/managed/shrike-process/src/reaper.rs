@@ -558,9 +558,8 @@ mod tests {
     #[test]
     fn wait_pid_dead_returns_immediately_for_a_dead_pid() {
         let started = Instant::now();
-        // 0x7FFF_FFFF is far above any realistic live PID; even if taken, the
-        // function still returns a bool — we assert on the dead case via a PID we
-        // know is invalid (0 reads dead through pid_alive's guard).
+        // PID 0 reads dead through pid_alive's non-positive guard, so this
+        // exercises the already-dead fast path: return true without spinning.
         assert!(wait_pid_dead(0, Duration::from_secs(5)));
         assert!(
             started.elapsed() < Duration::from_secs(1),

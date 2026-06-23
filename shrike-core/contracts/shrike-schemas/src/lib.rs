@@ -2415,7 +2415,6 @@ mod tests {
         let p: CollectionPruneResponse = serde_json::from_str(r#"{}"#).unwrap();
         assert!(p.dry_run);
 
-        // ServerStatus.collection_held -> true (default_true).
         // SearchResponse.completeness -> Full (the safe "final answer" default).
         let sr: SearchResponse = serde_json::from_str(r#"{}"#).unwrap();
         assert_eq!(sr.completeness, Completeness::Full);
