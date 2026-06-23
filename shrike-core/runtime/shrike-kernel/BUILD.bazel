@@ -77,6 +77,27 @@ rust_test(
     ],
 )
 
+# The convergence + freshness integration suite: the end-to-end invariants the
+# in-crate unit tests don't reach at the composition level — the incremental
+# reconcile converges to a full rebuild (the marquee reconcile==rebuild proof),
+# the boot reconcile heals a drifted collection to the same state, the freshness
+# signal never over-certifies a pending write, and the upsert/delete/dup-policy
+# seams behave through the public kernel API. Own test binary for the
+# process-global runtime-seam reason as the proofs above.
+rust_test(
+    name = "convergence_test",
+    size = "medium",
+    srcs = ["tests/convergence.rs"],
+    edition = "2021",
+    deps = [
+        ":shrike_kernel",
+        "//shrike-core/contracts/shrike-error:shrike_error",
+        "//shrike-core/runtime/shrike-collection:shrike_collection",
+        "@crates//:futures",
+        "@crates//:tokio",
+    ],
+)
+
 # The committed-but-errored regression: the maintained write tail is
 # best-effort — a committed note's call returns Ok despite a failed embed
 # tail. Own test binary (an integration test linking the public crate API +
