@@ -672,6 +672,47 @@ unauthenticated from the network*, regardless of how the data plane is exposed.
   front of the loopback-TCP listener) and the management-pane subdomain are out of scope here — they
   are the authn/authz and management-UI tracks. This decision is the transport split they build on.
 
+## Testing
+
+### The Rust unit bar: API-level, adversarial, no integration backstop
+
+The kernel's integration suite (Python) is genuinely strong, and the early Rust
+tests were written *assuming* it backstops them — cursory in-module smoke tests.
+That assumption capped unit-test quality. The bar is reset: each crate gets
+fast, exhaustive tests **directly against its public API**, adversarial by
+construction (boundaries, negative cases, malformed input, ordering, idempotence,
+oracle cross-checks), standing on their own rather than leaning on end-to-end
+coverage. The per-category taxonomy (unit / property / oracle-differential /
+fuzz-style / in-crate integration) and where each lives are in
+[`testing.md`](testing.md).
+
+### Property/generative tests use an inlined PRNG, not `proptest` — the crate graph is the reason
+
+Property-based and fuzz-style inline tests use a ~15-line SplitMix64 generator
+inlined in the test module, not `proptest`/`quickcheck`/`rand`. The constraint is
+the build: the authoritative lane is Bazel, whose `crate_universe` resolves every
+dependency — including dev/test crates — from one `Cargo.lock` into
+`MODULE.bazel.lock`. Adding an external test framework is therefore not a
+`Cargo.toml` edit; it is a crate-graph change that needs a `./bazel` re-splice to
+adopt, and shipping the `Cargo.lock` delta without the matching lock re-splice
+would break CI's Bazel lane. The inlined generator delivers the load-bearing
+properties (seed-reproducible inputs, an oracle to diff against, panic-freedom
+sweeps) at **zero crate-graph churn**, riding the `rust_test(crate=…)` target each
+crate already has. What it lacks vs `proptest` is automatic shrinking — accepted,
+because a seed reproduces any failure and the generators are small enough to
+minimize by hand.
+
+- **`cargo-fuzz`/`libFuzzer` and `miri`** (the SSRF/decode trust boundaries; FFI
+  soundness in `shrike-cabi`/`shrike-pyo3`) are **cargo-only** tools that do not
+  belong on the per-PR `bazel test //...` critical path — they are slow and need
+  their own toolchain. The posture: a scheduled/manual cargo lane, off `//...`,
+  added when a boundary's value justifies it; the inline panic-freedom sweeps
+  cover the common case until then.
+- **Escalation to `proptest` for a specific high-value boundary** (where shrinking
+  earns its keep) is a deliberate, bazel-gated follow-up: add the dep, run
+  `./bazel` to re-splice `MODULE.bazel.lock`, commit both — never piggy-backed on
+  a test-only change.
+
 ## Performance engineering
 
 ### Stub-vs-real embedding is a profile choice, via a first-class `synthetic` runtime (#865)

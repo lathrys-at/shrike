@@ -481,3 +481,396 @@ pub trait DerivedStore: Send + Sync {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
+    use std::sync::Mutex;
+
+    /// A tiny deterministic, seed-reproducible generator (SplitMix64). The
+    /// inline-test property/generative lane uses this in place of an external
+    /// `proptest`/`rand` dependency, so a property test rides the existing
+    /// `rust_test` target with no crate-graph (`MODULE.bazel.lock`) churn. A
+    /// failure is reproducible from its seed; widen `ITERS` to search harder.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        fn next_i64(&mut self) -> i64 {
+            self.next_u64() as i64
+        }
+    }
+
+    fn hash_one_i64(key: i64) -> u64 {
+        let mut h = FxI64Hasher::default();
+        h.write_i64(key);
+        h.finish()
+    }
+
+    // ---- FxI64Hasher ----------------------------------------------------
+
+    #[test]
+    fn fxhasher_single_key_write_is_a_bijection() {
+        // With an empty starting state, `write_i64(k)` reduces to
+        // `(0.rotate_left(5) ^ k as u64) * K` = `(k as u64) * K`, and K is odd,
+        // so single-key hashing is a bijection over u64 — distinct keys NEVER
+        // collide. This is load-bearing: rowids/note-ids are sequential, and a
+        // hasher that collided on sequential small integers would silently
+        // degrade every search-path map (`FxI64Map`/`FxI64Set`). Pin it across
+        // sequential keys, both signs, the boundaries, and a random sweep.
+        let mut seen = std::collections::HashSet::new();
+        let push = |k: i64, seen: &mut std::collections::HashSet<u64>| {
+            assert!(
+                seen.insert(hash_one_i64(k)),
+                "single-key hash collided at key {k}"
+            );
+        };
+        for k in -5_000_i64..=5_000 {
+            push(k, &mut seen);
+        }
+        for k in [i64::MIN, i64::MAX, i64::MIN + 1, i64::MAX - 1, 0, -1] {
+            // these may already be in the sequential range; only assert distinctness
+            seen.insert(hash_one_i64(k));
+        }
+        let mut rng = Rng::new(0xDEAD_BEEF);
+        let before = seen.len();
+        let mut inserted = 0;
+        for _ in 0..50_000 {
+            let k = rng.next_i64();
+            if hash_one_i64(k) != hash_one_i64(k.wrapping_add(1)) {
+                inserted += 1;
+            }
+            seen.insert(hash_one_i64(k));
+        }
+        assert!(inserted > 0);
+        assert!(seen.len() >= before, "hash set should only grow");
+        // The bijection, stated directly: equal hashes imply equal keys.
+        let mut rng = Rng::new(7);
+        for _ in 0..50_000 {
+            let a = rng.next_i64();
+            let b = rng.next_i64();
+            assert_eq!(
+                hash_one_i64(a) == hash_one_i64(b),
+                a == b,
+                "hash equality must mirror key equality (a={a}, b={b})"
+            );
+        }
+    }
+
+    #[test]
+    fn fxhasher_write_i64_and_u64_agree_on_bit_pattern() {
+        // The impl casts `i as u64` in `write_i64`; the two entry points must
+        // therefore agree for the same 64-bit pattern, or a map keyed via one
+        // path and probed via the other would miss.
+        let mut rng = Rng::new(1234);
+        for _ in 0..10_000 {
+            let bits = rng.next_u64();
+            let mut hi = FxI64Hasher::default();
+            hi.write_i64(bits as i64);
+            let mut hu = FxI64Hasher::default();
+            hu.write_u64(bits);
+            assert_eq!(hi.finish(), hu.finish(), "i64/u64 disagree on {bits:#x}");
+        }
+    }
+
+    #[test]
+    fn fxhasher_is_deterministic_and_empty_is_zero() {
+        assert_eq!(hash_one_i64(42), hash_one_i64(42));
+        // No writes → no state mutation → finish() is the zero seed.
+        assert_eq!(FxI64Hasher::default().finish(), 0);
+        // The byte fallback on empty input is likewise a no-op.
+        let mut h = FxI64Hasher::default();
+        h.write(&[]);
+        assert_eq!(h.finish(), 0);
+    }
+
+    #[test]
+    fn fxhasher_byte_fallback_is_deterministic_and_position_sensitive() {
+        let h = |bytes: &[u8]| {
+            let mut h = FxI64Hasher::default();
+            h.write(bytes);
+            h.finish()
+        };
+        assert_eq!(h(b"abc"), h(b"abc"));
+        // rotate-xor-multiply folds position in, so a transposition changes the
+        // digest (not a guarantee for all inputs, but it must for this one).
+        assert_ne!(h(b"abc"), h(b"acb"));
+        assert_ne!(h(b"ab"), h(b"ba"));
+    }
+
+    #[test]
+    fn fxi64map_matches_std_hashmap_semantics() {
+        // The Fx-hashed map must behave exactly like the std map it replaces —
+        // cross-check a randomized insert/overwrite/remove trace against
+        // `BTreeMap` as the oracle.
+        let mut fx: FxI64Map<i64> = FxI64Map::default();
+        let mut oracle: BTreeMap<i64, i64> = BTreeMap::new();
+        let mut rng = Rng::new(99);
+        for _ in 0..20_000 {
+            let key = rng.next_i64() % 512; // force collisions/overwrites
+            if rng.next_u64() % 3 == 2 {
+                assert_eq!(fx.remove(&key), oracle.remove(&key));
+            } else {
+                let v = rng.next_i64();
+                assert_eq!(fx.insert(key, v), oracle.insert(key, v));
+            }
+            assert_eq!(fx.len(), oracle.len());
+            assert_eq!(fx.get(&key).copied(), oracle.get(&key).copied());
+        }
+        let mut fx_pairs: Vec<_> = fx.into_iter().collect();
+        fx_pairs.sort_unstable();
+        let oracle_pairs: Vec<_> = oracle.into_iter().collect();
+        assert_eq!(fx_pairs, oracle_pairs);
+    }
+
+    #[test]
+    fn fxi64set_matches_std_set_semantics() {
+        let mut fx: FxI64Set = FxI64Set::default();
+        let mut oracle: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+        let mut rng = Rng::new(0x5151);
+        for _ in 0..20_000 {
+            let key = rng.next_i64() % 512;
+            if rng.next_u64().is_multiple_of(4) {
+                assert_eq!(fx.remove(&key), oracle.remove(&key));
+            } else {
+                assert_eq!(fx.insert(key), oracle.insert(key));
+            }
+            assert_eq!(fx.contains(&key), oracle.contains(&key));
+            assert_eq!(fx.len(), oracle.len());
+        }
+    }
+
+    #[test]
+    fn fxi64_buildhasher_keys_route_through_hasher_for_arbitrary_type() {
+        // BuildHasherDefault must drive FxI64Hasher for any Hash key, exercising
+        // the byte fallback (a tuple hashes field-wise, not via write_i64).
+        let bh = BuildHasherDefault::<FxI64Hasher>::default();
+        let one = |v: &(i64, i64)| bh.hash_one(v);
+        assert_eq!(one(&(1, 2)), one(&(1, 2)));
+        assert_ne!(one(&(1, 2)), one(&(2, 1)));
+    }
+
+    // ---- DerivedStore default methods -----------------------------------
+
+    type Row = (i64, String, String, String);
+
+    /// A mock `DerivedStore` recording the calls the default methods make, so
+    /// the streaming/batching CONTRACT (not a backend) is what's under test.
+    /// Every non-default method is `unimplemented!()` except the few a default
+    /// delegates to.
+    /// One recorded `build` call: `(rows, live_notes, col_mod)`.
+    type BuildCall = (Vec<Row>, Vec<i64>, i64);
+
+    #[derive(Default)]
+    struct MockStore {
+        built: Mutex<Vec<BuildCall>>,
+        // queries the singular search methods saw, in call order
+        substr_seen: Mutex<Vec<String>>,
+        fuzzy_seen: Mutex<Vec<String>>,
+        // a query string that makes the singular methods return Err
+        fail_query: Option<String>,
+    }
+
+    macro_rules! unused {
+        ($($sig:item)*) => { $($sig)* };
+    }
+
+    impl DerivedStore for MockStore {
+        fn build(&self, rows: &[Row], live_notes: &[i64], col_mod: i64) -> NativeResult<()> {
+            self.built
+                .lock()
+                .unwrap()
+                .push((rows.to_vec(), live_notes.to_vec(), col_mod));
+            Ok(())
+        }
+        fn search_substring(
+            &self,
+            query: &str,
+            _limit: i64,
+            _scope: Option<&[i64]>,
+            _exclude: &[&str],
+        ) -> NativeResult<Option<Vec<LexicalRow>>> {
+            self.substr_seen.lock().unwrap().push(query.to_owned());
+            if self.fail_query.as_deref() == Some(query) {
+                return Err(shrike_error::NativeError::internal("boom"));
+            }
+            // Encode the query into the row so order is verifiable.
+            Ok(Some(vec![(
+                query.len() as i64,
+                query.to_owned(),
+                String::new(),
+                None,
+            )]))
+        }
+        fn search_fuzzy(
+            &self,
+            query: &str,
+            _top_k: i64,
+            _scope: Option<&[i64]>,
+            _exclude: &[&str],
+        ) -> NativeResult<Vec<LexicalRow>> {
+            self.fuzzy_seen.lock().unwrap().push(query.to_owned());
+            if self.fail_query.as_deref() == Some(query) {
+                return Err(shrike_error::NativeError::internal("boom"));
+            }
+            Ok(vec![(
+                query.len() as i64,
+                query.to_owned(),
+                String::new(),
+                None,
+            )])
+        }
+
+        unused! {
+            fn ingest(&self, _n: i64, _s: &str, _r: &[(String, String)]) -> NativeResult<()> { unimplemented!() }
+            fn ingest_many(&self, _n: &[(i64, Vec<(String, String)>)], _s: &str) -> NativeResult<()> { unimplemented!() }
+            fn refresh_derived_snapshots(&self) -> NativeResult<()> { unimplemented!() }
+            fn remove(&self, _n: &[i64], _s: Option<&str>) -> NativeResult<()> { unimplemented!() }
+            fn count(&self) -> NativeResult<i64> { unimplemented!() }
+            fn get_col_mod(&self) -> Option<i64> { unimplemented!() }
+            fn set_col_mod(&self, _v: i64) -> NativeResult<()> { unimplemented!() }
+            fn meta_get(&self, _k: &str) -> NativeResult<Option<String>> { unimplemented!() }
+            fn meta_set(&self, _k: &str, _v: &str) -> NativeResult<()> { unimplemented!() }
+            fn refs_for_source(&self, _s: &str) -> NativeResult<Vec<(i64, String)>> { unimplemented!() }
+            fn texts_for_source(&self, _s: &str) -> NativeResult<Vec<(i64, String, String)>> { unimplemented!() }
+            fn texts_for_source_for_notes(&self, _s: &str, _n: &[i64]) -> NativeResult<Vec<(i64, String, String)>> { unimplemented!() }
+            fn mark_gated(&self, _s: &str, _p: &[(i64, String)]) -> NativeResult<()> { unimplemented!() }
+            fn gated_refs_for_source(&self, _s: &str) -> NativeResult<Vec<(i64, String)>> { unimplemented!() }
+            fn clear_gated(&self, _s: &str) -> NativeResult<()> { unimplemented!() }
+            fn put_segments(&self, _n: i64, _s: &str, _r: &str, _j: &str) -> NativeResult<()> { unimplemented!() }
+            fn get_segments(&self, _n: i64, _s: &str, _r: &str) -> NativeResult<Option<String>> { unimplemented!() }
+            fn match_rows(&self, _e: &str, _l: i64, _t: bool, _sc: Option<&[i64]>, _ex: &[&str]) -> NativeResult<Vec<MatchRow>> { unimplemented!() }
+        }
+    }
+
+    fn row(id: i64) -> Row {
+        (id, "field".into(), format!("r{id}"), format!("t{id}"))
+    }
+
+    #[test]
+    fn build_streamed_concatenates_chunks_in_order_and_counts() {
+        let store = MockStore::default();
+        let chunks = vec![
+            vec![row(1), row(2)],
+            vec![], // an empty chunk in the middle must not end the stream
+            vec![row(3)],
+            vec![row(4), row(5)],
+        ];
+        let mut it = chunks.into_iter();
+        let mut next = move || it.next().map(Ok);
+        let total = store
+            .build_streamed(&mut next, &[1, 2, 3, 4, 5], 777)
+            .unwrap();
+        assert_eq!(total, 5, "returns total rows seen across all chunks");
+        let built = store.built.lock().unwrap();
+        assert_eq!(built.len(), 1, "exactly one build() for the whole stream");
+        let (rows, live, col_mod) = &built[0];
+        assert_eq!(col_mod, &777);
+        assert_eq!(live, &vec![1, 2, 3, 4, 5]);
+        let ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
+        assert_eq!(
+            ids,
+            vec![1, 2, 3, 4, 5],
+            "row order preserved across chunks"
+        );
+    }
+
+    #[test]
+    fn build_streamed_empty_stream_builds_nothing_and_counts_zero() {
+        let store = MockStore::default();
+        let mut next = || None;
+        let total = store.build_streamed(&mut next, &[], 0).unwrap();
+        assert_eq!(total, 0);
+        let built = store.built.lock().unwrap();
+        assert_eq!(built.len(), 1);
+        assert!(built[0].0.is_empty(), "build() called with no rows");
+    }
+
+    #[test]
+    fn build_streamed_aborts_on_chunk_error_without_building() {
+        let store = MockStore::default();
+        let mut state = 0;
+        let mut next = move || {
+            state += 1;
+            match state {
+                1 => Some(Ok(vec![row(1)])),
+                2 => Some(Err(shrike_error::NativeError::internal("read failed"))),
+                _ => panic!("must stop pulling after an Err chunk"),
+            }
+        };
+        let result = store.build_streamed(&mut next, &[1], 5);
+        assert!(result.is_err(), "a chunk read error aborts the rebuild");
+        assert!(
+            store.built.lock().unwrap().is_empty(),
+            "build() must NOT run on a partial/failed stream — the watermark \
+             stays behind for a later drift rebuild to heal"
+        );
+    }
+
+    #[test]
+    fn search_substring_batch_default_is_one_result_per_query_in_order() {
+        let store = MockStore::default();
+        let queries = ["alpha", "be", "gamma"];
+        let out = store
+            .search_substring_batch(&queries, 10, None, &[])
+            .unwrap();
+        assert_eq!(out.len(), 3);
+        // Each result carries its query back (encoded by the mock), in order.
+        let echoed: Vec<&str> = out
+            .iter()
+            .map(|r| r.as_ref().unwrap()[0].1.as_str())
+            .collect();
+        assert_eq!(echoed, queries);
+        assert_eq!(*store.substr_seen.lock().unwrap(), queries);
+    }
+
+    #[test]
+    fn search_fuzzy_batch_default_is_one_result_per_query_in_order() {
+        let store = MockStore::default();
+        let queries = ["x", "yy", "zzz", "x"];
+        let out = store.search_fuzzy_batch(&queries, 5, None, &[]).unwrap();
+        let echoed: Vec<&str> = out.iter().map(|r| r[0].1.as_str()).collect();
+        assert_eq!(
+            echoed, queries,
+            "duplicate queries each get their own result"
+        );
+    }
+
+    #[test]
+    fn search_batches_abandon_at_first_failure() {
+        // The doc contract: "the batch is abandoned at the first failure". The
+        // default's `.collect()` into `NativeResult<Vec<_>>` must short-circuit.
+        let store = MockStore {
+            fail_query: Some("bad".into()),
+            ..Default::default()
+        };
+        assert!(store
+            .search_substring_batch(&["ok", "bad", "after"], 1, None, &[])
+            .is_err());
+        // The query AFTER the failure is never issued (short-circuit).
+        let seen = store.substr_seen.lock().unwrap();
+        assert_eq!(*seen, vec!["ok".to_string(), "bad".to_string()]);
+        drop(seen);
+
+        let store2 = MockStore {
+            fail_query: Some("bad".into()),
+            ..Default::default()
+        };
+        assert!(store2
+            .search_fuzzy_batch(&["ok", "bad", "after"], 1, None, &[])
+            .is_err());
+        assert_eq!(
+            *store2.fuzzy_seen.lock().unwrap(),
+            vec!["ok".to_string(), "bad".to_string()]
+        );
+    }
+}
