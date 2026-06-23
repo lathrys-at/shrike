@@ -1619,104 +1619,6 @@ impl DerivedEngine {
         with_busy_retry(run)?
     }
 
-    /// [`Self::match_rows`] over many MATCH expressions on `conn`, sharing ONE
-    /// compiled statement (through the connection's statement cache) across the
-    /// whole batch. The fused-search lexical reads call this once for all query
-    /// strings rather than re-resolving the scope and recompiling the statement per
-    /// query. Returns one row vector per expression, in `exprs` order.
-    ///
-    /// `conn` is a checked-out [`ReadPool`] connection — read-only by discipline
-    /// (SELECTs, plus a TEMP scope set only for a scope past the inline cap, never a
-    /// store write).
-    ///
-    /// The scope is constant across the batch, so its clause — inline literals at or
-    /// below the inline cap, a TEMP subquery above it (see [`Self::scope_clause`]) —
-    /// leaves the SQL text, hence the statement-cache key, identical for every query
-    /// in the batch, and the statement compiles once for the whole set.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if resolving the scope fails, or any expression's MATCH query
-    /// fails (the batch stops at the first failure, like the singular read).
-    fn match_rows_batch(
-        conn: &Connection,
-        exprs: &[String],
-        limit: i64,
-        with_text: bool,
-        scope: Option<&[i64]>,
-        exclude_sources: &[&str],
-    ) -> NativeResult<Vec<Vec<MatchRow>>> {
-        if exprs.is_empty() {
-            return Ok(Vec::new()); // nothing to match — skip the staging
-        }
-        let span = tracing::debug_span!("derived.match_batch", n = exprs.len(), limit, with_text);
-        let _enter = span.enter();
-        let txt_col = if with_text { "idx.txt" } else { "NULL" };
-        // The scope is constant across the batch, so inlining it as literals leaves
-        // the SQL — the prepare_cached key — stable across the batch's queries (it
-        // compiles once), while keeping the parallel chunks off the temp-table
-        // pcache mutex a staged set would re-introduce. See [`Self::scope_clause`].
-        let scope_clause = Self::scope_clause(conn, scope)?;
-        let exclude_clause = if exclude_sources.is_empty() {
-            String::new()
-        } else {
-            let placeholders = (0..exclude_sources.len())
-                .map(|i| format!("?{}", i + 4))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("AND m.source NOT IN ({placeholders}) ")
-        };
-        let sql = format!(
-            "SELECT m.note_id, m.source, m.ref, {txt_col}, \
-             snippet(idx, 0, '', '', '…', ?1) \
-             FROM idx JOIN rowmap m ON m.rowid = idx.rowid \
-             WHERE idx MATCH ?2 {scope_clause}{exclude_clause}ORDER BY rank LIMIT ?3"
-        );
-        let mut out: Vec<Vec<MatchRow>> = Vec::with_capacity(exprs.len());
-        for expr in exprs {
-            // prepare_cached: the statement compiles on the first expression and
-            // every later one in the batch (and later searches of the same shape)
-            // reuses it. The MATCH expression is the only thing that varies per
-            // query, bound as ?2. Busy-retry stays per query — a surviving busy
-            // surfaces as `unavailable`, exactly like the singular read.
-            let run = || -> rusqlite::Result<Result<Vec<MatchRow>, NativeError>> {
-                let mut params: Vec<&dyn rusqlite::ToSql> = vec![&SNIPPET_TOKENS, expr, &limit];
-                params.extend(exclude_sources.iter().map(|s| s as &dyn rusqlite::ToSql));
-                let mut stmt = conn.prepare_cached(&sql)?;
-                let mut q = stmt.query(rusqlite::params_from_iter(params))?;
-                let mut rows: Vec<MatchRow> = Vec::new();
-                loop {
-                    let row = match q.next() {
-                        Ok(Some(r)) => r,
-                        Ok(None) => break,
-                        Err(e) if is_retryable(&e) => return Err(e), // retried
-                        Err(e) => {
-                            return Ok(Err(NativeError::invalid_input(format!("fts5 match: {e}"))))
-                        }
-                    };
-                    match (|| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                        ))
-                    })() {
-                        Ok(tuple) => rows.push(tuple),
-                        Err(e) if is_retryable(&e) => return Err(e),
-                        Err(e) => {
-                            return Ok(Err(NativeError::invalid_input(format!("fts5 match: {e}"))))
-                        }
-                    }
-                }
-                Ok(Ok(rows))
-            };
-            out.push(with_busy_retry(run)??);
-        }
-        Ok(out)
-    }
-
     /// Document frequency for each of `terms`, from the materialized `trigram_df`
     /// snapshot — the fuzzy path reads it to prune common trigrams. A term absent
     /// from the result is absent from the SNAPSHOT (treated as DF 0, sorting last in
@@ -2675,6 +2577,18 @@ pub const FUZZY_MIN_SHARED: usize = 2;
 /// has only a handful of trigrams, all kept). A perf/recall dial.
 pub const FUZZY_MAX_TRIGRAMS: usize = 6;
 
+/// The cost bound on the substring trigram-intersection basis: AND at most this many
+/// of a query's rarest trigrams to narrow the candidate set before the literal verify.
+/// Unlike [`FUZZY_MAX_TRIGRAMS`] this is NOT a recall dial — a literal match contains
+/// every query trigram, so it survives the AND of ANY subset, and the verify is the
+/// recall arbiter. It only bounds how many posting bitmaps a query loads + intersects;
+/// recall-safe to raise (tighter candidate set) or lower (looser, more verify work).
+pub const SUBSTRING_INTERSECT_MAX: usize = 6;
+
+/// A substring candidate row read for the literal verify: `(idx rowid, txt, note_id,
+/// source, ref)`.
+type SubstringCandidate = (i64, String, i64, String, String);
+
 /// The per-query rare-trigram cap as a clamped log-growth curve in the query's OWN
 /// trigram count `n`: `clamp(floor + round(k·ln(n/floor)), floor, ceiling)`.
 ///
@@ -3125,19 +3039,11 @@ impl DerivedEngine {
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
     ) -> NativeResult<Option<Vec<LexicalRow>>> {
-        // NFC-normalize so the phrase matches the NFC-normalized index.
-        let normalized = nfc(query);
-        let q = normalized.trim();
-        if q.chars().count() < MIN_TRIGRAM {
-            return Ok(None);
-        }
-        // A quoted phrase → contiguous (literal substring) match.
-        let rows = self.match_rows(&fts_quote(q), limit, false, scope, exclude_sources)?;
-        Ok(Some(
-            rows.into_iter()
-                .map(|(nid, source, r, _txt, snippet)| (nid, source, r, snippet))
-                .collect(),
-        ))
+        Ok(self
+            .search_substring_batch(&[query], limit, scope, exclude_sources)?
+            .into_iter()
+            .next()
+            .unwrap_or(None))
     }
 
     /// Notes sharing trigrams with `query` (typo/partial tolerant), ranked by how
@@ -3164,15 +3070,29 @@ impl DerivedEngine {
             .unwrap_or_default())
     }
 
-    /// [`Self::search_substring`] over a batch of queries — one result per query
-    /// in `queries` order, sharing one connection lock, one scope staging, and
-    /// one compiled statement across the set. A sub-trigram query resolves to
-    /// `None` (the caller's `find_notes` fallback) without reaching FTS5, exactly
-    /// like the singular call.
+    /// [`Self::search_substring`] over a batch of queries — one result per query in
+    /// `queries` order, sharing one connection across the set. A sub-trigram query
+    /// resolves to `None` (the caller's `find_notes` fallback); a servable query maps
+    /// to `Some(rows)` (possibly empty — served, found nothing).
+    ///
+    /// Ranks literal matches WITHOUT FTS5 bm25 or `snippet()`. A literal substring
+    /// match contains EVERY query trigram, so it survives the intersection of any
+    /// subset of those trigrams' postings — the asymmetry the fuzzy path can't use (a
+    /// typo destroys a trigram). So each query ANDs the precomputed roaring bitmaps of
+    /// its rarest few trigrams ([`Self::substring_intersect_terms`]) into a small
+    /// candidate set, reads those candidates' `(txt, provenance)` once, VERIFIES the
+    /// literal substring in Rust ([`Self::literal_scan`]) — which drops the AND's
+    /// non-contiguous false positives — and ranks survivors by length-normalized
+    /// literal-TF ([`Self::substring_score`]). bm25's `ORDER BY rank` over the full
+    /// phrase-match set (no `LIMIT` short-circuit) was the lexical hotspot; this skips
+    /// it. The bitmaps come from the precomputed table when it covers the live index,
+    /// else the live FTS5 postings ([`Self::fuzzy_term_rowids`]), so a write since the
+    /// last rebuild is still found — recall-safe: a literal match is in the
+    /// intersection by construction, and the cut is by literal verify, never by rowid.
     ///
     /// # Errors
     ///
-    /// Returns an error if the batched MATCH query fails.
+    /// Returns an error if a backing-store read fails.
     pub fn search_substring_batch(
         &self,
         queries: &[&str],
@@ -3180,47 +3100,315 @@ impl DerivedEngine {
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
     ) -> NativeResult<Vec<Option<Vec<LexicalRow>>>> {
-        // Servable queries (>= a trigram) contribute an expr + an FTS5 slot;
-        // sub-trigram queries resolve to None without a query. `served[i]`
-        // records which, so the batched rows reattach to the right queries.
-        let mut exprs: Vec<String> = Vec::new();
-        let mut served: Vec<bool> = Vec::with_capacity(queries.len());
-        for q in queries {
-            // NFC-normalize so the phrase matches the NFC-normalized index.
-            let normalized = nfc(q);
-            let trimmed = normalized.trim();
-            if trimmed.chars().count() < MIN_TRIGRAM {
-                served.push(false);
-            } else {
-                served.push(true);
-                exprs.push(fts_quote(trimmed));
-            }
-        }
-        // One pool connection for the whole batch's single MATCH read.
-        let conn = self.read_pool.checkout()?;
-        let mut batched =
-            Self::match_rows_batch(&conn, &exprs, limit, false, scope, exclude_sources)?
-                .into_iter();
-        // `batched` yields one entry per served query, in order; reattach each to
-        // its query. A served query maps to `Some(rows)` (possibly empty — the
-        // store served it and found nothing); a sub-trigram query maps to `None`
-        // (the caller's find_notes fallback). `map` over `next()` keeps this
-        // panic-free even if the lengths ever disagree.
-        let out = served
-            .into_iter()
-            .map(|s| {
-                if s {
-                    batched.next().map(|rows| {
-                        rows.into_iter()
-                            .map(|(nid, source, r, _txt, snippet)| (nid, source, r, snippet))
-                            .collect()
-                    })
-                } else {
+        // Per query: the case-folded query chars (for the literal verify) + its trigram
+        // set. `None` = sub-trigram query → the caller's `find_notes` fallback.
+        let prepared: Vec<Option<(Vec<char>, std::collections::BTreeSet<String>)>> = queries
+            .iter()
+            .map(|q| {
+                let normalized = nfc(q);
+                let trimmed = normalized.trim();
+                if trimmed.chars().count() < MIN_TRIGRAM {
                     None
+                } else {
+                    Some((
+                        Self::fold_chars(trimmed),
+                        trigrams(trimmed).into_iter().collect(),
+                    ))
                 }
             })
             .collect();
-        Ok(out)
+        // One batched DF lookup over every distinct trigram, then per query pick the
+        // rarest few for the intersection basis. The cap is derived from each query's
+        // OWN grams against the shared DF snapshot, so the basis is byte-identical
+        // whether a query runs alone or in a batch (the batch==serial invariant).
+        let distinct: std::collections::BTreeSet<&str> = prepared
+            .iter()
+            .flatten()
+            .flat_map(|(_, g)| g.iter().map(String::as_str))
+            .collect();
+        let conn = self.read_pool.checkout()?;
+        let df = Self::trigram_dfs(&conn, &distinct.into_iter().collect::<Vec<_>>())?;
+        let bases: Vec<Option<Vec<String>>> = prepared
+            .iter()
+            .map(|p| {
+                p.as_ref()
+                    .map(|(_, g)| Self::substring_intersect_terms(g, &df))
+            })
+            .collect();
+        // Load each distinct basis trigram's posting bitmap once, shared across queries:
+        // the precomputed table when fresh, else the live FTS5 postings.
+        let distinct_terms: std::collections::BTreeSet<&str> = bases
+            .iter()
+            .flatten()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        let term_bitmaps: std::collections::HashMap<String, roaring::RoaringBitmap> =
+            if distinct_terms.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                let terms_vec: Vec<&str> = distinct_terms.into_iter().collect();
+                if Self::bitmaps_fresh(&conn)? {
+                    Self::load_trigram_bitmaps(&conn, &terms_vec)?
+                } else {
+                    Self::fuzzy_term_rowids(&conn, &terms_vec)?
+                        .into_iter()
+                        .map(|(term, rids)| (term, rids.into_iter().map(|r| r as u32).collect()))
+                        .collect()
+                }
+            };
+        // Per query: AND the basis bitmaps → candidate rowids, then verify + rank.
+        prepared
+            .iter()
+            .zip(&bases)
+            .map(|(p, base)| match (p, base) {
+                (Some((folded, _)), Some(terms)) => {
+                    let candidates = Self::intersect_bitmaps(terms, &term_bitmaps);
+                    Ok(Some(Self::substring_rank_query(
+                        &conn,
+                        folded,
+                        &candidates,
+                        limit,
+                        exclude_sources,
+                        scope,
+                    )?))
+                }
+                _ => Ok(None),
+            })
+            .collect()
+    }
+
+    /// The rarest few of `grams` for the intersection basis: DF ascending (rarest
+    /// first — they narrow the AND most and have the cheapest postings), term as a
+    /// deterministic tie-break, capped at [`SUBSTRING_INTERSECT_MAX`]. Unlike the fuzzy
+    /// prune this is a pure COST bound: a literal match contains every query trigram, so
+    /// it survives the AND of any subset, and [`Self::literal_scan`] is the recall
+    /// arbiter — fewer trigrams only widen the candidate set. DF lags the live index
+    /// between refreshes, so a just-written (snapshot-absent, DF-0) trigram sorts FIRST
+    /// and is kept: its REAL posting (fresh table or live fallback) still gates the AND,
+    /// and a genuinely-absent trigram correctly empties the result (nothing contains
+    /// it, so nothing contains the phrase). A trigram OUTSIDE the cap is enforced by the
+    /// verify, never dropped.
+    fn substring_intersect_terms(
+        grams: &std::collections::BTreeSet<String>,
+        df: &std::collections::HashMap<String, i64>,
+    ) -> Vec<String> {
+        let mut terms: Vec<&String> = grams.iter().collect();
+        terms.sort_by(|a, b| {
+            let d = |g: &String| df.get(g).copied().unwrap_or(0);
+            d(a).cmp(&d(b)).then_with(|| a.cmp(b))
+        });
+        terms.truncate(SUBSTRING_INTERSECT_MAX);
+        terms.into_iter().cloned().collect()
+    }
+
+    /// Intersect the basis trigrams' posting bitmaps into the candidate idx rowids
+    /// (ascending). A basis trigram absent from `term_bitmaps` has no posting — nothing
+    /// contains it, so nothing contains the literal phrase — and the intersection is
+    /// correctly empty. ANDs smallest-bitmap-first.
+    fn intersect_bitmaps(
+        terms: &[String],
+        term_bitmaps: &std::collections::HashMap<String, roaring::RoaringBitmap>,
+    ) -> Vec<i64> {
+        if terms.is_empty() {
+            return Vec::new();
+        }
+        let mut bms: Vec<&roaring::RoaringBitmap> = Vec::with_capacity(terms.len());
+        for t in terms {
+            match term_bitmaps.get(t) {
+                Some(b) => bms.push(b),
+                None => return Vec::new(), // absent basis trigram → empty intersection
+            }
+        }
+        bms.sort_by_key(|b| b.len());
+        let mut acc = bms[0].clone();
+        for b in &bms[1..] {
+            acc &= *b;
+            if acc.is_empty() {
+                break;
+            }
+        }
+        acc.iter().map(|r| r as i64).collect()
+    }
+
+    /// Verify + rank one query's candidate rowids into its survivors. Reads the small
+    /// candidate set's `(txt, note_id, source, ref)` once (the `exclude_sources` +
+    /// out-of-scope drops applied in Rust), keeps a segment only if it LITERALLY
+    /// contains the folded query ([`Self::literal_scan`] — drops the AND's non-
+    /// contiguous false positives), scores it by length-normalized literal-TF, dedups
+    /// to the best (highest-score, lowest-rowid) segment per note, and returns the
+    /// top-k notes (score desc, note-id asc) with a literal-match-centred snippet.
+    fn substring_rank_query(
+        conn: &Connection,
+        query_folded: &[char],
+        candidate_rowids: &[i64],
+        limit: i64,
+        exclude_sources: &[&str],
+        scope: Option<&[i64]>,
+    ) -> NativeResult<Vec<LexicalRow>> {
+        if limit <= 0 || candidate_rowids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = Self::substring_candidate_rows(conn, candidate_rowids, exclude_sources, scope)?;
+        // note_id -> (score, rowid, source, ref, snippet) for its best segment.
+        let mut best: FxI64Map<(f64, i64, String, String, Option<String>)> = FxI64Map::default();
+        for (rid, txt, nid, source, r) in rows {
+            let folded = Self::fold_chars(&txt);
+            let Some((pos, tf)) = Self::literal_scan(&folded, query_folded) else {
+                continue; // shares the basis trigrams but not the contiguous phrase
+            };
+            let score = Self::substring_score(tf, folded.len());
+            let chars: Vec<char> = txt.chars().collect();
+            let snippet = Self::literal_snippet(&chars, pos, query_folded.len());
+            let better = match best.get(&nid) {
+                Some(&(bs, brid, _, _, _)) => score > bs || (score == bs && rid < brid),
+                None => true,
+            };
+            if better {
+                best.insert(nid, (score, rid, source, r, snippet));
+            }
+        }
+        let mut ranked: Vec<(i64, f64, String, String, Option<String>)> = best
+            .into_iter()
+            .map(|(nid, (s, _rid, src, r, sn))| (nid, s, src, r, sn))
+            .collect();
+        // score desc, note-id asc — the within-RRF-exact-tier order.
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        ranked.truncate(limit as usize);
+        Ok(ranked
+            .into_iter()
+            .map(|(nid, _s, src, r, sn)| (nid, src, r, sn))
+            .collect())
+    }
+
+    /// One read of the candidate rowids' `(rowid, txt, note_id, source, ref)`, joining
+    /// `idx.txt` to `rowmap` provenance and dropping `exclude_sources` + out-of-scope
+    /// segments in Rust. The candidate set is the small bitmap intersection, so the
+    /// rowids ride inline as i64 literals (no injection surface, no temp table).
+    fn substring_candidate_rows(
+        conn: &Connection,
+        rowids: &[i64],
+        exclude_sources: &[&str],
+        scope: Option<&[i64]>,
+    ) -> NativeResult<Vec<SubstringCandidate>> {
+        let scope_set: Option<FxI64Set> = scope.map(|ids| ids.iter().copied().collect());
+        let csv = rowids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT idx.rowid, idx.txt, m.note_id, m.source, m.ref \
+             FROM idx JOIN rowmap m ON m.rowid = idx.rowid WHERE idx.rowid IN ({csv})"
+        );
+        let run = || -> rusqlite::Result<Result<Vec<SubstringCandidate>, NativeError>> {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let mut q = stmt.query([])?;
+            let mut out = Vec::new();
+            loop {
+                let row = match q.next() {
+                    Ok(Some(r)) => r,
+                    Ok(None) => break,
+                    Err(e) if is_retryable(&e) => return Err(e),
+                    Err(e) => {
+                        return Ok(Err(NativeError::invalid_input(format!("fts5 text: {e}"))))
+                    }
+                };
+                let got = (|| {
+                    Ok::<_, rusqlite::Error>((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })();
+                match got {
+                    Ok((rid, Some(txt), nid, source, r)) => {
+                        if exclude_sources.contains(&source.as_str()) {
+                            continue;
+                        }
+                        if let Some(set) = &scope_set {
+                            if !set.contains(&nid) {
+                                continue;
+                            }
+                        }
+                        out.push((rid, txt, nid, source, r));
+                    }
+                    Ok((_, None, _, _, _)) => {}
+                    Err(e) if is_retryable(&e) => return Err(e),
+                    Err(e) => {
+                        return Ok(Err(NativeError::invalid_input(format!("fts5 text: {e}"))))
+                    }
+                }
+            }
+            Ok(Ok(out))
+        };
+        with_busy_retry(run)?
+    }
+
+    /// Case-fold a string to a 1:1 char vector (the first lowercase char of each),
+    /// matching the trigram tokenizer's case-insensitivity. 1:1 so a match index in the
+    /// folded vector maps straight back to the original chars for a case-preserving
+    /// snippet.
+    fn fold_chars(s: &str) -> Vec<char> {
+        s.chars()
+            .map(|c| c.to_lowercase().next().unwrap_or(c))
+            .collect()
+    }
+
+    /// Scan `hay` for `needle` (both already folded), returning the first match index
+    /// and the non-overlapping occurrence count, or `None` if absent. The literal
+    /// substring verify behind the trigram-intersection candidate set.
+    fn literal_scan(hay: &[char], needle: &[char]) -> Option<(usize, usize)> {
+        let n = needle.len();
+        if n == 0 || hay.len() < n {
+            return None;
+        }
+        let (mut first, mut count, mut i) = (None, 0usize, 0usize);
+        while i + n <= hay.len() {
+            if &hay[i..i + n] == needle {
+                first.get_or_insert(i);
+                count += 1;
+                i += n; // non-overlapping
+            } else {
+                i += 1;
+            }
+        }
+        first.map(|f| (f, count))
+    }
+
+    /// Length-normalized literal term frequency — the within-exact-tier rank once bm25
+    /// is gone. bm25 is `IDF(term) × TF-saturation`; for a single literal phrase ranked
+    /// across candidates that all contain it, `IDF` is constant and drops out of the
+    /// order, leaving the part that matters: occurrence count, saturated (`k1`) and
+    /// length-normalized so a short segment dominated by the phrase outranks a long one
+    /// with the same count. The single tweak point for the exact-tier order.
+    fn substring_score(tf: usize, seg_len: usize) -> f64 {
+        const K1: f64 = 1.2;
+        let tf = tf as f64;
+        (tf * (K1 + 1.0) / (tf + K1)) / (seg_len.max(1) as f64).sqrt()
+    }
+
+    /// A `…`-delimited window of the ORIGINAL chars around the literal match at `pos`
+    /// (length `qlen`), `SNIPPET_TOKENS` chars of context each side — case preserved
+    /// because `pos` indexes the original chars (the fold is 1:1).
+    fn literal_snippet(chars: &[char], pos: usize, qlen: usize) -> Option<String> {
+        if chars.is_empty() {
+            return None;
+        }
+        let ctx = SNIPPET_TOKENS as usize;
+        let start = pos.saturating_sub(ctx);
+        let end = (pos + qlen + ctx).min(chars.len());
+        let mut s = String::new();
+        if start > 0 {
+            s.push('…');
+        }
+        s.extend(&chars[start..end]);
+        if end < chars.len() {
+            s.push('…');
+        }
+        Some(s)
     }
 
     /// [`Self::search_fuzzy`] over a batch of queries — one result per query in
@@ -3665,6 +3853,98 @@ mod lexical_tests {
             .unwrap()
             .unwrap()
             .is_empty()); // quotes safe
+    }
+
+    #[test]
+    fn substring_recall_is_the_literal_match_set_and_survives_a_stale_bitmap() {
+        // The off-bm25 substring path (trigram-intersection candidate + literal verify)
+        // must return EXACTLY the notes whose text literally contains the query — the
+        // recall-safety contract — and the verify must drop the AND's non-contiguous
+        // false positives. Independent of any ranking.
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-derived-substr-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
+        let corpus: &[(i64, &str)] = &[
+            (1, "the mitochondria is the powerhouse"),
+            (2, "Mitochondrial DNA replication"), // case + within-word substring
+            (3, "abc bcx cxy xyz"),               // all of "abcxyz"'s trigrams, NOT contiguous
+            (4, "literal abcxyz appears here"),   // contiguous
+            (5, "momentum is mass times velocity"),
+            (6, "cells cells cells everywhere"), // multi-occurrence
+            (7, "one cell only"),
+        ];
+        let rows: Vec<(i64, String, String, String)> = corpus
+            .iter()
+            .map(|(id, t)| (*id, "field".to_string(), "Front".to_string(), t.to_string()))
+            .collect();
+        build_snapshot_live(&e, &rows, 1).unwrap();
+
+        let truth = |q: &str| -> std::collections::BTreeSet<i64> {
+            let ql = q.to_lowercase();
+            corpus
+                .iter()
+                .filter(|(_, t)| t.to_lowercase().contains(&ql))
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        let got = |q: &str| -> std::collections::BTreeSet<i64> {
+            e.search_substring(q, 100, None, &[])
+                .unwrap()
+                .unwrap()
+                .into_iter()
+                .map(|(nid, ..)| nid)
+                .collect()
+        };
+        for q in [
+            "mitochondria",
+            "MITOCHONDR",
+            "abcxyz",
+            "cell",
+            "mass times",
+            "zzznope",
+        ] {
+            assert_eq!(
+                got(q),
+                truth(q),
+                "substring recall != literal-match set for {q:?}"
+            );
+        }
+        // The verify drops note 3 (every trigram present, phrase not contiguous).
+        assert_eq!(got("abcxyz"), std::collections::BTreeSet::from([4]));
+
+        // Length-normalized literal-TF: note 6 ("cells" ×3) outranks note 7 for "cell".
+        let cell = e.search_substring("cell", 100, None, &[]).unwrap().unwrap();
+        assert_eq!(
+            cell.first().map(|r| r.0),
+            Some(6),
+            "more occurrences ranks first"
+        );
+
+        // Freshness fallback: a note ingested AFTER the bitmap build leaves them stale
+        // (write_gen now exceeds bitmap_built_gen); it must still be found via the live
+        // postings — the exact recall hole the gate closes for fuzzy, here for substring.
+        e.ingest_many(
+            &[(
+                8,
+                vec![("Front".into(), "freshly ingested chloroplast".into())],
+            )],
+            "field",
+        )
+        .unwrap();
+        assert_eq!(
+            got("chloroplast"),
+            std::collections::BTreeSet::from([8]),
+            "a write since the last bitmap build is still found (live-posting fallback)"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
