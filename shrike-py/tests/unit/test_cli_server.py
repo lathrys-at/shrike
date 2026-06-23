@@ -11,9 +11,6 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-from click.testing import CliRunner
-
 # Force ``shrike.server.__init__`` to completion at collection time, before any test in
 # this module patches ``shrike.server.main``. A worker otherwise imports the package only
 # when a test first touches it, and both touchpoints — ``mock.patch("shrike.server.main",
@@ -23,10 +20,15 @@ from click.testing import CliRunner
 # the eager ``def main`` line runs). Completing the import once here closes that window for
 # the whole worker: ``main`` is then a settled, permanently-bound attribute that no later
 # resolution can see partial. The heavy serve graph stays deferred to ``main()`` call time.
+import click
+import pytest
+from click.testing import CliRunner
+
 import shrike.server
 from shrike.cli import cli
 from shrike.cli.server_cmd import _wait_for_server
 from shrike.schemas import (
+    CollectionStatus,
     CoverageCell,
     CoverageMatrix,
     CoverageRow,
@@ -233,6 +235,166 @@ class TestServerStatus:
         assert json.loads(result.output)["running"] is False
 
 
+class TestRenderStatusBranches:
+    def test_log_and_cooperative_locking_released(self, run):
+        # The optional `log` line and the cooperative-locking row (released/idle).
+        status = _server()
+        status.log = "/logs/shrike.log"
+        status.locking = "cooperative"
+        status.collection_held = False
+        fake = MagicMock()
+        fake.server_status.return_value = status
+        with patch(f"{SC}.ShrikeClient", return_value=fake):
+            result = run("server", "status")
+        assert result.exit_code == 0, result.output
+        assert "Log:" in result.output
+        assert "cooperative" in result.output
+        assert "released (idle)" in result.output
+
+    def test_cooperative_locking_held(self, run):
+        status = _server()
+        status.locking = "cooperative"
+        status.collection_held = True
+        fake = MagicMock()
+        fake.server_status.return_value = status
+        with patch(f"{SC}.ShrikeClient", return_value=fake):
+            result = run("server", "status")
+        assert "collection held" in result.output
+
+    def test_render_status_omits_log_and_uptime_when_absent(self):
+        # _render_status is reached with log/uptime already set from the CLI path,
+        # so the no-log/no-uptime branches are exercised by calling it directly.
+        from shrike.cli.server_cmd import _render_status
+
+        status = _server()
+        status.log = None
+        status.uptime = None
+        buf: list[str] = []
+        with (
+            patch(f"{SC}.output.kv", side_effect=lambda label, *a, **k: buf.append(label)),
+            patch(f"{SC}.status_render"),
+        ):
+            _render_status(status)
+        assert "Log" not in buf
+        assert "Uptime" not in buf
+        assert "URL" in buf  # the always-present rows still render
+
+    def test_collections_table_rendered(self, run):
+        # Multi-collection routing renders the per-collection table with the
+        # default marker, idle/released/open states, the (boot) tag, and the
+        # footnote about --profile.
+        status = _server()
+        status.collections = [
+            CollectionStatus(
+                name="main",
+                path="/m.anki2",
+                registered=True,
+                is_default=True,
+                active=True,
+                held=True,
+                index_state="ready",
+            ),
+            CollectionStatus(
+                name="idle",
+                path="/i.anki2",
+                registered=True,
+                is_default=False,
+                active=False,
+                held=None,
+                index_state=None,
+            ),
+            CollectionStatus(
+                name="released",
+                path="/r.anki2",
+                registered=True,
+                is_default=False,
+                active=True,
+                held=False,
+                index_state="ready",
+            ),
+            CollectionStatus(
+                name="booting",
+                path="/b.anki2",
+                registered=False,
+                is_default=False,
+                active=True,
+                held=True,
+                index_state="building",
+            ),
+        ]
+        fake = MagicMock()
+        fake.server_status.return_value = status
+        with patch(f"{SC}.ShrikeClient", return_value=fake):
+            result = run("server", "status")
+        out = result.output
+        assert "Collections" in out
+        assert "main" in out and "idle" in out and "released" in out and "booting" in out
+        assert "not opened" in out  # active=False state
+        assert "(boot)" in out  # unregistered tag
+        assert "--profile" in out
+
+
+class TestServerStatusJsonAndMeta:
+    def test_unresponsive_json(self, run):
+        # Running but unresponsive, --json: emits running=True, responsive=False.
+        fake = MagicMock()
+        fake.server_status.return_value = None
+        with (
+            patch(f"{SC}.ShrikeClient", return_value=fake),
+            patch(f"{SC}.is_server_alive", return_value=True),
+            patch(f"{SC}.read_server_meta", return_value={"pid": 7, "url": "http://x"}),
+        ):
+            result = run("--json", "server", "status")
+        import json
+
+        data = json.loads(result.output)
+        assert data["running"] is True and data["responsive"] is False
+        assert data["pid"] == 7
+
+    def test_unresponsive_renders_url_and_pid(self, run):
+        # The pretty unresponsive branch prints both the URL and the PID rows.
+        fake = MagicMock()
+        fake.server_status.return_value = None
+        with (
+            patch(f"{SC}.ShrikeClient", return_value=fake),
+            patch(f"{SC}.is_server_alive", return_value=True),
+            patch(f"{SC}.read_server_meta", return_value={"pid": 7, "url": "http://x"}),
+        ):
+            result = run("server", "status")
+        assert "URL:" in result.output and "http://x" in result.output
+        assert "PID:" in result.output and "7" in result.output
+
+    def test_unresponsive_meta_without_url_or_pid(self, run):
+        # Partial meta (neither url nor pid) exercises the negative side of both
+        # optional-row branches: the header prints, no URL/PID rows.
+        fake = MagicMock()
+        fake.server_status.return_value = None
+        with (
+            patch(f"{SC}.ShrikeClient", return_value=fake),
+            patch(f"{SC}.is_server_alive", return_value=True),
+            patch(f"{SC}.read_server_meta", return_value={}),
+        ):
+            result = run("server", "status")
+        assert "not responding" in result.output
+        assert "URL:" not in result.output
+        assert "PID:" not in result.output
+
+    def test_not_running_cleans_stale_meta_file(self, run):
+        # META_FILE present but the daemon is dead → cleanup_state is called.
+        fake = MagicMock()
+        fake.server_status.return_value = None
+        with (
+            patch(f"{SC}.ShrikeClient", return_value=fake),
+            patch(f"{SC}.is_server_alive", return_value=False),
+            patch(f"{SC}.META_FILE") as meta_file,
+            patch(f"{SC}.cleanup_state") as cleanup,
+        ):
+            meta_file.exists.return_value = True
+            result = run("server", "status")
+        assert result.exit_code == 1
+        cleanup.assert_called_once()
+
+
 class TestServerStop:
     def test_not_running(self, run):
         with (
@@ -286,6 +448,25 @@ class TestServerStop:
         import json
 
         assert json.loads(result.output)["stopped"] is True
+
+    def test_not_running_json(self, run):
+        with (
+            patch(f"{SC}.is_server_alive", return_value=False),
+            patch(f"{SC}.read_server_meta", return_value=None),
+        ):
+            result = run("--json", "server", "stop")
+        import json
+
+        data = json.loads(result.output)
+        assert data["stopped"] is False and data["reason"] == "not running"
+
+    def test_stop_failed_no_reason_uses_unknown(self, run):
+        with (
+            patch(f"{SC}.is_server_alive", return_value=True),
+            patch(f"{SC}.stop_server", return_value={"stopped": False}),
+        ):
+            result = run("server", "stop")
+        assert "unknown" in result.output
 
 
 _LOG = "2025-05-24T10:30:00 INFO  shrike.tools  list_notes deck=Test\n"
@@ -342,6 +523,110 @@ class TestServerLogs:
             result = run("server", "logs", "--follow")
         assert "list_notes" in result.output
         assert "following" in result.output
+
+    def test_log_dir_resolved_from_server_meta(self, run, tmp_path):
+        # With no get_log_file stub, the meta's log_dir drives resolution: a real
+        # log file under the meta dir is read.
+        log_dir = tmp_path / "metalogs"
+        log_dir.mkdir()
+        (log_dir / "shrike.log").write_text(_LOG)
+        with patch(f"{SC}.read_server_meta", return_value={"log_dir": str(log_dir)}):
+            result = run("server", "logs")
+        assert "list_notes" in result.output
+
+    def test_stdin_plain_skips_blank_lines(self, run):
+        # The plain emit path drops blank/whitespace-only lines (767->exit arc).
+        result = run("--no-pretty", "server", "logs", "--stdin", input=_LOG + "   \n\n")
+        assert "list_notes" in result.output
+        # Exactly one non-blank content line emitted.
+        assert result.output.strip().count("list_notes") == 1
+
+    def test_stdin_pretty_skips_blank_lines(self, run):
+        # A blank line yields style_log_line() is None → not printed (the
+        # styled-None arc); a valid line still renders.
+        result = run("server", "logs", "--stdin", input="\n" + _LOG + "\n")
+        assert "list_notes" in result.output
+
+    def test_json_skips_unparseable_lines(self, run):
+        # parse_log_line() returns None for a malformed line → it is dropped from
+        # the messages array (776->774 arc), the valid one is kept.
+        import json
+
+        result = run("--json", "server", "logs", "--stdin", input="not a log\n" + _LOG)
+        data = json.loads(result.output)
+        assert len(data["messages"]) == 1
+        assert data["messages"][0]["logger"] == "shrike.tools"
+
+
+class TestTailFollow:
+    def test_open_error_raises_click_exception(self, run, tmp_path):
+        from shrike.cli.server_cmd import _tail_follow
+
+        missing = tmp_path / "nope" / "shrike.log"  # parent dir absent → OSError
+        with pytest.raises(click.ClickException) as ei:
+            _tail_follow(missing, 10, pretty=False)
+        assert "Cannot read log file" in str(ei.value)
+
+    def test_stream_without_fileno_uses_plain_sleep(self, run, tmp_path):
+        # A stream lacking fileno() can't be select()'d, so the loop falls back to
+        # a plain sleep (the no-fileno branch). A custom fake file drives it.
+        from shrike.cli import server_cmd
+
+        class _NoFilenoStream:
+            def __init__(self) -> None:
+                self._reads = [_LOG, ""]  # initial content, then nothing new
+
+            def read(self) -> str:
+                return self._reads.pop(0) if self._reads else ""
+
+            def close(self) -> None:
+                pass
+
+            # Deliberately no fileno attribute.
+
+        logfile = tmp_path / "shrike.log"
+        logfile.write_text(_LOG)
+        with (
+            patch.object(server_cmd, "open", lambda *a, **k: _NoFilenoStream(), create=True),
+            patch(f"{SC}.time.sleep", side_effect=[None, KeyboardInterrupt]),
+        ):
+            server_cmd._tail_follow(logfile, 1, pretty=False)
+        # No exception escaped; the no-fileno sleep path was taken.
+
+    def test_select_error_falls_back_to_sleep_then_emits_new_data(self, run, tmp_path):
+        # A ValueError from select.select falls through to time.sleep; the sleep
+        # appends a new line, which the subsequent read() emits — then a second
+        # sleep raises KeyboardInterrupt to stop the loop.
+        from shrike.cli.server_cmd import _tail_follow
+
+        logfile = tmp_path / "shrike.log"
+        logfile.write_text(_LOG)
+        new_line = "2025-05-24T10:31:00 INFO  shrike.tools  appended_line ok\n"
+
+        def sleeper(_secs):
+            # 1st sleep: no append → the next read is empty (the loop-back arc).
+            # 2nd sleep: append a line → the next read emits it (the new-data arc).
+            # 3rd sleep: stop the follow loop.
+            sleeper.calls += 1  # type: ignore[attr-defined]
+            if sleeper.calls == 2:  # type: ignore[attr-defined]
+                with open(logfile, "a") as fh:
+                    fh.write(new_line)
+                return None
+            if sleeper.calls >= 3:  # type: ignore[attr-defined]
+                raise KeyboardInterrupt
+            return None
+
+        sleeper.calls = 0  # type: ignore[attr-defined]
+
+        buf: list[str] = []
+        with (
+            patch("select.select", side_effect=ValueError("bad fd")),
+            patch(f"{SC}.time.sleep", side_effect=sleeper),
+            patch(f"{SC}.click.echo", side_effect=lambda s="": buf.append(s)),
+        ):
+            _tail_follow(logfile, 1, pretty=False)
+        # The appended line was read after the sleep and emitted (the new-data loop).
+        assert any("appended_line" in line for line in buf)
 
 
 class TestServerStart:
@@ -525,6 +810,158 @@ class TestServerStart:
         import json
 
         assert json.loads(result.output)["responding"] is False
+
+
+class TestServerStartProfileAndV2:
+    def _common(self, tmp_path, **overrides):
+        defaults = dict(
+            is_server_alive=MagicMock(return_value=False),
+            cleanup_state=MagicMock(),
+            get_log_file=MagicMock(return_value=tmp_path / "shrike.log"),
+            STATE_DIR=tmp_path / "state",
+        )
+        defaults.update(overrides)
+        return patch.multiple(SC, **defaults)
+
+    def _run_cfg(self, tmp_path, cfg_text, *args, **kwargs):
+        cfg = tmp_path / "config.yml"
+        cfg.write_text(cfg_text)
+        return CliRunner().invoke(cli, ["--config", str(cfg), *args], **kwargs)
+
+    def test_profile_error_becomes_click_exception(self, tmp_path):
+        from shrike.harness.profiles import ProfileError
+
+        with (
+            self._common(tmp_path),
+            patch(f"{SC}.resolve_embedding_profile", side_effect=ProfileError("bad backend")),
+        ):
+            result = self._run_cfg(
+                tmp_path,
+                "",
+                "server",
+                "start",
+                "--collection",
+                str(tmp_path / "c.anki2"),
+                "--log-dir",
+                str(tmp_path / "logs"),
+            )
+        assert result.exit_code != 0
+        assert "bad backend" in result.output
+
+    def test_v2_config_rejects_ocr_backend(self, tmp_path):
+        # A v2 config (embedders:) plus --ocr-backend is the forbidden mix.
+        cfg_text = "embedders:\n  text:\n    runtime: onnx\n"
+        with (
+            self._common(tmp_path),
+            patch(f"{SC}.resolve_embedding_profile", return_value={}),
+        ):
+            result = self._run_cfg(
+                tmp_path,
+                cfg_text,
+                "server",
+                "start",
+                "--collection",
+                str(tmp_path / "c.anki2"),
+                "--log-dir",
+                str(tmp_path / "logs"),
+                "--ocr-backend",
+                "apple",
+            )
+        assert result.exit_code != 0
+        assert "--ocr-backend is incompatible" in result.output
+
+    def test_v2_config_passes_config_to_daemon(self, tmp_path):
+        # A v2 config rides --config to the spawned daemon (the embedding args
+        # branch); --no-embedding is appended.
+        cfg_text = "embedders:\n  text:\n    runtime: onnx\n"
+        proc = MagicMock(pid=123)
+        captured_args: list[str] = []
+
+        def fake_popen(args, **_):
+            captured_args.extend(args)
+            return proc
+
+        with (
+            self._common(tmp_path),
+            patch(f"{SC}.resolve_embedding_profile", return_value={}),
+            patch(f"{SC}.subprocess.Popen", side_effect=fake_popen),
+            patch(f"{SC}._wait_for_server", return_value=_server()),
+        ):
+            result = self._run_cfg(
+                tmp_path,
+                cfg_text,
+                "server",
+                "start",
+                "--collection",
+                str(tmp_path / "c.anki2"),
+                "--log-dir",
+                str(tmp_path / "logs"),
+                "--no-embedding",
+            )
+        assert result.exit_code == 0, result.output
+        assert "--config" in captured_args
+        assert "--no-embedding" in captured_args
+
+    def test_v2_save_config_skips_legacy_embedding_section(self, tmp_path):
+        # With a v2 config, --save-config must NOT write a legacy embedding:
+        # section (the forbidden v2+legacy mix), and the JSON path suppresses the
+        # "Config saved" advisory.
+        cfg_text = "embedders:\n  text:\n    runtime: onnx\n"
+        proc = MagicMock(pid=123)
+        captured: dict = {}
+        with (
+            self._common(tmp_path),
+            patch(f"{SC}.resolve_embedding_profile", return_value={"model": "/m"}),
+            patch(f"{SC}.subprocess.Popen", return_value=proc),
+            patch(f"{SC}._wait_for_server", return_value=_server()),
+            patch(f"{SC}.save_config", side_effect=lambda cfg, _p: captured.update(cfg) or "/cfg"),
+        ):
+            result = self._run_cfg(
+                tmp_path,
+                cfg_text,
+                "--json",
+                "server",
+                "start",
+                "--collection",
+                str(tmp_path / "c.anki2"),
+                "--log-dir",
+                str(tmp_path / "logs"),
+                "--save-config",
+            )
+        assert result.exit_code == 0, result.output
+        # Under a v2 config, the resolved model is NOT bridged back into a legacy
+        # embedding: section (that would create the forbidden v2+legacy mix).
+        assert captured.get("embedding", {}).get("model") != "/m"
+        # JSON output: no "Config saved" advisory line.
+        assert "Config saved" not in result.output
+
+    def test_save_config_persists_cooperative_lock(self, tmp_path):
+        # The cooperative-lock + hold-seconds save-config branches.
+        proc = MagicMock(pid=123)
+        captured: dict = {}
+        with (
+            self._common(tmp_path),
+            patch(f"{SC}.subprocess.Popen", return_value=proc),
+            patch(f"{SC}._wait_for_server", return_value=_server()),
+            patch(f"{SC}.save_config", side_effect=lambda cfg, _p: captured.update(cfg) or "/cfg"),
+        ):
+            result = self._run_cfg(
+                tmp_path,
+                "",
+                "server",
+                "start",
+                "--collection",
+                str(tmp_path / "c.anki2"),
+                "--log-dir",
+                str(tmp_path / "logs"),
+                "--cooperative-lock",
+                "--lock-hold-seconds",
+                "12",
+                "--save-config",
+            )
+        assert result.exit_code == 0, result.output
+        assert captured["server"]["cooperative_lock"] is True
+        assert captured["server"]["lock_hold_seconds"] == 12
 
 
 class TestWaitForServer:

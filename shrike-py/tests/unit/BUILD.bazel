@@ -181,8 +181,10 @@ _CLI = [
     "test_cli_export.py",
     "test_cli_import.py",
     "test_cli_index_embedding.py",
+    "test_cli_info_commands.py",
     "test_cli_json_output.py",
     "test_cli_migrate_type.py",
+    "test_cli_note_commands.py",
     "test_cli_note_replace.py",
     "test_cli_ordering.py",
     "test_cli_output.py",
@@ -191,6 +193,7 @@ _CLI = [
     "test_cli_routing.py",
     "test_cli_search.py",
     "test_cli_server.py",
+    "test_cli_type_commands.py",
     "test_cli_type_info_output.py",
     "test_server_start_config.py",
 ]

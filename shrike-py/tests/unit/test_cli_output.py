@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 from unittest.mock import MagicMock, patch
 
+import click
 import pytest
 from click.testing import CliRunner
 from rich.console import Console
@@ -42,6 +43,7 @@ from shrike.schemas import (
     SubstringInfo,
     TemplateInfo,
     UpsertNoteError,
+    UpsertNoteOk,
 )
 
 # Tag bodies chosen to exercise both failure modes: a well-formed style tag
@@ -292,3 +294,171 @@ def test_json_with_no_pretty_is_allowed(cli_run, flags) -> None:
     result = cli_run("collection", "info", *flags)
     assert result.exit_code == 0, result.output
     assert _MUTEX not in result.output
+
+
+# --- NoteIDType identifier parsing --------------------------------------------
+#
+# The `#id`/name-or-id edge: the param type accepts a bare int, a "#"-prefixed
+# string, and rejects non-numeric input with a Click failure.
+
+
+def test_note_id_passes_int_through() -> None:
+    assert output.NOTE_ID.convert(42, None, None) == 42
+
+
+def test_note_id_strips_hash_prefix() -> None:
+    assert output.NOTE_ID.convert("#170000123", None, None) == 170000123
+
+
+def test_note_id_rejects_non_numeric() -> None:
+    with pytest.raises(click.exceptions.BadParameter):
+        output.NOTE_ID.convert("notanid", None, None)
+
+
+def test_note_id_coerces_non_str_non_int_via_int() -> None:
+    # A value that is neither int nor str falls through to int() — a float with
+    # an integral value coerces (the defensive non-int/non-str branch).
+    assert output.NOTE_ID.convert(7.0, None, None) == 7
+
+
+# --- table / template / result_status render branches -------------------------
+
+
+def test_table_empty_rows_renders_none_placeholder() -> None:
+    out = _capture(lambda: output.table(["A", "B"], []))
+    assert "(none)" in out
+
+
+def test_append_template_field_multiline_indents_each_line() -> None:
+    # A multiline template value takes the indented-block branch (not inline).
+    lines: list[str] = []
+    output._append_template_field(lines, "Front", "line one\nline two")
+    # The label is on its own line; each content line is indented separately.
+    assert "Front:" in lines[0]
+    assert "line one" not in lines[0]  # value is NOT inline on the label line
+    assert any("line one" in line for line in lines[1:])
+    assert any("line two" in line for line in lines[1:])
+
+
+def test_append_template_field_single_line_inlines_value() -> None:
+    # The single-line branch keeps the value on the label line.
+    lines: list[str] = []
+    output._append_template_field(lines, "Back", "just one")
+    assert len(lines) == 1
+    assert "Back:" in lines[0] and "just one" in lines[0]
+
+
+def test_note_type_table_renders_header_and_rows() -> None:
+    nts = [
+        NoteTypeInfo(name="Basic", id=10, type="standard", fields=["Front", "Back"]),
+        NoteTypeInfo(name="Cloze", id=20, type="cloze", fields=["Text"]),
+    ]
+    out = _capture(lambda: output.note_type_table(nts, "/c.anki2"))
+    assert "Showing 2 note type(s)" in out
+    assert "Basic" in out and "Cloze" in out
+    assert "#10" in out and "#20" in out
+
+
+def test_note_type_detail_without_detail_renders_only_summary() -> None:
+    # detail is None → the templates/CSS block is skipped (the negative branch).
+    nt = NoteTypeInfo(name="Basic", id=10, type="standard", fields=["Front", "Back"])
+    out = _capture(lambda: output.note_type_detail(nt))
+    assert "Basic" in out
+    assert "Templates" not in out
+    assert "CSS" not in out
+
+
+def test_note_type_detail_with_single_line_template_inlines_it() -> None:
+    # detail present, no field metadata, single-line template fronts/backs:
+    # exercises the no-fields branch and the inline (single-line) template path.
+    nt = NoteTypeInfo(
+        name="Basic",
+        id=10,
+        type="standard",
+        fields=["Front", "Back"],
+        detail=NoteTypeDetail(
+            fields=[],
+            templates=[TemplateInfo(name="Card 1", front="{{Front}}", back="{{Back}}")],
+            css=".card { color: red; }",
+        ),
+    )
+    out = _capture(lambda: output.note_type_detail(nt))
+    assert "Templates" in out
+    assert "Card 1" in out
+    assert "CSS" in out
+    # No per-field metadata header when detail.fields is empty.
+    assert "Fields\n" not in out or "Front" in out
+
+
+def test_result_status_created_updated_and_unknown() -> None:
+    out = _capture(
+        lambda: output.result_status(
+            [
+                UpsertNoteOk(status="created", id=1),
+                UpsertNoteOk(status="updated", id=2),
+            ]
+        )
+    )
+    assert "Created note" in out and "#1" in out
+    assert "Updated note" in out and "#2" in out
+
+
+def test_result_status_unknown_variant_str_fallback() -> None:
+    # A result whose status is none of created/updated/error hits the `else`
+    # branch and is rendered via str(); UpsertNoteSkipped is exactly that case.
+    from shrike.schemas import UpsertNoteSkipped
+
+    skipped = UpsertNoteSkipped(status="skipped", index=0, reason="duplicate")
+    out = _capture(lambda: output.result_status([skipped]))
+    assert "skipped" in out or "duplicate" in out
+
+
+# --- small render helpers + JSON conversion -----------------------------------
+
+
+def test_parse_comma_separated_splits_and_strips() -> None:
+    # `--tags a, b ,,c` + a repeat → a flat, stripped, empty-dropped tuple.
+    out = output.parse_comma_separated(None, None, ("a, b ,,c", "d"))
+    assert out == ("a", "b", "c", "d")
+
+
+def test_to_jsonable_recurses_lists_and_passes_plain_data() -> None:
+    note = _note(id=3)
+    out = output._to_jsonable([note, {"plain": 1}])
+    assert out[0]["id"] == 3
+    assert out[1] == {"plain": 1}
+
+
+def test_section_prints_title() -> None:
+    out = _capture(lambda: output.section("My Section"))
+    assert "My Section" in out
+
+
+def test_kv_prints_label_and_value_with_indent() -> None:
+    out = _capture(lambda: output.kv("Label", "value", indent=2))
+    assert "Label:" in out and "value" in out
+
+
+def test_note_summary_row_keeps_date_without_t_separator() -> None:
+    # A modified value with no "T" is rendered verbatim (the no-split branch).
+    row = output.note_summary_row(_note(modified="2026-01-02"))
+    assert row[-1] == "2026-01-02"
+
+
+def test_note_type_detail_field_without_description_omits_quote() -> None:
+    # A field-detail with no description skips the trailing ` · "…"` (the
+    # negative description branch).
+    nt = NoteTypeInfo(
+        name="Basic",
+        id=10,
+        type="standard",
+        fields=["Front"],
+        detail=NoteTypeDetail(
+            fields=[FieldDetail(name="Front", font="Arial", size=20, description="")],
+            templates=[TemplateInfo(name="Card 1", front="{{Front}}", back="{{Back}}")],
+            css="",
+        ),
+    )
+    out = _capture(lambda: output.note_type_detail(nt))
+    assert "Front" in out
+    assert '"' not in out  # no description quote emitted

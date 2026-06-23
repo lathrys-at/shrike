@@ -75,3 +75,23 @@ class TestMigrateTypeCLI:
         assert result.exit_code == 0
         assert m.call_count == 1
         assert m.call_args.kwargs["dry_run"] is False
+
+    def test_clean_migration_omits_drop_and_empty_lines(self):
+        # No dropped/new-empty fields → neither advisory line is printed (the
+        # negative side of both branches), just the count + type transition.
+        clean = MigrateNoteTypeResponse(
+            changed=[1],
+            from_note_type="Basic",
+            to_note_type="Cloze",
+            dropped_fields=[],
+            new_empty_fields=[],
+            dry_run=False,
+        )
+        with patch("shrike.client.ShrikeClient.migrate_note_type", return_value=clean):
+            result = CliRunner().invoke(
+                cli, ["note", "migrate-type", "1", "--to", "Cloze", "--map", "Front=Text", "--yes"]
+            )
+        assert result.exit_code == 0, result.output
+        assert "drops (content lost)" not in result.output
+        assert "empty in target" not in result.output
+        assert "Migrated 1" in result.output

@@ -25,8 +25,10 @@ from shrike.schemas import (
     FuzzyMatch,
     IndexReady,
     ListNotesResponse,
+    Note,
     SearchMatch,
     SearchResponse,
+    SearchResultGroup,
     ServerStatus,
     SignalContribution,
     SubstringInfo,
@@ -101,6 +103,128 @@ class TestDefaultSearchCommand:
         assert res.exit_code == 0, res.output
         assert fake.search_notes.call_args.kwargs["limit"] == 5
         assert fake.search_notes.call_args.kwargs["threshold"] == 0.7
+
+
+def _group(source: str, matches: list[SearchMatch]) -> SearchResultGroup:
+    return SearchResultGroup(source=source, matches=matches)
+
+
+class TestDefaultSearchPrettyRender:
+    def test_requires_query_or_similar_to(self, run):
+        # A leading option routes to the default command, which then rejects the
+        # empty query+similar-to combination with a usage error.
+        fake = MagicMock()
+        res, _ = run("search", "--limit", "5", client=fake)
+        assert res.exit_code != 0
+        assert "Provide query strings" in res.output
+        fake.search_notes.assert_not_called()
+
+    def test_deck_and_tags_forwarded(self, run):
+        fake = MagicMock()
+        fake.search_notes.return_value = SearchResponse(results=[])
+        res, _ = run("--json", "search", "x", "--deck", "Bio", "--tags", "a,b", client=fake)
+        assert res.exit_code == 0, res.output
+        assert fake.search_notes.call_args.kwargs["deck"] == "Bio"
+        assert fake.search_notes.call_args.kwargs["tags"] == ["a", "b"]
+
+    def test_empty_results_prints_no_results(self, run):
+        fake = MagicMock()
+        fake.search_notes.return_value = SearchResponse(results=[])
+        res, _ = run("search", "nothing matches", client=fake)
+        assert res.exit_code == 0, res.output
+        assert "No results" in res.output
+
+    def test_message_without_results_is_shown_alone(self, run):
+        # A message with no matching groups prints the message but not "No results".
+        fake = MagicMock()
+        fake.search_notes.return_value = SearchResponse(
+            results=[], message="semantic ranking unavailable"
+        )
+        res, _ = run("search", "x", client=fake)
+        assert res.exit_code == 0, res.output
+        assert "semantic ranking unavailable" in res.output
+        assert "No results" not in res.output
+
+    def test_brief_render_lists_id_deck_and_snippet(self, run):
+        fake = MagicMock()
+        match = _match(
+            score=0.9,
+            deck="Bio",
+            substring=SubstringInfo(matched_fields=["Front"], snippet="…electron…"),
+        )
+        fake.search_notes.return_value = SearchResponse(results=[_group("electron", [match])])
+        res, _ = run("search", "electron", "--brief", client=fake)
+        assert res.exit_code == 0, res.output
+        assert "Results for: electron" in res.output
+        assert "#1" in res.output and "Bio" in res.output
+        assert "electron" in res.output  # the snippet
+
+    def test_detail_render_uses_full_note_panel(self, run):
+        fake = MagicMock()
+        match = _match(score=0.42, content={"Front": "Q", "Back": "A"})
+        fake.search_notes.return_value = SearchResponse(results=[_group("q", [match])])
+        res, _ = run("search", "q", client=fake)
+        assert res.exit_code == 0, res.output
+        assert "Note #1" in res.output
+        assert "Q" in res.output and "A" in res.output
+
+    def test_brief_match_without_snippet_omits_snippet_line(self, run):
+        # A brief match with neither a substring nor a fuzzy snippet skips the
+        # indented snippet line (the no-snippet branch of the brief loop).
+        fake = MagicMock()
+        match = _match(score=0.7, deck="Bio")
+        fake.search_notes.return_value = SearchResponse(results=[_group("q", [match])])
+        res, _ = run("search", "q", "--brief", client=fake)
+        assert res.exit_code == 0, res.output
+        assert "#1" in res.output
+
+
+class TestSearchQueryPrettyRender:
+    def test_no_notes_prints_placeholder(self, run):
+        fake = MagicMock()
+        fake.query.return_value = ListNotesResponse(notes=[], total=0)
+        res, _ = run("search", "query", "is:due", client=fake)
+        assert res.exit_code == 0, res.output
+        assert "No notes found" in res.output
+
+    def test_renders_table_for_brief(self, run):
+        fake = MagicMock()
+        note = Note(
+            id=3, note_type="Basic", deck="D", tags=[], modified="2026-01-01T00:00:00", content=None
+        )
+        fake.query.return_value = ListNotesResponse(notes=[note], total=1)
+        res, _ = run("search", "query", "is:due", "--brief", client=fake)
+        assert res.exit_code == 0, res.output
+        assert "#3" in res.output
+        assert fake.query.call_args.kwargs["fields"] == "meta"
+
+    def test_renders_detail_when_content_present(self, run):
+        fake = MagicMock()
+        note = Note(
+            id=4,
+            note_type="Basic",
+            deck="D",
+            tags=[],
+            modified="2026-01-01T00:00:00",
+            content={"Front": "Q"},
+        )
+        fake.query.return_value = ListNotesResponse(notes=[note], total=4)
+        res, _ = run("search", "query", "deck:D", client=fake)
+        assert res.exit_code == 0, res.output
+        assert "1 of 4" in res.output
+        assert "Note #4" in res.output
+
+
+class TestSearchCoverageNone:
+    def test_no_coverage_info_prints_placeholder(self, run):
+        # status responds but carries no coverage matrix.
+        fake = MagicMock()
+        status = _status_with_coverage()
+        status.coverage = None
+        fake.server_status.return_value = status
+        res, _ = run("search", "coverage", client=fake)
+        assert res.exit_code == 0, res.output
+        assert "No coverage information" in res.output
 
 
 class TestSearchQuery:
