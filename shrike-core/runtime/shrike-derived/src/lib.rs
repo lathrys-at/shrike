@@ -2805,6 +2805,7 @@ impl DerivedEngine {
     /// (rare) trigrams each indexed rowid shares, from the per-term posting sets
     /// gathered rowid-only by [`Self::fuzzy_term_rowids`]. Provenance-free, so it
     /// runs before the survivors' `(note_id, source, ref)` is known.
+    #[allow(dead_code)] // reference for the bit-sliced fuzzy_rank_query cross-check + revert.
     fn accumulate_overlap(
         pruned_terms: &[String],
         term_bitmaps: &std::collections::HashMap<String, roaring::RoaringBitmap>,
@@ -2871,6 +2872,128 @@ impl DerivedEngine {
         Ok(out)
     }
 
+    /// Bit-sliced overlap counting. Returns the count "bit planes" `acc` where the
+    /// overlap count of a rowid is `Σ_b 2^b · [rid ∈ acc[b]]`. Adds each input
+    /// bitmap with a ripple-carry across the planes (XOR = sum bit, AND = carry), so
+    /// the per-rowid overlap for EVERY rowid is computed in `O(k·log k)` bitmap ops
+    /// — `O(containers)`, independent of posting size. That is the dense-posting win
+    /// the per-rowid accumulation loop can't get: a trigram in tens of thousands of
+    /// notes is one bitmap container, so adding it costs a few SIMD word ops, not
+    /// one increment per rowid.
+    fn bitsliced_overlap(bitmaps: &[&roaring::RoaringBitmap]) -> Vec<roaring::RoaringBitmap> {
+        use roaring::RoaringBitmap;
+        let mut acc: Vec<RoaringBitmap> = Vec::new();
+        for &b in bitmaps {
+            let mut carry = b.clone();
+            let mut level = 0usize;
+            while !carry.is_empty() {
+                if level == acc.len() {
+                    acc.push(RoaringBitmap::new());
+                }
+                let new_carry = &acc[level] & &carry; // carry-out = already-set AND incoming
+                acc[level] ^= &carry; // sum bit at this plane
+                carry = new_carry;
+                level += 1;
+            }
+        }
+        acc
+    }
+
+    /// The rowids whose bit-sliced overlap count is EXACTLY `c`: AND the planes `c`
+    /// has set, then subtract every plane it has clear — a rowid survives iff its
+    /// plane membership is exactly `c`'s bit pattern. `c == 0` selects nothing.
+    fn count_eq(acc: &[roaring::RoaringBitmap], c: u32) -> roaring::RoaringBitmap {
+        use roaring::RoaringBitmap;
+        // A count whose highest set bit is beyond the planes can't exist (the loop
+        // walks c up to the term count, which may exceed the realized max overlap).
+        if 32 - c.leading_zeros() > acc.len() as u32 {
+            return RoaringBitmap::new();
+        }
+        let set: Vec<usize> = (0..acc.len()).filter(|&b| (c >> b) & 1 == 1).collect();
+        let Some((&first, rest)) = set.split_first() else {
+            return RoaringBitmap::new();
+        };
+        let mut out = acc[first].clone();
+        for &b in rest {
+            out &= &acc[b];
+        }
+        for (b, plane) in acc.iter().enumerate() {
+            if (c >> b) & 1 == 0 {
+                out -= plane;
+            }
+        }
+        out
+    }
+
+    /// One query's fuzzy ranking via the bit-sliced overlap planes, hydrating only
+    /// as deep as the threshold top-k needs. Walks the overlap-count buckets high →
+    /// low; each bucket hydrates its rowids (the same source/scope filter as
+    /// [`Self::seg_meta_for_rowids`]) and records the best segment per note (highest
+    /// count, lowest rowid). Processing high → low means a note's FIRST appearance
+    /// is its highest-count (best) segment, and ascending rowid order within a
+    /// bucket makes the first the lowest-rowid tiebreak — exactly
+    /// [`Self::rank_overlap`]'s `best`. Once `top_k` notes are locked at a count, no
+    /// lower bucket (a strictly smaller count) can enter the top-k, so it stops —
+    /// bounding the hydration to the high-overlap head instead of every
+    /// `count >= FUZZY_MIN_SHARED` candidate. The result is identical to
+    /// `accumulate_overlap` + `rank_overlap` (pinned by a cross-check test); a
+    /// fetch-all (`top_k` past the candidate count) never trips the stop and walks
+    /// every bucket.
+    fn fuzzy_rank_query(
+        conn: &Connection,
+        pruned_terms: &[String],
+        term_bitmaps: &std::collections::HashMap<String, roaring::RoaringBitmap>,
+        top_k: usize,
+        exclude_sources: &[&str],
+        scope: Option<&[i64]>,
+    ) -> NativeResult<Vec<(i64, String, String, i64)>> {
+        let bitmaps: Vec<&roaring::RoaringBitmap> = pruned_terms
+            .iter()
+            .filter_map(|t| term_bitmaps.get(t))
+            .collect();
+        // Fewer present postings than the floor can never reach the overlap minimum.
+        if bitmaps.len() < FUZZY_MIN_SHARED {
+            return Ok(Vec::new());
+        }
+        let acc = Self::bitsliced_overlap(&bitmaps);
+        let max_count = bitmaps.len() as u32;
+        // note_id -> (count, rowid, source, ref) for its best segment.
+        let mut best: FxI64Map<(usize, i64, String, String)> = FxI64Map::default();
+        for c in (FUZZY_MIN_SHARED as u32..=max_count).rev() {
+            let bucket = Self::count_eq(&acc, c);
+            if !bucket.is_empty() {
+                let rids: Vec<i64> = bucket.iter().map(i64::from).collect();
+                let meta = Self::seg_meta_for_rowids(conn, &rids, exclude_sources, scope)?;
+                // `rids` is ascending (bitmap iteration order), so the first segment
+                // recorded for a note is its lowest rowid at this — its best — count.
+                for &rid in &rids {
+                    if let Some((nid, source, r)) = meta.get(&rid) {
+                        best.entry(*nid)
+                            .or_insert_with(|| (c as usize, rid, source.clone(), r.clone()));
+                    }
+                }
+            }
+            // Every note in `best` now has count >= c; the next bucket is c-1 < c, so
+            // it can never displace a locked top-k. A fetch-all top_k never trips this.
+            if top_k > 0 && best.len() >= top_k {
+                break;
+            }
+        }
+        let mut ranked: Vec<(i64, usize, i64, String, String)> = best
+            .into_iter()
+            .map(|(nid, (count, rid, source, r))| (nid, count, rid, source, r))
+            .collect();
+        // count desc, then note-id asc — the rank_overlap order.
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        if top_k > 0 {
+            ranked.truncate(top_k);
+        }
+        Ok(ranked
+            .into_iter()
+            .map(|(nid, _c, rid, source, r)| (nid, source, r, rid))
+            .collect())
+    }
+
     /// Rank one query's accumulated overlap into its survivors. A segment's overlap
     /// is how many pruned trigrams matched it; a note's overlap is its best
     /// segment's. Keep notes sharing at least [`FUZZY_MIN_SHARED`] pruned trigrams,
@@ -2883,6 +3006,7 @@ impl DerivedEngine {
     /// `exclude_sources` or an out-of-scope `note_id`, so "absent" means "filtered
     /// out," and skipping it makes a note rank by its best surviving segment — the
     /// same result a `source NOT IN` / `note_id IN` MATCH predicate would give.
+    #[allow(dead_code)] // reference for the bit-sliced fuzzy_rank_query cross-check + revert.
     fn rank_overlap(
         overlap: &FxI64Map<usize>,
         seg_meta: &FxI64Map<(i64, String, String)>,
@@ -3112,39 +3236,25 @@ impl DerivedEngine {
         // SQLite build an ephemeral index over the set (a temp btree on the pcache
         // mutex). rank_overlap skips a candidate absent from `seg_meta`, so a dropped
         // segment never ranks.
-        // SPIKE: load the pruned trigrams' precomputed posting bitmaps (one query)
-        // instead of re-scanning each one's FTS5 doclist via `fuzzy_term_rowids`.
+        // SPIKE: load the pruned trigrams' precomputed posting bitmaps (one read),
+        // then rank each query via the bit-sliced overlap planes — counting overlap
+        // with bitmap ops (not a per-rowid loop) and hydrating only as deep as the
+        // threshold top-k needs (see fuzzy_rank_query), not every candidate.
         let term_bitmaps = Self::load_trigram_bitmaps(&conn, &distinct_terms_vec)?;
-        let overlaps: Vec<FxI64Map<usize>> = pruned
+        let survivors: Vec<Vec<(i64, String, String, i64)>> = pruned
             .iter()
-            .map(|p| {
-                p.as_ref().map_or_else(FxI64Map::default, |terms| {
-                    Self::accumulate_overlap(terms, &term_bitmaps)
-                })
+            .map(|p| match p {
+                Some(terms) => Self::fuzzy_rank_query(
+                    &conn,
+                    terms,
+                    &term_bitmaps,
+                    top_k as usize,
+                    exclude_sources,
+                    scope,
+                ),
+                None => Ok(Vec::new()),
             })
-            .collect();
-        // An FxHash set, not a BTreeSet: the candidate set only DEDUPES the rowids it
-        // hands to seg_meta hydration (order is irrelevant — rank_overlap iterates the
-        // overlap map, not this set), so O(1) inserts beat the BTree's O(log n)
-        // pointer-chasing on a set this hot.
-        let mut candidates: FxI64Set = FxI64Set::default();
-        for ov in &overlaps {
-            for (&rid, &count) in ov {
-                if count >= FUZZY_MIN_SHARED {
-                    candidates.insert(rid);
-                }
-            }
-        }
-        let seg_meta = Self::seg_meta_for_rowids(
-            &conn,
-            &candidates.into_iter().collect::<Vec<_>>(),
-            exclude_sources,
-            scope,
-        )?;
-        let survivors: Vec<Vec<(i64, String, String, i64)>> = overlaps
-            .iter()
-            .map(|ov| Self::rank_overlap(ov, &seg_meta, top_k as usize))
-            .collect();
+            .collect::<NativeResult<_>>()?;
         // Build snippets for the surviving rowids only, from text read by a plain
         // rowid lookup (no MATCH re-scan) and windowed in Rust around the query's
         // own rare trigrams.
@@ -3493,6 +3603,74 @@ mod lexical_tests {
         let hits = e.search_fuzzy("mitochondira", 10, None, &[]).unwrap(); // transposition
         assert!(hits.iter().any(|(nid, ..)| *nid == 1));
         assert!(e.search_fuzzy("xy", 10, None, &[]).unwrap().is_empty()); // too short to rank
+    }
+
+    #[test]
+    fn fuzzy_rank_query_matches_accumulate_and_rank_overlap() {
+        // The bit-sliced threshold ranker must produce byte-identical results to the
+        // reference (accumulate_overlap + rank_overlap) on identical inputs — across
+        // multi-segment notes (Front+Back, so a note's best field wins the collapse),
+        // ties (ranked by note id), and every top_k cut (which exercises the
+        // early-stop). Both paths consume the same pruned terms + loaded bitmaps, so
+        // any divergence is the ranker's, not the prune/load.
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-derived-xcheck-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = DerivedEngine::open(dir.join("shrike.db").to_str().unwrap(), 1).unwrap();
+        let words = ["alphabravo", "charlie", "deltaecho", "foxtrot", "golfhotel"];
+        let mut rows: Vec<(i64, String, String, String)> = Vec::new();
+        for n in 1..=12usize {
+            let front = format!(
+                "{} {}",
+                words[n % words.len()],
+                words[(n + 1) % words.len()]
+            );
+            let back = words[(n + 2) % words.len()].to_string();
+            rows.push((n as i64, "field".into(), "Front".into(), front));
+            rows.push((n as i64, "field".into(), "Back".into(), back));
+        }
+        build_snapshot_live(&e, &rows, 1).unwrap();
+
+        let conn = e.read_pool.checkout().unwrap();
+        let policy = e.fuzzy_cap_policy();
+        let queries = [
+            "alphabravo charlie",
+            "deltaecho foxtrot golfhotel",
+            "alphabravo charlie deltaecho",
+            "charlie golfhotel",
+        ];
+        for q in queries {
+            let Some(grams) = DerivedEngine::fuzzy_grams(q) else {
+                continue;
+            };
+            let gram_strs: Vec<&str> = grams.iter().map(String::as_str).collect();
+            let df = DerivedEngine::trigram_dfs(&conn, &gram_strs).unwrap();
+            let pruned = DerivedEngine::prune_to_rare_terms(&grams, &df, policy);
+            let distinct: Vec<&str> = pruned.iter().map(String::as_str).collect();
+            let bitmaps = DerivedEngine::load_trigram_bitmaps(&conn, &distinct).unwrap();
+            for &top_k in &[1usize, 2, 3, 5, 10, 100] {
+                // Reference: accumulate_overlap → candidates(≥2) → seg_meta → rank.
+                let overlap = DerivedEngine::accumulate_overlap(&pruned, &bitmaps);
+                let candidates: Vec<i64> = overlap
+                    .iter()
+                    .filter(|(_, &c)| c >= FUZZY_MIN_SHARED)
+                    .map(|(&r, _)| r)
+                    .collect();
+                let seg_meta =
+                    DerivedEngine::seg_meta_for_rowids(&conn, &candidates, &[], None).unwrap();
+                let reference = DerivedEngine::rank_overlap(&overlap, &seg_meta, top_k);
+                let bit_sliced =
+                    DerivedEngine::fuzzy_rank_query(&conn, &pruned, &bitmaps, top_k, &[], None)
+                        .unwrap();
+                assert_eq!(reference, bit_sliced, "query {q:?} top_k {top_k}");
+            }
+        }
     }
 
     #[test]
