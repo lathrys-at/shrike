@@ -1053,4 +1053,22 @@ mod tests {
         assert_eq!(modality, "image");
         assert_eq!(*count, 40.0);
     }
+
+    // #1009 reproducer (red by design). The `VectorIndex::ensure` contract
+    // (shrike-store) is "idempotent at the same ndim, an error at a different
+    // ndim". This impl only inserts when the modality is absent, so a
+    // conflicting re-ensure returns Ok and the caller believes a width it does
+    // not have — the mismatch then surfaces far away at a later add/search.
+    // This asserts the SECURE behaviour and FAILS until the fix lands; on the
+    // epic test-engineering branch the same assertion rides as `#[ignore]`.
+    #[test]
+    fn ensure_at_a_conflicting_ndim_is_error() {
+        let e = engine();
+        e.ensure("text", 8).unwrap();
+        e.ensure("text", 8).unwrap(); // idempotent at the same width
+        let err = e
+            .ensure("text", 16)
+            .expect_err("a conflicting ndim must be an error, not a silent no-op");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
 }
