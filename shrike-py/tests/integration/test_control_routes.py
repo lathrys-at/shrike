@@ -19,7 +19,7 @@ search recall, which would be vacuous without a populated derived/vector store.
 
 from __future__ import annotations
 
-import time
+import subprocess
 
 import httpx
 import pytest
@@ -162,15 +162,14 @@ class TestShutdownRoute:
         assert body["status"] == "ok"
         assert body["pid"] > 0
         # The graceful path: uvicorn drains in-flight responses, then serve()
-        # returns and the process exits. Poll the subprocess handle (bounded — a
-        # /shutdown that never exits is a real bug, not a slow boot).
-        deadline = time.monotonic() + 15.0
-        while time.monotonic() < deadline:
-            if isolated_server.proc.poll() is not None:
-                break
-            time.sleep(0.1)
-        assert isolated_server.proc.poll() is not None, "server did not exit after /shutdown"
-        assert isolated_server.proc.returncode == 0
+        # returns and the process exits. Block on the subprocess handle until it
+        # exits (bounded — a /shutdown that never exits is a real bug, not a slow
+        # boot); the wait returns the instant the process is reaped.
+        try:
+            returncode = isolated_server.proc.wait(timeout=15.0)
+        except subprocess.TimeoutExpired:
+            pytest.fail("server did not exit after /shutdown")
+        assert returncode == 0
 
 
 class TestMediaPathSafety:

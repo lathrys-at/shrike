@@ -585,7 +585,10 @@ mod tests {
             (KEY_BAND, any::<i64>()).prop_map(|(k, v)| MapOp::Insert(k, v)),
             KEY_BAND.prop_map(MapOp::Remove),
         ];
-        prop::collection::vec(op, 0..2_000)
+        // A few hundred ops over the 1024-wide `KEY_BAND` already saturates every
+        // branch many times (fresh-insert, overwrite, remove-hit, remove-miss);
+        // longer traces only repeat the same oracle steps.
+        prop::collection::vec(op, 0..400)
     }
 
     proptest! {

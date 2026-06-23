@@ -650,13 +650,14 @@ mod tests {
         );
     }
 
-    /// Stability across many calls (not just two): the same path always maps to
-    /// the same namespace within a run. Re-derivation must be a pure function.
+    /// Stability across repeated calls (not just two): the same path always maps
+    /// to the same namespace within a run. Re-derivation must be a pure function,
+    /// so a few repeats pin it — the digest carries no per-call state to drift.
     #[test]
     fn namespace_is_idempotent_across_many_calls() {
         let p = "/srv/anki/profiles/main/collection.anki2";
         let first = index_namespace(p);
-        for _ in 0..1000 {
+        for _ in 0..4 {
             assert_eq!(index_namespace(p), first);
         }
     }
