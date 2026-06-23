@@ -1038,8 +1038,41 @@ impl DerivedEngine {
                 ins.execute(rusqlite::params![prev, buf]).map_err(db_err)?;
             }
         }
+        // Stamp the build watermark = the highest rowid these bitmaps cover, so a
+        // fuzzy query can cheaply detect a write since this build (a higher live
+        // rowid) and fall back to the live posting read — the bitmaps are a snapshot.
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('bitmap_watermark', \
+             (SELECT COALESCE(MAX(rowid), 0) FROM rowmap))",
+            [],
+        )
+        .map_err(db_err)?;
         tx.commit().map_err(db_err)?;
         Ok(())
+    }
+
+    /// Whether the precomputed bitmaps still cover the live index: true iff no row
+    /// has been written since the build watermark. A missing watermark (never
+    /// built) reads as stale. Deletes don't matter — a deleted rowid the bitmaps
+    /// still carry is dropped by the `seg_meta` hydration, never surfaced — so only
+    /// an INSERT (a higher rowid) invalidates the snapshot for recall.
+    fn bitmaps_fresh(conn: &Connection) -> NativeResult<bool> {
+        let watermark: Option<i64> = conn
+            .query_row(
+                "SELECT (SELECT value FROM meta WHERE key='bitmap_watermark')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(db_err)?;
+        let Some(watermark) = watermark else {
+            return Ok(false);
+        };
+        let live_max: i64 = conn
+            .query_row("SELECT COALESCE(MAX(rowid), 0) FROM rowmap", [], |r| {
+                r.get(0)
+            })
+            .map_err(db_err)?;
+        Ok(live_max <= watermark)
     }
 
     /// Drop any leftover shadow tables (a prior aborted rebuild) and create
@@ -3236,11 +3269,20 @@ impl DerivedEngine {
         // SQLite build an ephemeral index over the set (a temp btree on the pcache
         // mutex). rank_overlap skips a candidate absent from `seg_meta`, so a dropped
         // segment never ranks.
-        // SPIKE: load the pruned trigrams' precomputed posting bitmaps (one read),
-        // then rank each query via the bit-sliced overlap planes — counting overlap
-        // with bitmap ops (not a per-rowid loop) and hydrating only as deep as the
-        // threshold top-k needs (see fuzzy_rank_query), not every candidate.
-        let term_bitmaps = Self::load_trigram_bitmaps(&conn, &distinct_terms_vec)?;
+        // The pruned trigrams' posting bitmaps: from the precomputed table when it
+        // still covers the live index, else built in-memory from the live FTS5
+        // postings so a write since the last rebuild is still found. Either source
+        // feeds the same bit-sliced ranker — counting overlap with bitmap ops (not a
+        // per-rowid loop) and hydrating only as deep as the threshold top-k needs.
+        let term_bitmaps: std::collections::HashMap<String, roaring::RoaringBitmap> =
+            if Self::bitmaps_fresh(&conn)? {
+                Self::load_trigram_bitmaps(&conn, &distinct_terms_vec)?
+            } else {
+                Self::fuzzy_term_rowids(&conn, &distinct_terms_vec)?
+                    .into_iter()
+                    .map(|(term, rids)| (term, rids.into_iter().map(|r| r as u32).collect()))
+                    .collect()
+            };
         let survivors: Vec<Vec<(i64, String, String, i64)>> = pruned
             .iter()
             .map(|p| match p {
@@ -3323,7 +3365,6 @@ impl DerivedEngine {
     /// # Errors
     ///
     /// Returns an error if any term's MATCH query fails.
-    #[allow(dead_code)] // SPIKE: superseded by load_trigram_bitmaps; kept for the A/B revert.
     fn fuzzy_term_rowids(
         conn: &Connection,
         terms: &[&str],
@@ -4510,9 +4551,6 @@ mod lexical_tests {
     }
 
     #[test]
-    #[ignore = "SPIKE: bitmap postings are a build snapshot, so a write-after-refresh \
-                is invisible until the next rebuild — the live-recall-under-churn gap \
-                that productionizing the bitmap path must close (incremental maintenance)."]
     fn fuzzy_finds_a_match_via_just_written_trigrams_under_a_stale_snapshot() {
         // #958: a note matching the query ONLY through trigrams written since the DF
         // snapshot must still surface — the prune keeps absent (DF-0) trigrams, so
