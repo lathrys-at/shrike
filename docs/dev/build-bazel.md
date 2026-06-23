@@ -93,6 +93,28 @@ a failed target above it has shipped breakage before.
 sdist, and `_version.py`. Off a tag you get a dev version; on a `v*` tag the
 clean release version. The pip lane reads the same tag through hatch-vcs.
 
+## CI lanes and the per-PR budget
+
+The per-PR critical path is two jobs in `.github/workflows/test.yml`: **`lint`**
+(ruff/mypy + cargo fmt/clippy) and **`tests`** — ONE `./bazel test` over `//...`
+plus the embedding lanes. There is deliberately **no further split** (#422): Bazel
+parallelizes the whole graph inside a single invocation up to `--jobs`, so carving
+it into per-crate or Rust-vs-Python GitHub jobs would pay N checkouts + N cache
+restores to re-parallelize what one invocation already does — the cache (warmed on
+main by `warm-cache.yml`, restored per-PR) is the real wall-clock lever, not job
+fan-out. Each job carries a `timeout-minutes` **hang backstop** (#749) — generous
+enough for a cold-cache miss, far below GitHub's 6h default so a wedged action fails
+in minutes.
+
+Off the per-PR path: **cross-platform** (ARM/macOS) is label-gated (`rc`/`macos`/
+`linux-arm`); **coverage** (Python + Rust) and the **embedding model lanes that need
+local models** run on push-to-main / rc / dispatch (the per-PR `tests` job runs the
+*hermetic* embedding lanes whose externals are sha256-pinned, not the model-download
+ones); a **miri** FFI-soundness lane is scheduled (see the testing ADRs). The
+`proptest` fuzzes ride the normal per-crate `rust_test` targets in `//...` — they're
+fast (even the 8192-case trust-boundary sweeps run in ~1s), so they don't need a
+separate lane.
+
 ## The polyglot seam
 
 - **Rust** comes in through rules_rust + crate_universe: `MODULE.bazel`'s
