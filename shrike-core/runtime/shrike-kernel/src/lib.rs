@@ -3042,20 +3042,18 @@ impl Kernel {
         .await
     }
 
-    /// Single-query lexical search — the as-you-type fast path. A dedicated lean
-    /// routine for ONE query string with no id anchors and no semantic ranking.
-    /// It skips everything [`search_fused`] does for the general case: the query
-    /// embed, the cross-space build, the index-size over-fetch clamp, and the
-    /// compute-pool CHUNK fan-out (which exists to spread a query *bank* across
-    /// the workers — pure overhead for a single query). The substring + fuzzy
-    /// reads run as ONE compute job (off the runtime thread, since they block on
-    /// SQLite), then the lexical-only assembly runs on the collection actor.
+    /// Single-query lexical search — the as-you-type fast path. A lean routine for
+    /// ONE query string, no id anchors, no semantic ranking: it skips the embed,
+    /// cross-space build, index-size clamp, and compute-pool chunk fan-out that
+    /// [`search_fused`] carries for a query *bank*. The substring + fuzzy reads run
+    /// as one compute job (off the runtime thread — they block on SQLite); the
+    /// lexical-only assembly runs on the collection actor.
     ///
-    /// The result is identical to `search_fused([query], …, semantic=false)`: it
+    /// The result is identical to `search_fused([query], …, semantic=false)` — it
     /// reuses the same [`actions::search_lexical`] reads and
-    /// [`actions::search_assemble`] fusion, so parity is structural — only the
-    /// orchestration is leaner. Returns the same `(groups, stale)` pair, bracketed
-    /// by the same freshness stamps.
+    /// [`actions::search_assemble`] fusion, so parity is structural, only the
+    /// orchestration leaner — and returns the same `(groups, stale)` pair under the
+    /// same freshness bracket.
     ///
     /// # Errors
     ///
