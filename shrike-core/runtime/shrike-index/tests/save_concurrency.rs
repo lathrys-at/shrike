@@ -143,11 +143,12 @@ fn searches_during_repeated_saves_stay_correct_and_never_crash() {
     eprintln!("storm: {saves} saves, {total} correct concurrent searches");
 }
 
-/// (b) add/remove racing a save: the `save_mutation` guard must serialize them
-/// so the on-disk bytes can't tear, and a restore of the saved files must yield
-/// a loadable, internally-consistent index. Expected-correct: no panic; the
-/// final save restores cleanly; every base key is present (the save captured a
-/// consistent snapshot, never a half-applied add).
+/// (b) add/remove racing a save AND a concurrent search: the `save_mutation`
+/// guard must serialize add/remove against the save so the on-disk bytes can't
+/// tear, and the `state` `RwLock` must exclude the add's `reserve()` realloc from
+/// a concurrent search read — so a search over the growing/shrinking index never
+/// reads torn state. Expected-correct: no panic; the searches stay structurally
+/// valid throughout; the final save restores cleanly with every base key present.
 #[test]
 fn add_remove_racing_a_save_never_tears_the_file() {
     let ndim = 64usize;
@@ -191,10 +192,46 @@ fn add_remove_racing_a_save_never_tears_the_file() {
         saves
     });
 
+    // Searcher racing the mutator: every `add` reserves (and may realloc) under the
+    // exclusive write guard, so a concurrent search read guard must never observe a
+    // mid-realloc index. A garbage key or non-finite distance here would mean a
+    // reserve raced a walk — the exact case the RwLock (not the old `Mutex`) now has
+    // to guarantee while still letting searches run concurrently.
+    let e_search = Arc::clone(&engine);
+    let stop_search = Arc::clone(&stop);
+    let base_vecs: Vec<Vec<f32>> = (0..base).map(|k| unit(k, ndim)).collect();
+    let searcher = std::thread::spawn(move || {
+        let mut ok = 0u64;
+        let mut q = 0usize;
+        while !stop_search.load(Ordering::Relaxed) {
+            let out = e_search
+                .search_by_modality(std::slice::from_ref(&base_vecs[q]), 5, None, None)
+                .unwrap();
+            if let Some((keys, dists)) = out[0].get("text") {
+                for &k in keys {
+                    assert!(
+                        (0..base as i64).contains(&k) || (10_000..10_500).contains(&k),
+                        "garbage key {k} from a search racing add/remove+reserve"
+                    );
+                }
+                for &d in dists {
+                    assert!(
+                        d.is_finite(),
+                        "non-finite distance during a concurrent reserve"
+                    );
+                }
+            }
+            ok += 1;
+            q = (q + 1) % base as usize;
+        }
+        ok
+    });
+
     std::thread::sleep(Duration::from_millis(400));
     stop.store(true, Ordering::Relaxed);
     let muts = mutator.join().unwrap();
     let saves = saver.join().unwrap();
+    let searches = searcher.join().unwrap();
 
     // A final clean save, then restore it: it must load and the base band must
     // all be present (the disjoint churn band may or may not be there, but the
@@ -212,8 +249,9 @@ fn add_remove_racing_a_save_never_tears_the_file() {
             "base key {key} missing after a save raced with add/remove"
         );
     }
+    assert!(searches > 0, "the searcher made no progress");
     std::fs::remove_dir_all(&dir).ok();
-    eprintln!("tear: {muts} mutation cycles, {saves} saves, restore clean");
+    eprintln!("tear: {muts} mutation cycles, {saves} saves, {searches} searches, restore clean");
 }
 
 /// (c) Two saves racing the SAME directory. Each save stages to `<file>.tmp`
