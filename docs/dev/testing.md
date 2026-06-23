@@ -267,14 +267,27 @@ to `main`.
 
 ## Coverage
 
-Coverage lives in its own workflow and is **reported, never enforced as a CI
-gate**. The `fail_under` target in `[tool.coverage.report]` is enforced only
-locally. Run it locally to keep the number healthy:
+Coverage is two numbers from two tools — Python (`coverage.py`) and Rust
+(`cargo-llvm-cov`) — both living in the `Coverage` workflow, both **reported,
+never enforced as a CI gate** (the rationale, and why off-gate, is in the coverage
+ADR in [`decisions.md`](decisions.md)). The floors are local ratchets: Python's
+`fail_under` in `[tool.coverage.report]`, Rust's `--fail-under-lines`. Run either
+locally to keep the number healthy:
 
 ```bash
-scripts/coverage.sh            # full suite; prints report, exits non-zero below fail_under
-scripts/coverage.sh --html     # also writes htmlcov/index.html
+scripts/coverage.sh                        # Python: full suite; report, exits non-zero below fail_under
+scripts/coverage.sh --html                 # also writes htmlcov/index.html
+scripts/coverage-rust.sh                    # Rust: shrike-core workspace; prints the per-crate table
+scripts/coverage-rust.sh --html            # also writes shrike-core/target/llvm-cov/html/index.html
+scripts/coverage-rust.sh --fail-under-lines 88   # local ratchet
 ```
+
+`scripts/coverage-rust.sh` needs `cargo-llvm-cov` + the `llvm-tools-preview`
+component (`rustup component add llvm-tools-preview && cargo install cargo-llvm-cov
+--locked`) and excludes the binding crates (their contract is the FFI boundary, not
+cargo coverage — see the ADR). Neither coverage number rides Bazel: `bazel
+coverage` can't see the spawned server subprocess, so each language uses its own
+native tool.
 
 A plain `pytest --cov=shrike` reads well below the real number because it can't
 see the spawned server subprocess. The capture happens through a committed `.pth`

@@ -752,6 +752,38 @@ graph (no further lock change).
   `ip_is_allowed`; the resolve-then-vet path that calls the system resolver is an
   end-to-end concern, not a unit-lane sweep.
 
+### Coverage is measured for BOTH languages, reported never gated
+
+Coverage is two numbers from two tools, neither on the per-PR critical path and
+neither a build gate:
+
+- **Python** — `coverage.py` (branch mode) over the unit + non-embedding
+  integration suites, via `scripts/coverage.sh`. The spawned-server subprocess is
+  captured through a committed `.pth` hook (a plain `--cov` misses it — see the
+  Bazel-coverage-subprocess note below). ~87%.
+- **Rust** — `cargo-llvm-cov` (line + region) over the `shrike-core` workspace, via
+  `scripts/coverage-rust.sh`. It excludes the binding crates (`shrike-pyo3`,
+  `shrike-cabi`): their thin Rust unit tests would dilute the kernel/store/engine
+  number, and their real contract is the FFI boundary the Python `native` suite and
+  the scheduled miri lane cover. ~90%.
+
+Both are **cargo/pip concerns, not Bazel** — `bazel coverage` can't see the spawned
+server subprocess and its Rust-coverage path is a deferred follow-up, so each
+language's native coverage tool owns its number. The CI `Coverage` workflow runs
+both off the per-PR path (push-to-main + rc PR + manual dispatch) and publishes the
+Python badge; it reports tables to the run summary and **never fails a build on a
+threshold**.
+
+**Gating posture: deliberately off-gate** (revisited under the "free CI" framing and
+kept). A hard coverage gate makes an unrelated PR fail on coverage *noise* — a
+refactor that deletes a covered branch, a line only reachable on another platform,
+a flaky-skipped test — turning a health signal into brittle friction. The number's
+value is the *trend*, surfaced on every main merge via the badge. The floors are
+**local ratchets**, not gates: Python's `fail_under` in `pyproject.toml` (enforced
+only by `scripts/coverage.sh`), and Rust's `scripts/coverage-rust.sh
+--fail-under-lines N`. Ratchet them up as coverage climbs; never lower one to make a
+run pass.
+
 ## Performance engineering
 
 ### Stub-vs-real embedding is a profile choice, via a first-class `synthetic` runtime (#865)

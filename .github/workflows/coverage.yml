@@ -156,6 +156,45 @@ jobs:
           path: htmlcov/
           retention-days: 14
 
+  # Rust coverage (#748): cargo-llvm-cov over the shrike-core workspace, same
+  # off-gate posture and triggers as the Python job above — reports a table to the
+  # run summary, never fails on a threshold. Independent of the badge job (the badge
+  # tracks the Python number). Linux only (the cargo lanes are; macOS builds Rust
+  # through Bazel). cargo-llvm-cov is NOT Bazel coverage — see the coverage ADR.
+  coverage-rust:
+    name: Measure Rust coverage
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'rc')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # full history + tags so hatch-vcs / anki version derivation works
+      - uses: ./.github/actions/rust-setup
+        with:
+          shared-key: rust-coverage
+      - name: Install llvm-tools + cargo-llvm-cov
+        run: rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # DESCRIPTORS_BIN: the anki build scripts run during the instrumented compile
+      # and need the checked-in pinned descriptor set (rust-cache prunes the shared
+      # target dir cargo would otherwise hand it through) — same reason as the lint
+      # and Python-coverage lanes.
+      - name: Measure + report Rust coverage
+        env:
+          DESCRIPTORS_BIN: ${{ github.workspace }}/shrike-core/third_party/anki/anki_descriptors.bin
+        run: |
+          {
+            echo '### Rust coverage (cargo-llvm-cov, line + region)'
+            echo ''
+            echo '```'
+            scripts/coverage-rust.sh
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Publish the README badge (a shields-endpoint JSON on the orphan `badges` branch).
   # ONLY the main-scoped runs do this — a merge to main or a manual dispatch, never a
   # PR (an rc PR reports its number, it doesn't move main's badge), which the `if`
