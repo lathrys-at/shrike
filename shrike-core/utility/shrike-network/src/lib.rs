@@ -715,4 +715,32 @@ mod tests {
         let err = pinned_endpoint_async_client("http://", T).unwrap_err();
         assert!(err.message.contains("invalid endpoint URL"), "{err:?}");
     }
+
+    // ── #1008 reproducer (red by design) ────────────────────────────────
+    //
+    // IPv4-compatible IPv6 (`::a.b.c.d`, the deprecated `::/96` block) wrapping
+    // an internal v4 address is currently ALLOWED by `ip_is_allowed`. It is
+    // CPython-parity-faithful (`ipaddress.ip_address("::127.0.0.1").is_global`
+    // is True), but a hardening gap: unlike the `::ffff:` mapped form,
+    // `to_ipv4_mapped()` returns None here, so the v6 path never defers to the
+    // v4 classifier, and the wrapped loopback/RFC1918/metadata address is
+    // reachable on any host whose OS honours the deprecated family. This test
+    // asserts the SECURE behaviour and so FAILS until the fix lands — it is the
+    // executable spec for #1008. On the epic test-engineering branch the same
+    // assertion rides as `#[ignore]` so that suite stays green.
+    #[test]
+    fn allowlist_should_refuse_ipv4_compatible_internal_addresses() {
+        for bad in [
+            "::127.0.0.1",       // ::7f00:1   — loopback
+            "::10.0.0.1",        // ::a00:1    — RFC1918
+            "::192.168.1.1",     // ::c0a8:101 — RFC1918
+            "::169.254.169.254", // ::a9fe:a9fe — cloud metadata
+        ] {
+            let ip: IpAddr = bad.parse().unwrap();
+            assert!(
+                !ip_is_allowed(ip),
+                "{bad} (IPv4-compatible) wraps an internal v4 and must be refused"
+            );
+        }
+    }
 }
