@@ -45,6 +45,7 @@ def _command(tool: str, tmp_path: Path, *, platform: str = "linux", **overrides)
         repeats=5,
         warmup=1,
         ops=100,
+        seed=42,
         baseline=None,
     )
     kwargs.update(overrides)

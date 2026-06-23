@@ -175,13 +175,19 @@ async def _run_workloads(
     label_w = max(16, *(len(n) for n in names)) if names else 16
     registry = [n for n in names if n != INGEST]
     if registry:
-        # One RNG for the whole run, shared across the workloads — a single
-        # deterministic stream given the seed (resolved in main from entropy unless
-        # pinned with --seed).
-        rng = random.Random(seed)
+        # A per-workload RNG seeded from (run-seed, workload-name), so each
+        # workload's data is a function of (seed, name) only — reproducible
+        # regardless of which OTHER workloads share the invocation, while still
+        # globally pinned by one --seed. (A single shared RNG drawn in run order
+        # makes a workload's data depend on its co-run set.)
         # Read-only workloads first so the single shared boot stays representative.
         workloads = sorted(
-            (build_workload(n, ops=ops, corpus_size=corpus.spec.notes, rng=rng) for n in registry),
+            (
+                build_workload(
+                    n, ops=ops, corpus_size=corpus.spec.notes, rng=random.Random(f"{seed}:{n}")
+                )
+                for n in registry
+            ),
             key=lambda w: getattr(w, "mutates", False),
         )
         # An isolated working copy so a mutating workload never pollutes the cached
@@ -292,6 +298,11 @@ def _profile_under_instrumenter(
             "use --instrument=samply or =xctrace; for the merged Python+Rust view, run "
             "py-spy --native on Linux."
         )
+    # Resolve the run seed here too (entropy unless pinned) and forward it, so
+    # the profiled run reproduces the same data — without it a profiled slow
+    # query can never be reproduced.
+    seed = args.seed if args.seed is not None else random.SystemRandom().getrandbits(64)
+    print(f"Workload RNG seed: {seed}  (pass --seed {seed} to reproduce this run's data)")
     cmd = instrument_command(
         tool,
         Path(__file__).resolve(),
@@ -306,6 +317,7 @@ def _profile_under_instrumenter(
         repeats=args.repeats,
         warmup=args.warmup,
         ops=args.ops,
+        seed=seed,
         baseline=args.baseline,
     )
     artifact = artifact_path(run_dir, workload, tool)

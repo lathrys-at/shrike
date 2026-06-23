@@ -214,6 +214,10 @@ def evaluate_query(
 
     # -- recall family (only defined when the query has grade>=2 gold) --------
     recall_at_1 = recall_at_5 = recall_at_k = hit_at_k = mrr = ndcg = None
+    # recall@k normalizes by |relevant|, so a query whose gold phrase matches many
+    # notes caps below 1.0 even on a perfect search — the absolute number is
+    # deflated by gold-set size. The cross-arm DELTA (all arms share gold) is
+    # unaffected, which is the decision input.
     if gold.has_relevant:
         top1 = set(ids_in_order[:1])
         top5 = set(ids_in_order[:5])
