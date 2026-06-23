@@ -2200,4 +2200,474 @@ mod tests {
         let reposition = tagged_variant(&schema, "op", "reposition");
         assert_eq!(property_minimum(reposition, "position"), Some(0));
     }
+
+    // ========================================================================
+    // Adversarial wire-boundary tests (#742)
+    // ========================================================================
+
+    // SplitMix64 — the house deterministic PRNG (mirrors shrike-store's test
+    // helper). No external dep; reproducible fuzz seeds.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+    }
+
+    /// A structurally-plausible seed instance per catalog name. The fuzz
+    /// mutates these toward malformed input; a seed need not be valid for the
+    /// type (the property is "never panics", not "always parses").
+    fn fuzz_seeds() -> &'static [&'static str] {
+        &[
+            r#"{"id":1,"note_type":"Basic","deck":"D","tags":["a"],"modified":"m","content":{"F":"v"}}"#,
+            r#"{"status":"created","id":7}"#,
+            r#"{"status":"error","index":0,"error":"boom","reason":"duplicate"}"#,
+            r#"{"op":"add","name":"F","position":0}"#,
+            r#"{"op":"reposition","name":"F","position":3}"#,
+            r#"{"id":1,"note_type":"Basic","deck":"D","tags":[],"modified":"m","content":null,"score":0.5,"provenance":[{"signal":"text","rank":1}]}"#,
+            r#"{"state":"running","available":true,"pid":42,"modalities":["text"]}"#,
+            r#"{"state":"ready","available":true,"size":10,"ndim":384,"modalities":[]}"#,
+            r#"{"stopped":true,"pid":9,"forced":false}"#,
+            r#"{"delivery":"url","note_count":3,"bytes":99,"format":"apkg","url":"http://x"}"#,
+            r#"{"code":"input_error","message":"bad"}"#,
+            r#"{}"#,
+            r#"[]"#,
+            r#"null"#,
+            r#"{"running":true,"wire_protocol_version":1,"pid":1,"url":"u","collection":"c","log_level":"info","log_dir":"d","embedding":{"state":"not_configured"},"index":{"state":"ready","available":true,"size":0},"derived":{}}"#,
+        ]
+    }
+
+    /// Byte-level mutation: corrupt a seed in one of several adversarial ways.
+    fn mutate(seed: &str, rng: &mut Rng) -> String {
+        let mut bytes = seed.as_bytes().to_vec();
+        if bytes.is_empty() {
+            return seed.to_owned();
+        }
+        match rng.next_u64() % 6 {
+            0 => {
+                // Flip a byte.
+                let i = (rng.next_u64() as usize) % bytes.len();
+                bytes[i] ^= (rng.next_u64() & 0xff) as u8;
+            }
+            1 => {
+                // Delete a byte.
+                let i = (rng.next_u64() as usize) % bytes.len();
+                bytes.remove(i);
+            }
+            2 => {
+                // Insert a structural metacharacter.
+                let i = (rng.next_u64() as usize) % (bytes.len() + 1);
+                let injected =
+                    [b'{', b'}', b'[', b']', b'"', b':', b',', 0x1f][(rng.next_u64() % 8) as usize];
+                bytes.insert(i, injected);
+            }
+            3 => {
+                // Splice in an adversarial token (null, huge int, unicode, nan).
+                let tokens = [
+                    "null",
+                    "99999999999999999999999999",
+                    "-9223372036854775809",
+                    "\"日本語\\u0000\"",
+                    "NaN",
+                    "1e999",
+                    "true",
+                ];
+                let tok = tokens[(rng.next_u64() % tokens.len() as u64) as usize];
+                return format!("{seed}{tok}");
+            }
+            4 => {
+                // Truncate.
+                let cut = 1 + (rng.next_u64() as usize) % bytes.len();
+                bytes.truncate(cut);
+            }
+            _ => {
+                // Duplicate a region (unbalanced braces).
+                let i = (rng.next_u64() as usize) % bytes.len();
+                let dup = bytes[i];
+                bytes.insert(i, dup);
+            }
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[test]
+    fn roundtrip_never_panics_on_mutated_input() {
+        // The wire boundary's load-bearing robustness property: `roundtrip` is
+        // the parse+emit probe the Python contract test drives over untrusted
+        // JSON. It must ALWAYS terminate as Ok/Err — never unwind — for every
+        // catalog name against arbitrarily-corrupted bytes, or a malformed
+        // payload could crash the binding instead of erroring cleanly.
+        let names: Vec<&str> = schema_catalog().into_iter().map(|(n, _)| n).collect();
+        let mut rng = Rng::new(0xDEAD_BEEF_CAFE_F00D);
+        for name in &names {
+            for seed in fuzz_seeds() {
+                for _ in 0..40 {
+                    let mutated = mutate(seed, &mut rng);
+                    // Must not panic; the result (Ok or Err) is irrelevant.
+                    let _ = roundtrip(name, &mutated);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn roundtrip_unknown_name_is_err() {
+        // The `_ =>` arm: an unrecognized type name is a clean Err, not a
+        // panic — the binding dispatches names dynamically.
+        assert!(roundtrip("NoSuchType", "{}").is_err());
+        assert!(roundtrip("", "{}").is_err());
+        // Case sensitivity: the catalog keys are exact.
+        assert!(roundtrip("note", "{}").is_err());
+    }
+
+    #[test]
+    fn status_tagged_union_rejects_missing_unknown_and_underspecified_tag() {
+        // Every status/op-tagged union is exhaustively parsed by an old client;
+        // a payload that doesn't name a known variant, or names one but omits
+        // its payload, MUST error rather than silently parse to a wrong shape.
+
+        // Missing tag entirely.
+        assert!(roundtrip("UpsertNoteResult", r#"{"id":1}"#).is_err());
+        // Unknown tag value.
+        assert!(roundtrip("UpsertNoteResult", r#"{"status":"frobnicated","id":1}"#).is_err());
+        // Known tag, payload field missing (created needs id).
+        assert!(roundtrip("UpsertNoteResult", r#"{"status":"created"}"#).is_err());
+        // Known tag, wrong-typed payload field.
+        assert!(roundtrip("UpsertNoteResult", r#"{"status":"created","id":"seven"}"#).is_err());
+
+        // NoteTypeResult (created/updated need id AND name).
+        assert!(roundtrip("NoteTypeResult", r#"{"id":1,"name":"B"}"#).is_err());
+        assert!(roundtrip("NoteTypeResult", r#"{"status":"created","id":1}"#).is_err());
+        assert!(roundtrip(
+            "NoteTypeResult",
+            r#"{"status":"deleted","id":1,"name":"B"}"#
+        )
+        .is_err());
+
+        // op-tagged FieldOp / TemplateOp.
+        assert!(roundtrip("FieldOp", r#"{"name":"F"}"#).is_err());
+        assert!(roundtrip("FieldOp", r#"{"op":"obliterate","name":"F"}"#).is_err());
+        assert!(roundtrip("FieldOp", r#"{"op":"rename","name":"F"}"#).is_err()); // needs new_name
+        assert!(roundtrip("TemplateOp", r#"{"op":"add","name":"T"}"#).is_err()); // needs front/back
+        assert!(roundtrip("TemplateOp", r#"{"op":"reposition","name":"T"}"#).is_err()); // needs position
+
+        // state-tagged EmbeddingStatus / IndexStatus.
+        assert!(roundtrip("EmbeddingStatus", r#"{"available":true}"#).is_err());
+        assert!(roundtrip("EmbeddingStatus", r#"{"state":"melting"}"#).is_err());
+        assert!(roundtrip("IndexStatus", r#"{"state":"building","available":true}"#).is_err()); // needs progress
+
+        // delivery-tagged ExportPackageResponse.
+        assert!(roundtrip("ExportPackageResponse", r#"{"note_count":1}"#).is_err());
+        assert!(roundtrip(
+            "ExportPackageResponse",
+            r#"{"delivery":"path","note_count":1,"bytes":2,"format":"apkg"}"#
+        )
+        .is_err()); // path variant needs `path`
+    }
+
+    #[test]
+    fn untagged_stop_response_discriminates_on_stopped_literal() {
+        // StopResponse is untagged and self-selects on the LiteralTrue/
+        // LiteralFalse `stopped`. Succeeded defaults `stopped` to true, so a
+        // bare object matches Succeeded (the intended "already stopped" read).
+        // The adversarial edges are the cases that match NEITHER variant:
+        //
+        //  - stopped:false but no reason  -> not Succeeded (false ≠ true literal),
+        //    not Failed (reason missing). Must error.
+        assert!(roundtrip("StopResponse", r#"{"stopped":false}"#).is_err());
+        //  - stopped:7 (non-bool)         -> matches neither literal-bool arm.
+        assert!(roundtrip("StopResponse", r#"{"stopped":7}"#).is_err());
+        //  - stopped:"false" (string)     -> not a bool, matches neither.
+        assert!(roundtrip("StopResponse", r#"{"stopped":"false"}"#).is_err());
+        // The well-formed Failed payload (stopped:false + reason) DOES parse.
+        assert!(roundtrip("StopResponse", r#"{"stopped":false,"reason":"x"}"#).is_ok());
+    }
+
+    #[test]
+    fn serde_default_fields_deserialize_to_documented_defaults() {
+        // Omitting a `#[serde(default)]` field must yield the default the
+        // default_* fns document — the binding and search path rely on these
+        // exact values when an older/partial payload omits the key.
+
+        // SubstringInfo.source -> "field" (default_source_field).
+        let s: SubstringInfo = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(s.source, "field");
+        assert!(s.matched_fields.is_empty());
+        assert_eq!(s.snippet, None);
+
+        // ListNotesResponse.limit -> 50 (default_limit).
+        let l: ListNotesResponse = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(l.limit, 50);
+
+        // NoteTypeInfo.type -> "standard" (default_standard).
+        let nt: NoteTypeInfo = serde_json::from_str(r#"{"name":"B","id":1}"#).unwrap();
+        assert_eq!(nt.r#type, "standard");
+
+        // CollectionPruneResponse.dry_run -> true (default_true) — a missing
+        // flag must default to the SAFE (preview) value, never to writing.
+        let p: CollectionPruneResponse = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(p.dry_run);
+
+        // ServerStatus.collection_held -> true (default_true).
+        // SearchResponse.completeness -> Full (the safe "final answer" default).
+        let sr: SearchResponse = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(sr.completeness, Completeness::Full);
+        assert!(!sr.stale);
+    }
+
+    #[test]
+    fn option_field_accepts_explicit_null_and_absent_identically() {
+        // For Option fields, explicit `null` and an absent key must both yield
+        // None — the model_dump wire emits null, older payloads omit; the
+        // binding must treat them the same.
+        let absent: SubstringInfo = serde_json::from_str(r#"{}"#).unwrap();
+        let explicit: SubstringInfo =
+            serde_json::from_str(r#"{"snippet":null,"ref":null}"#).unwrap();
+        assert_eq!(absent, explicit);
+        assert_eq!(explicit.snippet, None);
+        assert_eq!(explicit.r#ref, None);
+
+        // A non-Option defaulted Vec: absent and explicit [] coincide.
+        let n_absent: Note =
+            serde_json::from_str(r#"{"id":1,"note_type":"B","deck":"D","modified":"m"}"#).unwrap();
+        let n_empty: Note =
+            serde_json::from_str(r#"{"id":1,"note_type":"B","deck":"D","modified":"m","tags":[]}"#)
+                .unwrap();
+        assert_eq!(n_absent, n_empty);
+        assert!(n_absent.tags.is_empty());
+    }
+
+    /// The set of property names a schema marks `required`. schemars omits the
+    /// key entirely when nothing is required, which itself is the invariant for
+    /// all-defaulted types.
+    fn required_set(schema: &serde_json::Value) -> std::collections::BTreeSet<String> {
+        schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn defaulted_and_optional_fields_are_never_schema_required() {
+        // The schema/serde consistency invariant: a `#[serde(default)]` or
+        // Option field is tolerated-absent on input, so it MUST NOT appear in
+        // the schema's `required` array — else the advertised schema rejects
+        // input the deserializer happily accepts (the MCP `tools/list` lie).
+        // (defaulted/optional fields per type, asserted absent from required.)
+        let cases: &[(&str, &[&str])] = &[
+            ("Note", &["tags", "content"]),
+            (
+                "SubstringInfo",
+                &["matched_fields", "snippet", "source", "ref"],
+            ),
+            (
+                "SearchMatch",
+                &[
+                    "score",
+                    "substring",
+                    "fuzzy",
+                    "provenance",
+                    "tags",
+                    "content",
+                ],
+            ),
+            ("ListNotesResponse", &["notes", "total", "limit"]),
+            ("NoteTypeInfo", &["fields", "type", "detail"]),
+            ("StoreMediaItem", &["filename", "data", "url", "path"]),
+            (
+                "ServerStatus",
+                &[
+                    "embedding_spaces",
+                    "derived",
+                    "locking",
+                    "collection_held",
+                    "dedup",
+                    "coverage",
+                ],
+            ),
+            ("CollectionPruneResponse", &["dry_run", "unused_tags"]),
+            ("FieldMetadataInput", &["font", "size", "description"]),
+        ];
+        for (name, defaulted) in cases {
+            let schema = schema_of(name);
+            let required = required_set(&schema);
+            for field in *defaulted {
+                assert!(
+                    !required.contains(*field),
+                    "{name}.{field} is `default`/Option but schema marks it required"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn required_fields_are_genuinely_required_at_deserialize() {
+        // The converse of the invariant above: a field the schema marks
+        // `required` must actually be rejected when absent — schema and serde
+        // agree on the mandatory set, not just the optional one.
+        let schema = schema_of("Note");
+        let required = required_set(&schema);
+        assert!(required.contains("id") && required.contains("note_type"));
+        // Drop each required field in turn; deserialization must fail.
+        assert!(
+            serde_json::from_str::<Note>(r#"{"note_type":"B","deck":"D","modified":"m"}"#).is_err()
+        );
+        assert!(serde_json::from_str::<Note>(r#"{"id":1,"deck":"D","modified":"m"}"#).is_err());
+        assert!(
+            serde_json::from_str::<Note>(r#"{"id":1,"note_type":"B","modified":"m"}"#).is_err()
+        );
+        assert!(serde_json::from_str::<Note>(r#"{"id":1,"note_type":"B","deck":"D"}"#).is_err());
+    }
+
+    #[test]
+    fn catalog_names_are_unique_and_schemas_are_titled_objects() {
+        // The catalog is a registry the contract test indexes by name; a
+        // duplicate name would silently shadow a type, and a schema without a
+        // title can't be matched to its Pydantic mirror.
+        let catalog = schema_catalog();
+        let mut seen = std::collections::BTreeSet::new();
+        for (name, schema) in &catalog {
+            assert!(seen.insert(*name), "duplicate catalog name: {name}");
+            let v: serde_json::Value = serde_json::from_str(schema).unwrap();
+            assert!(v.is_object(), "{name} schema is not an object");
+            assert!(
+                v.get("title").and_then(|t| t.as_str()).is_some(),
+                "{name} schema has no title"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_and_roundtrip_registries_do_not_drift() {
+        // schema_catalog! and roundtrip() are generated from the SAME macro
+        // invocation, so every catalog name must be a name roundtrip() knows
+        // (round-tripping its own emitted default value) and vice versa. A
+        // drift here means a type advertised but not parseable, or parseable
+        // but unadvertised — both break the Python contract test.
+        for (name, _) in schema_catalog() {
+            // An unknown name is the ONLY Err that is name-based; feeding `{}`
+            // either parses (Ok) or fails on missing fields, but NEVER returns
+            // the "unknown schema type" sentinel for a real catalog name.
+            let res = roundtrip(name, "{}");
+            if let Err(e) = res {
+                assert!(
+                    !e.contains("unknown schema type"),
+                    "catalog name {name} is not known to roundtrip()"
+                );
+            }
+        }
+        // And the negative direction: a name NOT in the catalog is unknown.
+        assert!(roundtrip("DefinitelyNotACatalogType", "{}")
+            .unwrap_err()
+            .contains("unknown schema type"));
+    }
+
+    #[test]
+    fn wire_protocol_version_is_pinned_to_one() {
+        // The backstop constant. The Python mirror
+        // (`shrike.schemas.WIRE_PROTOCOL_VERSION`) is pinned EQUAL by the
+        // schema contract test; bumping one without the other breaks the
+        // handshake. Pinned here so a stray edit is a local failure too.
+        assert_eq!(WIRE_PROTOCOL_VERSION, 1);
+    }
+
+    #[test]
+    fn boundary_i64_ids_roundtrip_exactly() {
+        // Note ids are Anki epoch-ms timestamps and can be large; the binding
+        // must not lose precision at the i64 extremes (a f64 detour would).
+        for id in [i64::MIN, i64::MAX, 0, -1, 9_007_199_254_740_993] {
+            let note = Note {
+                id,
+                note_type: "B".into(),
+                deck: "D".into(),
+                tags: vec![],
+                modified: "m".into(),
+                content: None,
+            };
+            let json = serde_json::to_string(&note).unwrap();
+            let back: Note = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.id, id, "i64 id must survive the wire exactly");
+        }
+        // An integer past i64::MAX must be REJECTED, not silently saturated.
+        assert!(roundtrip(
+            "Note",
+            r#"{"id":9223372036854775808,"note_type":"B","deck":"D","modified":"m"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn nonfinite_f64_score_serializes_to_null_not_a_crash() {
+        // serde_json cannot represent NaN/Infinity in JSON: it emits `null`
+        // (the score is Option<f64>, so null deserializes back to None). Pin
+        // this behavior — the search path's fused score may go non-finite, and
+        // it must degrade to "no score" on the wire rather than panic or emit
+        // invalid JSON that the Python side can't parse.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let m = SearchMatch {
+                note: Note {
+                    id: 1,
+                    note_type: "B".into(),
+                    deck: "D".into(),
+                    tags: vec![],
+                    modified: "m".into(),
+                    content: None,
+                },
+                score: Some(bad),
+                substring: None,
+                fuzzy: None,
+                provenance: vec![],
+            };
+            let json = serde_json::to_string(&m).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert!(value["score"].is_null(), "non-finite score must emit null");
+            let back: SearchMatch = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.score, None, "null score round-trips to None");
+        }
+        // The `Infinity`/`NaN` JSON literals are NOT valid JSON on input —
+        // they must be a clean parse Err, not accepted.
+        assert!(roundtrip(
+            "SearchMatch",
+            r#"{"id":1,"note_type":"B","deck":"D","tags":[],"modified":"m","content":null,"score":Infinity}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn literal_const_fields_reject_off_value_on_the_wire() {
+        // ServerStatus.running is LiteralTrue; ReloadResponse.status is the
+        // "reloaded" const. A payload carrying the wrong constant must error —
+        // these fields are how a client confirms it's talking to the right
+        // endpoint shape.
+        assert!(roundtrip(
+            "ReloadResponse",
+            r#"{"status":"reloaded","col_mod":1,"rebuilding":false}"#
+        )
+        .is_ok());
+        assert!(roundtrip(
+            "ReloadResponse",
+            r#"{"status":"reopened","col_mod":1,"rebuilding":false}"#
+        )
+        .is_err());
+        // EmbeddingStatus::Stopped.available is LiteralFalse: an explicit true
+        // contradicts the variant and must fail.
+        assert!(roundtrip("EmbeddingStatus", r#"{"state":"stopped","available":true}"#).is_err());
+        assert!(roundtrip(
+            "EmbeddingStatus",
+            r#"{"state":"stopped","available":false}"#
+        )
+        .is_ok());
+    }
 }

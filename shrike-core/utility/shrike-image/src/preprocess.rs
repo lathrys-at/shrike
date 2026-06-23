@@ -202,6 +202,39 @@ mod tests {
         }
     }
 
+    /// SplitMix64 — a tiny deterministic PRNG for the malformed-byte fuzz sweep,
+    /// so the adversarial corpus is reproducible without a dev-dep.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+    }
+
+    /// In-memory encode of an RGB image to any container format — synthesizes
+    /// valid fixtures across the decode surface (BMP/GIF/PNG; JPEG is lossy so
+    /// callers avoid pixel-exact goldens on it).
+    fn encode_rgb(
+        w: u32,
+        h: u32,
+        fmt: image::ImageFormat,
+        px: impl Fn(u32, u32) -> [u8; 3],
+    ) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb(px(x, y)));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut buf, fmt)
+            .expect("encode");
+        buf.into_inner()
+    }
+
     // Identity-size resizes below stay pixel-exact: at scale 1 the Catmull-Rom
     // kernel samples land on pixel centers (weight 1 at the knot, 0 at ±1/±2),
     // so the golden values are deterministic; tolerances cover f32↔u8 rounding.
@@ -360,5 +393,296 @@ mod tests {
     fn rejects_garbage_bytes() {
         let err = preprocess_to_chw(&[0u8, 1, 2, 3], &cfg(4, 4, [0.0; 3], [1.0; 3])).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    // ---- Adversarial: malformed / hostile decode (untrusted bytes from notes
+    // and media; the decode boundary must reject, never panic / OOM / hang). ----
+
+    /// Empty and 1-byte inputs are the degenerate untrusted case; the boundary
+    /// must reject them as `InvalidInput`, not panic on an out-of-bounds header
+    /// read.
+    #[test]
+    fn rejects_empty_and_single_byte() {
+        let c = cfg(4, 4, [0.0; 3], [1.0; 3]);
+        for bytes in [&[][..], &[0x00][..], &[0xFF][..]] {
+            let err = preprocess_to_chw(bytes, &c).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        }
+    }
+
+    /// A valid PNG cut at every truncation point (header-only through almost-whole)
+    /// must never panic or read past the buffer. The `png` decoder tolerates a
+    /// missing trailer and may return the rows it has, so the contract is total
+    /// (Ok | Err) — and any Ok is a *bounded* full-target plane with finite
+    /// values, never an out-of-bounds or partial buffer.
+    #[test]
+    fn truncated_png_at_every_cut_errs_never_panics() {
+        let png = png_bytes(12, 9, |x, y| {
+            [(x * 9 + y) as u8, (y * 7) as u8, (x ^ y) as u8]
+        });
+        let c = cfg(4, 4, [0.0; 3], [1.0; 3]);
+        for cut in 1..png.len() {
+            match preprocess_to_chw(&png[..cut], &c) {
+                Ok(v) => {
+                    assert_eq!(v.len(), 3 * 4 * 4, "cut {cut}: wrong plane size");
+                    assert!(v.iter().all(|f| f.is_finite()), "cut {cut}: non-finite");
+                }
+                Err(e) => assert_eq!(e.kind(), ErrorKind::InvalidInput, "cut {cut}"),
+            }
+        }
+    }
+
+    /// Each format's magic/signature followed by random garbage must be rejected,
+    /// not trusted past the header into an unbounded read.
+    #[test]
+    fn signature_then_garbage_errs() {
+        let c = cfg(4, 4, [0.0; 3], [1.0; 3]);
+        let sigs: &[&[u8]] = &[
+            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A], // PNG
+            &[0xFF, 0xD8, 0xFF, 0xE0],                         // JPEG
+            b"BM",                                             // BMP
+            b"GIF89a",                                         // GIF
+            &[0x52, 0x49, 0x46, 0x46],                         // RIFF (WebP)
+        ];
+        for sig in sigs {
+            let mut bytes = sig.to_vec();
+            bytes.extend(std::iter::repeat_n(0xA5u8, 64));
+            // Garbage past a real signature must not decode; whatever the kind,
+            // it must be an error and must not panic.
+            assert!(preprocess_to_chw(&bytes, &c).is_err());
+        }
+    }
+
+    /// A BMP whose header declares ~100k×100k (a decompression-bomb shape) must
+    /// be bounded by the decoder's allocation limits and rejected — never an
+    /// unbounded allocation. Untrusted bytes cannot dictate allocation size.
+    #[test]
+    fn decompression_bomb_dimensions_are_bounded_err() {
+        let (w, h): (i32, i32) = (100_000, 100_000);
+        let mut bmp = Vec::new();
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&0u32.to_le_bytes()); // file size (ignored)
+        bmp.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        bmp.extend_from_slice(&54u32.to_le_bytes()); // pixel-data offset
+        bmp.extend_from_slice(&40u32.to_le_bytes()); // DIB header size (BITMAPINFOHEADER)
+        bmp.extend_from_slice(&w.to_le_bytes());
+        bmp.extend_from_slice(&h.to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes()); // planes
+        bmp.extend_from_slice(&24u16.to_le_bytes()); // bpp
+        bmp.extend_from_slice(&0u32.to_le_bytes()); // compression = none
+        bmp.extend_from_slice(&0u32.to_le_bytes()); // image byte size
+        bmp.extend_from_slice(&0i32.to_le_bytes()); // x ppm
+        bmp.extend_from_slice(&0i32.to_le_bytes()); // y ppm
+        bmp.extend_from_slice(&0u32.to_le_bytes()); // colors used
+        bmp.extend_from_slice(&0u32.to_le_bytes()); // important colors
+        let err = preprocess_to_chw(&bmp, &cfg(224, 224, [0.0; 3], [1.0; 3])).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    /// The fuzz sweep: thousands of random buffers and random truncations of a
+    /// valid fixture. The contract under hostile bytes is total — every call
+    /// returns `Ok | Err`, none panics. (A panic here unwinds the test and fails
+    /// it, which is exactly the regression we guard.)
+    #[test]
+    fn fuzz_random_and_truncated_buffers_never_panic() {
+        let c = cfg(8, 8, [0.48, 0.46, 0.41], [0.27, 0.26, 0.28]);
+        let valid = png_bytes(20, 14, |x, y| {
+            [(x * 13) as u8, (y * 11) as u8, (x + y) as u8]
+        });
+        let mut rng = Rng::new(0xDEAD_BEEF_CAFE_F00D);
+
+        for _ in 0..4000 {
+            let pick = rng.next_u64();
+            let bytes: Vec<u8> = if pick & 1 == 0 {
+                // Fully random buffer, length 0..=255.
+                let len = (rng.next_u64() % 256) as usize;
+                (0..len).map(|_| (rng.next_u64() & 0xFF) as u8).collect()
+            } else {
+                // Random truncation of the valid fixture, optionally with a
+                // trailing byte flipped to corrupt an otherwise-whole image.
+                let cut = (rng.next_u64() as usize % valid.len()).max(1);
+                let mut v = valid[..cut].to_vec();
+                if pick & 2 == 0 && !v.is_empty() {
+                    let i = rng.next_u64() as usize % v.len();
+                    v[i] ^= (rng.next_u64() & 0xFF) as u8;
+                }
+                v
+            };
+            // The only assertion is "did not panic"; an Ok result is acceptable
+            // (a corrupted-but-decodable image is fine — it's bounded output).
+            let r = preprocess_to_chw(&bytes, &c);
+            if let Ok(v) = r {
+                assert_eq!(v.len(), 3 * 8 * 8);
+                assert!(v.iter().all(|f| f.is_finite()));
+            }
+        }
+    }
+
+    // ---- Format / shape edge cases: channel count and output dims are an
+    // invariant of the embedding contract regardless of input shape. ----
+
+    /// A 1×1 image (the smallest legal image) produces the full target plane
+    /// `3·crop²` with finite values — no divide-by-zero on the degenerate dims.
+    #[test]
+    fn one_by_one_image_yields_full_target_plane() {
+        let bytes = png_bytes(1, 1, |_, _| [200, 100, 50]);
+        let chw = preprocess_to_chw(&bytes, &cfg(4, 4, [0.0; 3], [1.0; 3])).unwrap();
+        assert_eq!(chw.len(), 3 * 4 * 4);
+        assert!(chw.iter().all(|f| f.is_finite()));
+    }
+
+    /// Extreme aspect ratios (1px-tall-wide and 1px-wide-tall) must still produce
+    /// exactly the target dims; shortest-edge resize + center-crop never under- or
+    /// over-fills the output tensor.
+    #[test]
+    fn extreme_aspect_ratios_yield_exact_target_dims() {
+        let c = cfg(8, 8, [0.0; 3], [1.0; 3]);
+        for (w, h) in [(64, 1), (1, 64), (128, 2), (2, 128)] {
+            let bytes = png_bytes(w, h, |x, y| [(x as u8).wrapping_add(y as u8); 3]);
+            let chw = preprocess_to_chw(&bytes, &c).unwrap();
+            assert_eq!(chw.len(), 3 * 8 * 8, "dims {w}x{h}");
+            assert!(chw.iter().all(|f| f.is_finite()));
+        }
+    }
+
+    /// Grayscale and RGBA inputs both decode through `to_rgb8` to a 3-channel
+    /// output of the target size: the pipeline output channel count is fixed at 3
+    /// regardless of the source pixel type.
+    #[test]
+    fn grayscale_and_rgba_inputs_become_three_channel_output() {
+        let c = cfg(4, 4, [0.0; 3], [1.0; 3]);
+
+        // Grayscale: every output channel equals the luma value (rescaled).
+        let gray = {
+            let img = image::GrayImage::from_fn(4, 4, |_, _| image::Luma([128]));
+            let mut buf = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageLuma8(img)
+                .write_to(&mut buf, image::ImageFormat::Png)
+                .unwrap();
+            buf.into_inner()
+        };
+        let g = preprocess_to_chw(&gray, &c).unwrap();
+        assert_eq!(g.len(), 3 * 4 * 4);
+        for &v in &g {
+            assert!((v - 128.0 / 255.0).abs() < TOL);
+        }
+
+        // RGBA: alpha is dropped, RGB carried through (no premultiply).
+        let rgba = {
+            let img = image::RgbaImage::from_fn(4, 4, |_, _| image::Rgba([60, 120, 180, 7]));
+            let mut buf = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut buf, image::ImageFormat::Png)
+                .unwrap();
+            buf.into_inner()
+        };
+        let a = preprocess_to_chw(&rgba, &c).unwrap();
+        let want = [60.0 / 255.0, 120.0 / 255.0, 180.0 / 255.0];
+        for ch in 0..3 {
+            for v in &a[ch * 16..(ch + 1) * 16] {
+                assert!((v - want[ch]).abs() < TOL, "ch {ch}: {v} != {}", want[ch]);
+            }
+        }
+    }
+
+    /// A valid image synthesized in BMP and GIF decodes to the same target plane
+    /// as PNG — the decode surface spans the declared format feature set, not just
+    /// PNG.
+    #[test]
+    fn bmp_and_gif_decode_to_target_plane() {
+        let c = cfg(4, 4, [0.0; 3], [1.0; 3]);
+        for fmt in [image::ImageFormat::Bmp, image::ImageFormat::Gif] {
+            let bytes = encode_rgb(6, 6, fmt, |_, _| [90, 90, 90]);
+            let chw = preprocess_to_chw(&bytes, &c).unwrap();
+            assert_eq!(chw.len(), 3 * 4 * 4, "{fmt:?}");
+            assert!(chw.iter().all(|v| (v - 90.0 / 255.0).abs() < TOL));
+        }
+    }
+
+    // ---- Pixel-pipeline oracle / property tests. ----
+
+    /// Determinism: the same bytes through the same config produce a bitwise
+    /// identical vector. The embedding contract relies on this — a non-deterministic
+    /// preprocess would silently invalidate the stored-vector fingerprint model.
+    #[test]
+    fn preprocess_is_deterministic() {
+        let bytes = png_bytes(40, 27, |x, y| [(x * 6) as u8, (y * 9) as u8, (x * y) as u8]);
+        let c = cfg(16, 14, [0.481, 0.457, 0.408], [0.268, 0.261, 0.275]);
+        let a = preprocess_to_chw(&bytes, &c).unwrap();
+        let b = preprocess_to_chw(&bytes, &c).unwrap();
+        assert_eq!(a, b, "identical input must yield identical output");
+    }
+
+    /// Shape + finiteness contract over a realistic CLIP config (224×224, the
+    /// real ViT input): output length is exactly `3·crop²` and every value is
+    /// finite (no NaN/Inf could reach the vision graph).
+    #[test]
+    fn clip_output_shape_and_finiteness() {
+        let bytes = png_bytes(300, 200, |x, y| {
+            [(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8]
+        });
+        let mean = [0.481_454_8, 0.457_827_5, 0.408_210_7];
+        let std = [0.268_629_5, 0.261_302_6, 0.275_777_1];
+        let chw = preprocess_to_chw(&bytes, &cfg(224, 224, mean, std)).unwrap();
+        assert_eq!(chw.len(), 3 * 224 * 224);
+        assert!(chw.iter().all(|f| f.is_finite()));
+    }
+
+    /// Analytic oracle: a solid-color image normalizes to exactly
+    /// `(color/255 − mean)/std` per channel everywhere, independent of resize/crop
+    /// (a constant image is resize/crop invariant). Computes the expected value by
+    /// hand and asserts within f32 epsilon over the whole plane.
+    #[test]
+    fn solid_color_matches_analytic_oracle_across_resize() {
+        let color = [219u8, 17, 144];
+        let mean = [0.481f32, 0.457, 0.408];
+        let std = [0.268f32, 0.261, 0.275];
+        // Source bigger than the crop so a real resize runs; the constant image
+        // is invariant under it, so the oracle still holds exactly.
+        let bytes = png_bytes(50, 80, |_, _| color);
+        let chw = preprocess_to_chw(&bytes, &cfg(28, 24, mean, std)).unwrap();
+        let plane = 24 * 24;
+        assert_eq!(chw.len(), 3 * plane);
+        for ch in 0..3 {
+            let want = (color[ch] as f32 / 255.0 - mean[ch]) / std[ch];
+            for v in &chw[ch * plane..(ch + 1) * plane] {
+                assert!((v - want).abs() < TOL, "ch {ch}: {v} != {want}");
+            }
+        }
+    }
+
+    /// Resize is an identity-shaped operation on output dims: regardless of input
+    /// size or aspect, the output is always exactly `3·crop²`. An image already at
+    /// the target size round-trips its constant pixels unchanged (resize at scale
+    /// 1 is pixel-exact for a constant image).
+    #[test]
+    fn resize_output_dims_invariant_and_identity_at_target() {
+        let mean = [0.0; 3];
+        let std = [1.0; 3];
+        // Output dims invariant across wildly different inputs.
+        for (w, h) in [(8, 8), (8, 32), (32, 8), (100, 7), (7, 100), (1, 1)] {
+            let bytes = png_bytes(w, h, |_, _| [33, 66, 99]);
+            let chw = preprocess_to_chw(&bytes, &cfg(8, 8, mean, std)).unwrap();
+            assert_eq!(chw.len(), 3 * 8 * 8, "dims {w}x{h}");
+        }
+        // Already-at-target identity: 8×8 source, resize 8, crop 8 → no scaling,
+        // no crop offset; a constant image is carried through pixel-exact.
+        let bytes = png_bytes(8, 8, |_, _| [33, 66, 99]);
+        let chw = preprocess_to_chw(&bytes, &cfg(8, 8, mean, std)).unwrap();
+        let want = [33.0 / 255.0, 66.0 / 255.0, 99.0 / 255.0];
+        for ch in 0..3 {
+            for v in &chw[ch * 64..(ch + 1) * 64] {
+                assert!((v - want[ch]).abs() < TOL);
+            }
+        }
+    }
+
+    /// `from_slices` rejects wrong-arity mean/std — the FFI arity guard on the
+    /// config boundary (not bytes, but still untrusted shape from across the FFI).
+    #[test]
+    fn from_slices_rejects_wrong_arity() {
+        assert!(PreprocessConfig::from_slices(224, 224, &[0.0, 0.0], &[1.0; 3]).is_err());
+        assert!(PreprocessConfig::from_slices(224, 224, &[0.0; 3], &[1.0; 4]).is_err());
+        assert!(PreprocessConfig::from_slices(224, 224, &[0.0; 3], &[1.0; 3]).is_ok());
     }
 }

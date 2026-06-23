@@ -715,4 +715,508 @@ mod tests {
         let err = pinned_endpoint_async_client("http://", T).unwrap_err();
         assert!(err.message.contains("invalid endpoint URL"), "{err:?}");
     }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Adversarial SSRF suite (#742): every classifier evasion, boundary, and
+    // malformed input that an attacker would reach for to make the allowlist
+    // hand back an internal address. Each test states the property it pins and
+    // names the asset the evasion would otherwise reach.
+    // ════════════════════════════════════════════════════════════════════
+
+    /// A tiny deterministic SplitMix64 — the inline property lane's PRNG, in
+    /// place of an external `rand`/`proptest` dependency, so the fuzz test rides
+    /// the existing `rust_test` target with no crate-graph churn. A failure is
+    /// reproducible from its seed.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+    }
+
+    fn v4(s: &str) -> IpAddr {
+        IpAddr::V4(s.parse().unwrap())
+    }
+
+    // ── IPv4 ranges: exact boundaries, just-in and just-out ─────────────
+
+    /// Every private/reserved IPv4 range is refused at BOTH its first and last
+    /// address — an off-by-one in a mask (e.g. `<<` vs `<=`) would leak an edge
+    /// host of a block that fronts loopback, LAN, the cloud metadata service, or
+    /// CGNAT. Table is (range-label, first, last); both ends must be refused.
+    #[test]
+    fn allowlist_refuses_ipv4_private_ranges_at_both_boundaries() {
+        let blocked_edges = [
+            ("0.0.0.0/8", "0.0.0.0", "0.255.255.255"),
+            ("10.0.0.0/8", "10.0.0.0", "10.255.255.255"),
+            ("127.0.0.0/8 loopback", "127.0.0.0", "127.255.255.255"),
+            (
+                "169.254.0.0/16 link-local",
+                "169.254.0.0",
+                "169.254.255.255",
+            ),
+            ("172.16.0.0/12", "172.16.0.0", "172.31.255.255"),
+            ("192.168.0.0/16", "192.168.0.0", "192.168.255.255"),
+            ("100.64.0.0/10 CGNAT", "100.64.0.0", "100.127.255.255"),
+            ("198.18.0.0/15 benchmarking", "198.18.0.0", "198.19.255.255"),
+            ("192.0.2.0/24 TEST-NET-1", "192.0.2.0", "192.0.2.255"),
+            (
+                "198.51.100.0/24 TEST-NET-2",
+                "198.51.100.0",
+                "198.51.100.255",
+            ),
+            ("203.0.113.0/24 TEST-NET-3", "203.0.113.0", "203.0.113.255"),
+            ("240.0.0.0/4 reserved", "240.0.0.0", "255.255.255.254"),
+        ];
+        for (label, first, last) in blocked_edges {
+            assert!(!ip_is_allowed(v4(first)), "{label}: first {first} leaked");
+            assert!(!ip_is_allowed(v4(last)), "{label}: last {last} leaked");
+        }
+        // The all-ones broadcast and 169.254.169.254 (the cloud metadata IP) are
+        // the two single addresses an attacker most wants; pin them by name.
+        assert!(!ip_is_allowed(v4("255.255.255.255")), "broadcast leaked");
+        assert!(
+            !ip_is_allowed(v4("169.254.169.254")),
+            "cloud metadata IP leaked"
+        );
+    }
+
+    /// The addresses ONE step outside each blocked range stay PUBLIC — the gate
+    /// must not over-block and break legitimate fetches. This is the negative
+    /// boundary control for the 172.16/12 block in particular, whose non-octet
+    /// mask (172.15.x public, 172.16–172.31 blocked, 172.32.x public) is the
+    /// classic place a hand-rolled check gets wrong.
+    #[test]
+    fn allowlist_permits_ipv4_just_outside_private_ranges() {
+        for good in [
+            "9.255.255.255",   // just below 10/8
+            "11.0.0.0",        // just above 10/8
+            "172.15.255.255",  // just below 172.16/12
+            "172.32.0.0",      // just above 172.16/12
+            "192.167.255.255", // just below 192.168/16
+            "192.169.0.0",     // just above 192.168/16
+            "169.253.255.255", // just below 169.254/16
+            "169.255.0.0",     // just above 169.254/16
+            "100.63.255.255",  // just below 100.64/10 CGNAT
+            "100.128.0.0",     // just above 100.64/10 CGNAT
+            "126.255.255.255", // just below 127/8 loopback
+            "128.0.0.0",       // just above 127/8 loopback
+            "192.0.1.255",     // just below 192.0.2/24
+            "192.0.3.0",       // just above 192.0.2/24
+            "239.255.255.255", // just below 240/4 (but multicast — see note)
+        ] {
+            // 239.255.255.255 is the top of 224/4 multicast; it is correctly
+            // refused by the multicast guard, not the range check — exclude it.
+            if good == "239.255.255.255" {
+                assert!(!ip_is_allowed(v4(good)), "{good} is multicast, must block");
+                continue;
+            }
+            assert!(
+                ip_is_allowed(v4(good)),
+                "{good} wrongly blocked (over-block)"
+            );
+        }
+    }
+
+    /// The 192.0.0.9 / 192.0.0.10 carve-out: the IANA registry marks these two
+    /// addresses inside the otherwise-reserved 192.0.0.0/24 as global (PCP / NAT
+    /// discovery anycast), and the classifier must match Python on that — both
+    /// the two exceptions ALLOWED and the rest of the /24 BLOCKED.
+    #[test]
+    fn allowlist_matches_python_on_the_192_0_0_24_carveout() {
+        assert!(ip_is_allowed(v4("192.0.0.9")), "192.0.0.9 is global");
+        assert!(ip_is_allowed(v4("192.0.0.10")), "192.0.0.10 is global");
+        for blocked in ["192.0.0.0", "192.0.0.8", "192.0.0.11", "192.0.0.255"] {
+            assert!(!ip_is_allowed(v4(blocked)), "{blocked} must stay blocked");
+        }
+    }
+
+    /// IPv4 multicast (224.0.0.0/4) is refused — a notetype that fetches a
+    /// multicast group would let an attacker pivot onto LAN multicast services.
+    #[test]
+    fn allowlist_refuses_ipv4_multicast() {
+        for m in ["224.0.0.0", "224.0.0.1", "232.1.2.3", "239.255.255.255"] {
+            assert!(!ip_is_allowed(v4(m)), "{m} multicast leaked");
+        }
+    }
+
+    // ── IPv6 evasions ───────────────────────────────────────────────────
+
+    /// The canonical IPv6 private/internal forms are all refused: loopback,
+    /// unspecified, ULA, link-local, NAT64-local, and the documentation range.
+    /// Each is a direct path to an internal v6 service if permitted.
+    #[test]
+    fn allowlist_refuses_ipv6_internal_forms() {
+        for bad in [
+            "::1",                                    // loopback
+            "::",                                     // unspecified (0.0.0.0 analogue)
+            "fc00::1",                                // ULA fc00::/7 low half
+            "fdff:ffff::1",                           // ULA fc00::/7 high half (fd..)
+            "fe80::1",                                // link-local fe80::/10
+            "febf:ffff::1",                           // link-local fe80::/10 top
+            "100::1",                                 // 100::/64 discard-only
+            "64:ff9b:1::1",                           // 64:ff9b:1::/48 NAT64 local-use
+            "2001:db8::1",                            // 2001:db8::/32 documentation
+            "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff", // doc range top
+        ] {
+            let ip: IpAddr = bad.parse().unwrap();
+            assert!(!ip_is_allowed(ip), "{bad} must be refused");
+        }
+    }
+
+    /// fc00::/7 ULA boundaries: the block runs fc00:: .. fdff:ffff:…:ffff. The
+    /// address just below (fbff:…) and just above (fe00::) the /7 must stay
+    /// public (no over-block), while both ends of the /7 are refused.
+    #[test]
+    fn allowlist_ula_fc00_slash7_boundaries() {
+        let parse = |s: &str| -> IpAddr { s.parse().unwrap() };
+        assert!(!ip_is_allowed(parse("fc00::")), "fc00:: ULA start leaked");
+        assert!(
+            !ip_is_allowed(parse("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")),
+            "ULA /7 end leaked"
+        );
+        // Just outside the /7 in both directions stays global.
+        assert!(
+            ip_is_allowed(parse("fbff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")),
+            "fbff:: wrongly blocked"
+        );
+        // fe00::/8 is global (link-local only starts at fe80::/10).
+        assert!(ip_is_allowed(parse("fe00::1")), "fe00::1 wrongly blocked");
+    }
+
+    /// IPv4-mapped IPv6 (`::ffff:a.b.c.d`) MUST defer to the embedded IPv4 and
+    /// inherit its verdict — the headline IPv6→IPv4 SSRF evasion: wrap loopback
+    /// or the metadata IP in a v6 literal hoping the v6 path skips the v4 block.
+    #[test]
+    fn allowlist_refuses_ipv4_mapped_internal_addresses() {
+        for bad in [
+            "::ffff:127.0.0.1",       // loopback
+            "::ffff:10.0.0.1",        // RFC1918
+            "::ffff:192.168.1.1",     // RFC1918
+            "::ffff:172.16.0.1",      // RFC1918
+            "::ffff:169.254.169.254", // cloud metadata
+            "::ffff:100.64.0.1",      // CGNAT
+            "::ffff:0.0.0.0",         // unspecified
+        ] {
+            let ip: IpAddr = bad.parse().unwrap();
+            assert!(
+                !ip_is_allowed(ip),
+                "{bad} (v4-mapped internal) must be refused"
+            );
+        }
+        // A v4-mapped PUBLIC address still passes (defer-to-v4 is symmetric).
+        assert!(
+            ip_is_allowed("::ffff:8.8.8.8".parse().unwrap()),
+            "::ffff:8.8.8.8 wrongly blocked"
+        );
+    }
+
+    /// 6to4 (2002::/16) embeds an IPv4 in bytes 2..6; the whole /16 is refused
+    /// so an attacker can't 6to4-wrap an internal v4 (`2002:7f00:1::` = the 6to4
+    /// of 127.0.0.1) to slip past. Pins both ends of the /16 and several
+    /// internal-v4 wrappings, extending the existing single-address probe.
+    #[test]
+    fn allowlist_refuses_entire_6to4_2002_slash16() {
+        for bad in [
+            "2002::",                                  // /16 start
+            "2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff", // /16 end
+            "2002:7f00:1::1",                          // wraps 127.0.0.1
+            "2002:a00:1::1",                           // wraps 10.0.0.1
+            "2002:c0a8:101::1",                        // wraps 192.168.1.1
+            "2002:a9fe:a9fe::1",                       // wraps 169.254.169.254 (metadata)
+            "2002:0808:0808::1",                       // wraps 8.8.8.8 — still refused (whole /16)
+        ] {
+            let ip: IpAddr = bad.parse().unwrap();
+            assert!(!ip_is_allowed(ip), "{bad} (6to4) must be refused");
+        }
+        // Just outside the /16 stays global.
+        assert!(
+            ip_is_allowed("2001:ffff::1".parse().unwrap()),
+            "2001:ffff::1 wrongly blocked"
+        );
+        assert!(
+            ip_is_allowed("2003::1".parse().unwrap()),
+            "2003::1 wrongly blocked"
+        );
+    }
+
+    /// IPv6 multicast (ff00::/8) is refused. Python's `is_global` actually
+    /// returns True for some multicast scopes, so this guard is the `&&
+    /// !is_multicast()` layer ON TOP of the parity classifier — pin that it
+    /// catches link-local, site-local, and global multicast scopes alike.
+    #[test]
+    fn allowlist_refuses_ipv6_multicast_all_scopes() {
+        for m in [
+            "ff00::1",
+            "ff01::1",
+            "ff02::1",        // node/link-local (all-nodes etc.)
+            "ff05::1",        // site-local
+            "ff0e::1",        // global-scope multicast
+            "ff02::1:ff00:0", // solicited-node
+        ] {
+            let ip: IpAddr = m.parse().unwrap();
+            assert!(!ip_is_allowed(ip), "{m} (v6 multicast) must be refused");
+        }
+    }
+
+    /// The 2001::/23 exception window: Python marks most of 2001::/23 non-global
+    /// but carves several sub-blocks back to global (2001:1::/32 etc.). The
+    /// classifier must match — both a refused interior (2001:2::, Teredo-ish) and
+    /// the allowed carve-outs.
+    #[test]
+    fn allowlist_matches_python_on_2001_slash23_window() {
+        // Refused: inside 2001::/23 but NOT one of the carve-outs.
+        for blocked in ["2001:2::1", "2001:5::1", "2001:1ff::1"] {
+            let ip: IpAddr = blocked.parse().unwrap();
+            assert!(!ip_is_allowed(ip), "{blocked} should be non-global");
+        }
+        // Allowed carve-outs that ARE global per the registry.
+        for good in [
+            "2001:1::1",
+            "2001:3::1",
+            "2001:4:112::1",
+            "2001:20::1",
+            "2001:30::1",
+        ] {
+            let ip: IpAddr = good.parse().unwrap();
+            assert!(ip_is_allowed(ip), "{good} is a global carve-out");
+        }
+    }
+
+    /// IPv4-COMPATIBLE IPv6 (`::a.b.c.d`, the deprecated RFC4291 form, NOT
+    /// v4-mapped) wrapping an internal v4. `to_ipv4_mapped()` returns None for
+    /// these, so the classifier does NOT defer to the IPv4 check — it follows
+    /// Python's `is_global`, which treats `::127.0.0.1` (= `::7f00:1`) as global.
+    /// The connect on this host fails (the OS rejects the deprecated family), but
+    /// on a host that DOES route it this is a loopback reach the allowlist would
+    /// permit.
+    ///
+    /// This pins the SECURE behaviour (these must be refused). It is parity-
+    /// faithful for `ip_is_allowed` to permit them — Python agrees — so this is a
+    /// hardening gap beyond strict parity, tracked as a DEFECT and left red-but-
+    /// ignored rather than fixed here (trust-boundary change → security review).
+    #[test]
+    #[ignore = "DEFECT #743: IPv4-compatible ::a.b.c.d (e.g. ::127.0.0.1) is is_global-true per Python parity but reaches an internal v4 where the OS routes it; ip_is_allowed should refuse the whole ::/96 v4-compatible block on top of parity"]
+    fn allowlist_should_refuse_ipv4_compatible_internal_addresses() {
+        for bad in [
+            "::127.0.0.1",       // ::7f00:1 — loopback
+            "::10.0.0.1",        // ::a00:1 — RFC1918
+            "::192.168.1.1",     // ::c0a8:101 — RFC1918
+            "::169.254.169.254", // ::a9fe:a9fe — cloud metadata
+        ] {
+            let ip: IpAddr = bad.parse().unwrap();
+            assert!(
+                !ip_is_allowed(ip),
+                "{bad} (IPv4-compatible) wraps an internal v4 and must be refused"
+            );
+        }
+    }
+
+    // ── parsing / normalization evasions through the resolving API ──────
+
+    /// The famous octal/hex/decimal/integer IPv4 spellings of 127.0.0.1, fed to
+    /// `resolve_public_ip` (the attacker-supplied media path). `getaddrinfo`
+    /// normalizes each spelling to the literal 127.0.0.1, which then hits the
+    /// loopback block — so every alternate encoding is refused as non-public.
+    /// This is THE classic allowlist bypass; pin that the resolve-then-vet shape
+    /// defeats it.
+    #[test]
+    fn resolve_public_ip_refuses_alternate_ipv4_encodings_of_loopback() {
+        for spelling in [
+            "0x7f.0.0.1", // hex first octet
+            "0177.0.0.1", // octal first octet
+            "2130706433", // 32-bit decimal integer
+            "0x7f000001", // 32-bit hex integer
+            "127.0.0.1",  // the canonical form (control)
+        ] {
+            match resolve_public_ip(spelling) {
+                Err(e) => assert!(
+                    e.message.contains("non-public address")
+                        || e.message.contains("could not resolve"),
+                    "{spelling}: unexpected error {e:?}"
+                ),
+                Ok(ip) => panic!(
+                    "{spelling} resolved to {ip} and was ALLOWED — alternate \
+                     encoding bypassed the loopback block (SSRF)"
+                ),
+            }
+        }
+    }
+
+    /// `resolve_public_ip` vets the IPv6 loopback and metadata literals too, not
+    /// just v4 — the v6 path is the same resolve-then-classify gate.
+    #[test]
+    fn resolve_public_ip_refuses_ipv6_internal_literals() {
+        for bad in ["::1", "fe80::1", "fc00::1", "::ffff:127.0.0.1"] {
+            let err = resolve_public_ip(bad).unwrap_err();
+            assert!(err.message.contains("non-public address"), "{bad}: {err:?}");
+        }
+    }
+
+    /// A name that resolves at all must have EVERY address vetted — but with a
+    /// pure-literal API the practical guard is: a literal that classifies bad is
+    /// refused before any socket, and a non-resolving name errors cleanly (no
+    /// panic, no Ok). Public literals pass and are returned for pinning.
+    #[test]
+    fn resolve_public_ip_returns_public_literal_for_pinning() {
+        let ip = resolve_public_ip("8.8.8.8").unwrap();
+        assert_eq!(ip, "8.8.8.8".parse::<IpAddr>().unwrap());
+    }
+
+    // ── same_host_redirect look-alike host evasions ─────────────────────
+
+    /// Host comparison is case-insensitive (the `url` crate lowercases the host),
+    /// so a redirect that only changes the host's CASE is the SAME host and is
+    /// allowed — a refusal here would be a false positive, but more importantly
+    /// this pins that case-folding can't be (mis)used to smuggle a different host
+    /// past a naive byte-compare.
+    #[test]
+    fn same_host_redirect_is_case_insensitive_on_host() {
+        let from = url::Url::parse("http://Api.Example.Com/v1").unwrap();
+        let t = same_host_redirect(&from, "http://API.EXAMPLE.COM/v2").unwrap();
+        assert_eq!(t.host_str(), Some("api.example.com"));
+    }
+
+    /// A trailing-dot FQDN (`example.com.`) is a DIFFERENT host string than
+    /// `example.com` to the `url` crate, so a redirect that adds/removes the dot
+    /// is refused. This matters because some resolvers treat the two as equal —
+    /// the conservative refusal keeps the pinned-IP invariant (the connection is
+    /// pinned to the base host's vetted IP; a host string mismatch must not slip
+    /// through as "same host").
+    #[test]
+    fn same_host_redirect_refuses_trailing_dot_fqdn_variant() {
+        let from = url::Url::parse("http://example.com/v1").unwrap();
+        let err = same_host_redirect(&from, "http://example.com.:80/x").unwrap_err();
+        assert!(err.message.contains("cross-host redirect"), "{err:?}");
+    }
+
+    /// A bracketed IPv6 redirect target to a DIFFERENT host (loopback) is
+    /// refused — the endpoint posture allows ONLY the same host, and `[::1]` is
+    /// not the base host.
+    #[test]
+    fn same_host_redirect_refuses_ipv6_loopback_target() {
+        let from = url::Url::parse("http://example.com/v1").unwrap();
+        let err = same_host_redirect(&from, "http://[::1]/x").unwrap_err();
+        assert!(err.message.contains("cross-host redirect"), "{err:?}");
+    }
+
+    /// Non-http(s) schemes beyond `file:` are all refused by the endpoint
+    /// redirect vet — `gopher:`/`ftp:`/`data:` are SSRF-adjacent exfil vectors,
+    /// and an empty/whitespace location is a malformed input that must error not
+    /// panic.
+    #[test]
+    fn same_host_redirect_refuses_dangerous_schemes_and_garbage() {
+        let from = url::Url::parse("http://example.com/v1").unwrap();
+        for bad in [
+            "gopher://example.com/x", // gopher SSRF classic
+            "ftp://example.com/x",
+            "data:text/plain,hi",
+            "ws://example.com/x",
+            "javascript:alert(1)",
+        ] {
+            let err = same_host_redirect(&from, bad).unwrap_err();
+            // Either an unsupported-scheme refusal or a cross-host refusal
+            // (scheme-relative parsing can drop the host) — never an Ok.
+            assert!(
+                err.message.contains("unsupported scheme")
+                    || err.message.contains("cross-host redirect"),
+                "{bad}: {err:?}"
+            );
+        }
+    }
+
+    /// An absolute redirect to the metadata IP that happens to reuse the base
+    /// host as USERINFO (`http://base@169.254.169.254/`) — `host_str()` strips
+    /// userinfo and returns the metadata IP, so it is refused. Re-pins the
+    /// userinfo decoy against the metadata asset specifically.
+    #[test]
+    fn same_host_redirect_userinfo_decoy_to_metadata_is_refused() {
+        let from = url::Url::parse("http://trusted.example.com/v1").unwrap();
+        let err = same_host_redirect(&from, "http://trusted.example.com@169.254.169.254/latest/")
+            .unwrap_err();
+        assert!(err.message.contains("cross-host redirect"), "{err:?}");
+    }
+
+    // ── HTTP client construction invariants ─────────────────────────────
+
+    /// The endpoint builder refuses a URL whose host is an internal LITERAL only
+    /// if … actually it must NOT — the operator path is deliberately ungated, so
+    /// loopback is allowed. But a non-resolving / malformed host must still error
+    /// cleanly, and a public literal builds. Pins the operator posture's contract
+    /// (loopback OK, garbage errors).
+    #[test]
+    fn pinned_endpoint_client_operator_posture_loopback_ok_garbage_errs() {
+        // Operator-trusted: loopback resolves + builds (no is_global gate).
+        assert!(pinned_endpoint_async_client("http://127.0.0.1:8080/v1", T).is_ok());
+        // A host that cannot resolve errors (not a panic, not a silent Ok).
+        let err = pinned_endpoint_async_client("http://no.such.host.shrike.invalid.:9/v1", T)
+            .unwrap_err();
+        assert!(
+            err.message.contains("could not resolve") || err.message.contains("invalid"),
+            "{err:?}"
+        );
+    }
+
+    /// `pinned_async_client` accepts any vetted IP literal as the pin target and
+    /// builds — including a v6 public address — proving the builder is not
+    /// v4-only (a v6 media host must be pinnable too).
+    #[test]
+    fn pinned_async_client_builds_for_public_ipv6() {
+        let ip: IpAddr = "2606:4700::1111".parse().unwrap();
+        assert!(pinned_async_client(ip, "example.com", T).is_ok());
+    }
+
+    // ── generative panic-freedom fuzz ───────────────────────────────────
+
+    /// FUZZ: `ip_is_allowed` over random v4 AND v6 bit patterns must be total —
+    /// always a clean bool, never a panic (a panic in the classifier is a
+    /// fail-open DoS on the media path). 20k random addresses per family.
+    #[test]
+    fn fuzz_ip_is_allowed_is_total_over_random_addresses() {
+        let mut rng = Rng::new(0xD15E_A5E0_5512_F00D);
+        for _ in 0..20_000 {
+            let v4bits = rng.next_u64() as u32;
+            let _ = ip_is_allowed(IpAddr::V4(Ipv4Addr::from(v4bits)));
+            let hi = rng.next_u64() as u128;
+            let lo = rng.next_u64() as u128;
+            let v6bits = (hi << 64) | lo;
+            let _ = ip_is_allowed(IpAddr::V6(Ipv6Addr::from(v6bits))); // never panics
+        }
+    }
+
+    /// FUZZ: the parsing/vetting surface must be panic-free on hostile strings.
+    /// Builds random host/URL strings from a charset rich in the bytes that
+    /// trip parsers (brackets, colons, `@`, `%`, dots, slashes, control bytes)
+    /// and drives them through `resolve_public_ip` and `same_host_redirect` —
+    /// every outcome must be Ok or Err, never a panic.
+    #[test]
+    fn fuzz_parsing_surface_is_panic_free_on_hostile_input() {
+        const CHARSET: &[u8] = b"0123456789abcdefABCDEF.:/[]@%-_xX vfF\t\n";
+        let mut rng = Rng::new(0x0FF1_CEBA_D5EE_D001);
+        let from = url::Url::parse("http://base.example.com/v1").unwrap();
+        // Kept modest: each iteration may hit getaddrinfo on a garbage host, so
+        // this is a panic-freedom sweep, not a volume benchmark.
+        for _ in 0..1_500 {
+            let len = (rng.next_u64() % 40) as usize;
+            let mut s = String::with_capacity(len);
+            for _ in 0..len {
+                let b = CHARSET[(rng.next_u64() as usize) % CHARSET.len()];
+                s.push(b as char);
+            }
+            // The bare-host resolve gate: only Ok/Err, never a panic.
+            let _ = resolve_public_ip(&s);
+            // The redirect vet over the same garbage as a Location header.
+            let _ = same_host_redirect(&from, &s);
+            // And as a full candidate URL into the endpoint builder.
+            let candidate = format!("http://{s}/p");
+            let _ = pinned_endpoint_async_client(&candidate, T);
+        }
+    }
 }

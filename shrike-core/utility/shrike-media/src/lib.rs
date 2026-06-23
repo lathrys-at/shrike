@@ -443,4 +443,330 @@ mod tests {
         assert_eq!(mime_extension("audio/ogg"), Some(".oga"));
         assert_eq!(mime_extension("application/unknown"), None);
     }
+
+    // ---- Adversarial sweeps (epic #740 / #742) -------------------------
+    //
+    // Every input below is *inbound and untrusted*: a `store_media` filename,
+    // URL path, or base64 blob a caller hands the server. The tests pin the
+    // EXACT behavior of the parsing/validation surface so a regression that
+    // widens what we accept (or panics on a hostile string) is caught here.
+
+    /// A 15-line SplitMix64, inlined to avoid a dev-dep (copied from
+    /// shrike-store's test PRNG). Deterministic fuzz so a failure reproduces.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+    }
+
+    /// MIME guessing is case-insensitive on the extension: an attacker can't
+    /// dodge or force a content type by varying case. `.PNG`/`.Png`/`.png`
+    /// all map to `image/png`.
+    #[test]
+    fn guess_mime_is_case_insensitive_on_the_extension() {
+        for name in ["a.PNG", "a.Png", "a.png", "a.pNg", "CLIP.M4A", "Doc.PDF"] {
+            assert!(
+                guess_mime(name).is_some(),
+                "{name}: extension case must not change the MIME result"
+            );
+        }
+        assert_eq!(guess_mime("a.PNG"), guess_mime("a.png"));
+        assert_eq!(guess_mime("CLIP.M4A"), Some("audio/mp4"));
+        assert_eq!(guess_mime("Doc.PDF"), Some("application/pdf"));
+    }
+
+    /// Only the LAST dot-segment is the extension, so a double-extension
+    /// disguise (`image.png.exe`) is classified by its true trailing token —
+    /// never the misleading inner one. Pins that we don't mistake `image.png.exe`
+    /// for a PNG, and that an unknown trailing token yields the documented
+    /// `None` fallback (NOT octet-stream — there is no permissive default).
+    #[test]
+    fn guess_mime_uses_only_the_last_extension() {
+        assert_eq!(guess_mime("image.PNG.exe"), None);
+        assert_eq!(guess_mime("archive.tar.gz"), None);
+        // The real trailing extension still resolves through inner dots.
+        assert_eq!(guess_mime("my.photo.backup.jpeg"), Some("image/jpeg"));
+        // A known trailing token after a dotted prefix is honored.
+        assert_eq!(guess_mime("a.b.c.png"), Some("image/png"));
+    }
+
+    /// Degenerate filename shapes the parser must classify as "no usable
+    /// extension" -> `None`, never panic, never a default MIME. Empty string,
+    /// trailing dot, and a bare unknown word all collapse to `None`.
+    #[test]
+    fn guess_mime_degenerate_names_yield_none_not_a_default() {
+        for name in ["", "noext", "file.", "...", "a.unknownext", "a."] {
+            assert_eq!(
+                guess_mime(name),
+                None,
+                "{name:?}: a name with no known trailing extension must be None"
+            );
+        }
+    }
+
+    /// A leading-dot "hidden file" with no stem (`.png`) is treated as having
+    /// extension `png` by `rsplit('.')`: the dotfile name IS the extension.
+    /// Pinned so the behavior is a deliberate, documented choice rather than an
+    /// accident — an attacker naming a payload `.png` gets `image/png`.
+    #[test]
+    fn guess_mime_leading_dot_hidden_file_is_treated_as_extension() {
+        assert_eq!(guess_mime(".png"), Some("image/png"));
+        assert_eq!(guess_mime(".jpeg"), Some("image/jpeg"));
+        assert_eq!(guess_mime(".unknown"), None);
+    }
+
+    /// Unicode in the stem and path separators in the name don't break MIME
+    /// guessing: only the trailing ASCII extension matters, and a non-ASCII
+    /// extension token is simply unknown (-> None), never a panic.
+    #[test]
+    fn guess_mime_handles_unicode_and_separators_without_panic() {
+        assert_eq!(guess_mime("\u{4f60}\u{597d}.png"), Some("image/png"));
+        assert_eq!(guess_mime("dir/sub/clip.mp3"), Some("audio/mpeg"));
+        // A non-ASCII "extension" lowercases to itself and is unknown.
+        assert_eq!(guess_mime("file.\u{0444}"), None);
+        // A pathologically long extension is just an unknown token.
+        let long = format!("f.{}", "z".repeat(4096));
+        assert_eq!(guess_mime(&long), None);
+    }
+
+    /// Fuzz: `guess_mime` is total over arbitrary byte-ish strings — it returns
+    /// Some/None but never panics or hangs, whatever junk an untrusted filename
+    /// carries (control chars, dots, slashes, high code points).
+    #[test]
+    fn guess_mime_is_panic_free_over_fuzzed_names() {
+        let mut rng = Rng::new(0xF11E_0001);
+        let palette = [
+            'a',
+            'Z',
+            '.',
+            '/',
+            '\\',
+            ' ',
+            '\0',
+            '\u{0301}',
+            '\u{1F4A9}',
+            'p',
+            'n',
+            'g',
+        ];
+        for _ in 0..5000 {
+            let len = (rng.next_u64() % 24) as usize;
+            let s: String = (0..len)
+                .map(|_| palette[(rng.next_u64() as usize) % palette.len()])
+                .collect();
+            // Total function: any Some(&'static str) value is fine; the property
+            // is "no panic", asserted by reaching the next iteration.
+            let _ = guess_mime(&s);
+        }
+    }
+
+    /// `guess_mime` is deterministic: same input, same output across calls.
+    #[test]
+    fn guess_mime_is_deterministic() {
+        for name in ["a.png", "x.unknown", ".gif", "image.png.exe", ""] {
+            assert_eq!(guess_mime(name), guess_mime(name));
+        }
+    }
+
+    /// Valid base64 round-trips, including the empty payload and single-byte
+    /// (double-padding) shapes, for the trusted-shape baseline the adversarial
+    /// cases contrast against.
+    #[test]
+    fn b64_valid_inputs_round_trip() {
+        assert_eq!(decode_media_b64("aGk=").unwrap(), b"hi");
+        assert_eq!(decode_media_b64("QQ==").unwrap(), b"A");
+        assert_eq!(decode_media_b64("").unwrap(), Vec::<u8>::new());
+        // encode -> decode identity over a non-trivial payload.
+        let payload: Vec<u8> = (0u8..=255).cycle().take(777).collect();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&payload);
+        assert_eq!(decode_media_b64(&encoded).unwrap(), payload);
+    }
+
+    /// Hostile base64: the STANDARD engine demands canonical padding, so a blob
+    /// with missing, extra, or interior padding is REJECTED — not silently
+    /// truncated to a "best effort" decode. Pins each as Err so a future engine
+    /// swap to a lenient mode is caught (a lenient decoder is an integrity hole
+    /// for untrusted media bytes).
+    #[test]
+    fn b64_non_canonical_padding_is_rejected() {
+        for bad in [
+            "aGk",       // missing padding
+            "aGk==",     // over-padded
+            "aGk=extra", // trailing junk after pad
+            "QQ",        // missing padding (1-byte payload)
+            "QQ=",       // wrong pad count
+            "Zg==Zg==",  // two padded quanta concatenated
+        ] {
+            assert!(
+                decode_media_b64(bad).is_err(),
+                "{bad:?}: non-canonical/garbage base64 must be rejected"
+            );
+        }
+    }
+
+    /// Invalid-alphabet symbols are rejected: anything outside the STANDARD
+    /// alphabet (`+`/`/` are the only specials) fails rather than being skipped.
+    #[test]
+    fn b64_invalid_alphabet_is_rejected() {
+        for bad in [
+            "not base64!!",
+            "****",
+            "@@@@",
+            "aGk-",
+            "aGk_",
+            "\u{00e9}\u{00e9}",
+        ] {
+            assert!(
+                decode_media_b64(bad).is_err(),
+                "{bad:?}: non-alphabet symbols must be rejected"
+            );
+        }
+    }
+
+    /// The de-chunker strips ALL whitespace before decoding, so PEM-style line
+    /// wrapping and data:-URI newlines decode to the same bytes as the joined
+    /// form — even whitespace inside a quantum. This is the property data-URI /
+    /// chunked uploads rely on.
+    #[test]
+    fn b64_strips_embedded_whitespace_pem_and_datauri_style() {
+        let joined = "SGVsbG8sIHdvcmxkIQ=="; // "Hello, world!"
+        let expected = b"Hello, world!".to_vec();
+        let wrapped = "SGVsbG8s\nIHdvcm\r\nxkIQ==";
+        let spaced = "SGVs bG8s IHdv cmxk IQ==";
+        let tabbed = "\tSGVsbG8sIHdvcmxkIQ==\n";
+        assert_eq!(decode_media_b64(joined).unwrap(), expected);
+        assert_eq!(decode_media_b64(wrapped).unwrap(), expected);
+        assert_eq!(decode_media_b64(spaced).unwrap(), expected);
+        assert_eq!(decode_media_b64(tabbed).unwrap(), expected);
+        // Pure whitespace is an empty payload, not an error.
+        assert_eq!(decode_media_b64(" \n\t ").unwrap(), Vec::<u8>::new());
+    }
+
+    /// The cap is on the ENCODED length and is checked BEFORE whitespace is
+    /// stripped (so the raw `data.len()` bounds it). A string longer than the
+    /// threshold is rejected with the limit message without ever allocating a
+    /// decode buffer. Pins the exact threshold `MEDIA_MAX_BYTES/3*4+4` boundary.
+    #[test]
+    fn b64_encoded_length_cap_boundary_is_exact() {
+        let threshold = MEDIA_MAX_BYTES / 3 * 4 + 4;
+        // At the threshold: not rejected by the cap (decode may still fail on
+        // content, but it must not be the size error).
+        let at = "A".repeat(threshold);
+        match decode_media_b64(&at) {
+            Ok(_) => {}
+            Err(e) => assert!(
+                !e.message.contains("limit"),
+                "len==threshold must not trip the size cap, got: {}",
+                e.message
+            ),
+        }
+        // One byte over: rejected, and specifically by the size cap.
+        let over = "A".repeat(threshold + 1);
+        let err = decode_media_b64(&over).unwrap_err();
+        assert!(
+            err.message.contains("limit"),
+            "len>threshold must trip the size cap, got: {}",
+            err.message
+        );
+        // A huge whitespace-padded string is rejected on raw length BEFORE the
+        // strip — i.e. whitespace can't be used to smuggle past the cap.
+        let smuggle = " ".repeat(threshold + 1);
+        let err = decode_media_b64(&smuggle).unwrap_err();
+        assert!(
+            err.message.contains("limit"),
+            "raw length cap must apply before whitespace stripping"
+        );
+    }
+
+    /// MEDIA_MAX_BYTES is a sane, finite policy value (a real megabyte-scale
+    /// cap, not 0 and not effectively unbounded). Guards against an accidental
+    /// edit that disables the cap.
+    #[test]
+    fn media_max_bytes_is_a_sane_cap() {
+        assert_eq!(MEDIA_MAX_BYTES, 64 * 1024 * 1024);
+        // Compile-time guards: a cap of 0 or an effectively-unbounded one would
+        // disable the policy. Const-block so the check rides the build, not just
+        // this test run.
+        const {
+            assert!(MEDIA_MAX_BYTES >= 1024 * 1024, "cap must be at least 1 MiB");
+        }
+        const {
+            assert!(
+                MEDIA_MAX_BYTES <= 1024 * 1024 * 1024,
+                "cap must stay bounded well under 1 GiB"
+            );
+        }
+    }
+
+    /// Fuzz: `decode_media_b64` is total over arbitrary strings — every input
+    /// yields Ok or Err, never a panic, however hostile. This is the core
+    /// promise for an untrusted base64 source.
+    #[test]
+    fn b64_decode_is_panic_free_over_fuzzed_strings() {
+        let mut rng = Rng::new(0xB64_F022);
+        // A palette mixing the alphabet, padding, whitespace, and junk so the
+        // sweep hits canonical, near-miss, and garbage shapes.
+        let palette: Vec<char> = "ABCXYZabcxyz0189+/=\n\r\t !@#*\u{00e9}".chars().collect();
+        for _ in 0..20_000 {
+            let len = (rng.next_u64() % 40) as usize;
+            let s: String = (0..len)
+                .map(|_| palette[(rng.next_u64() as usize) % palette.len()])
+                .collect();
+            // The property is panic-freedom; Ok|Err are both acceptable.
+            let _ = decode_media_b64(&s);
+        }
+    }
+
+    /// `safe_media_name` and `media_name_from_url` agree on the traversal guard:
+    /// a URL whose path is a traversal sequence yields no derived name (None),
+    /// mirroring `safe_media_name` collapsing the same to "". Untrusted URL
+    /// paths can't smuggle `..`/empty basenames into the media dir.
+    #[test]
+    fn media_name_from_url_refuses_traversal_and_empty_basenames() {
+        assert_eq!(
+            media_name_from_url("http://h/../../etc/passwd").as_deref(),
+            Some("passwd")
+        );
+        assert_eq!(media_name_from_url("http://h/").as_deref(), None);
+        assert_eq!(media_name_from_url("http://h/a/b/"), Some("b".to_string()));
+        assert_eq!(media_name_from_url("http://h/dir/.."), None);
+        // A non-URL yields None rather than panicking.
+        assert_eq!(media_name_from_url("not a url"), None);
+        assert_eq!(media_name_from_url(""), None);
+    }
+
+    /// Fuzz: the two untrusted-name reducers never panic and never emit a name
+    /// containing a path separator (the traversal invariant) over hostile input.
+    #[test]
+    fn name_reducers_never_emit_separators_over_fuzzed_input() {
+        let mut rng = Rng::new(0x5AFE_0003);
+        let palette: Vec<char> = "ab/\\.. \tCD\u{4f60}".chars().collect();
+        for _ in 0..10_000 {
+            let len = (rng.next_u64() % 20) as usize;
+            let s: String = (0..len)
+                .map(|_| palette[(rng.next_u64() as usize) % palette.len()])
+                .collect();
+            let safe = safe_media_name(&s);
+            assert!(
+                !safe.contains('/') && !safe.contains('\\'),
+                "safe_media_name({s:?}) leaked a separator: {safe:?}"
+            );
+            // media_name_from_url only parses absolute URLs; just assert no panic
+            // and, when it returns a name, no separator leaked.
+            if let Some(n) = media_name_from_url(&format!("http://h/{s}")) {
+                assert!(
+                    !n.contains('/') && !n.contains('\\'),
+                    "media_name_from_url leaked a separator for {s:?}: {n:?}"
+                );
+            }
+        }
+    }
 }
