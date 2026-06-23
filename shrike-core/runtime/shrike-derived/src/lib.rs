@@ -1303,11 +1303,6 @@ impl DerivedEngine {
         use roaring::RoaringBitmap;
         let ceiling = self.materialize_ceiling() as u64;
         let mut conn = self.lock();
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS idx_vocab_inst USING fts5vocab('idx', 'instance')",
-            [],
-        )
-        .map_err(db_err)?;
         let tx = conn.transaction().map_err(db_err)?;
         tx.execute("DELETE FROM trigram_bitmap", [])
             .map_err(db_err)?;
@@ -1316,41 +1311,37 @@ impl DerivedEngine {
         tx.execute("DELETE FROM trigram_dirty", [])
             .map_err(db_err)?;
         {
-            // `instance` fts5vocab yields (term, doc, col, offset) in term order, so
-            // one scan groups every rowid (`doc`) under its trigram. Duplicate
-            // (term, doc) positions just re-set the same bit (idempotent).
-            let mut sel = tx
-                .prepare("SELECT term, doc FROM idx_vocab_inst")
-                .map_err(db_err)?;
+            // Accumulate every trigram's posting keyed by `trigrams()` — the SAME fold
+            // the delta and the query use. Building from FTS5's own `idx_vocab_inst`
+            // would key the base by FTS5's context-free fold, which diverges from
+            // `str::to_lowercase` on e.g. Greek final sigma / Turkish İ; the
+            // `trigrams()`-keyed delta could not then maintain it, and with no global
+            // freshness gate that desync surfaces as wrong results. Keying base, delta,
+            // and query by one tokenizer makes the tier self-consistent regardless of
+            // how `trigrams()` relates to FTS5's fold.
+            let mut postings: std::collections::HashMap<String, RoaringBitmap> =
+                std::collections::HashMap::new();
+            {
+                let mut sel = tx.prepare("SELECT rowid, txt FROM idx").map_err(db_err)?;
+                let mut rows = sel.query([]).map_err(db_err)?;
+                while let Some(r) = rows.next().map_err(db_err)? {
+                    let rowid: i64 = r.get(0).map_err(db_err)?;
+                    let txt: String = r.get(1).map_err(db_err)?;
+                    for t in trigrams(&txt) {
+                        postings.entry(t).or_default().insert(rowid as u32);
+                    }
+                }
+            }
             let mut ins = tx
                 .prepare("INSERT INTO trigram_bitmap(term, bm) VALUES(?1, ?2)")
                 .map_err(db_err)?;
-            let mut rows = sel.query([]).map_err(db_err)?;
-            let mut cur: Option<String> = None;
-            let mut bm = RoaringBitmap::new();
-            // Insert the just-finished trigram's bitmap iff it is rare enough (DF =
-            // bitmap cardinality < C); commoner trigrams get no base row.
-            let mut flush = |term: String, bm: &mut RoaringBitmap| -> NativeResult<()> {
+            // Materialize only the rare trigrams (DF = posting cardinality < C);
+            // commoner trigrams get no base row and fall to the live posting read.
+            for (term, bm) in &postings {
                 if bm.len() < ceiling {
                     let buf = Self::serialize_bitmap(bm)?;
                     ins.execute(rusqlite::params![term, buf]).map_err(db_err)?;
                 }
-                bm.clear();
-                Ok(())
-            };
-            while let Some(r) = rows.next().map_err(db_err)? {
-                let term: String = r.get(0).map_err(db_err)?;
-                let doc: i64 = r.get(1).map_err(db_err)?;
-                if cur.as_deref() != Some(term.as_str()) {
-                    if let Some(prev) = cur.take() {
-                        flush(prev, &mut bm)?;
-                    }
-                    cur = Some(term);
-                }
-                bm.insert(doc as u32);
-            }
-            if let Some(prev) = cur.take() {
-                flush(prev, &mut bm)?;
             }
         }
         tx.commit().map_err(db_err)?;
@@ -1359,35 +1350,37 @@ impl DerivedEngine {
 
     /// The incremental fold the debounced refresher runs between builds — the
     /// `O(touched)` replacement for the full `O(vocab)` bitmap rebuild (#998). In ONE
-    /// transaction (so a concurrent write can't split the DF snapshot from the
-    /// re-tiering it drives):
+    /// transaction (so a concurrent write can't split the work):
     ///
     /// 1. Refresh `trigram_df` from the live index (the cheap row-vocab read the query
-    ///    prune also relies on).
-    /// 2. For each DIRTY trigram (the only ones whose DF — and so materialization —
-    ///    could have moved), compare its fresh DF against `C` and reconcile its tier
-    ///    (FOLD a still-rare materialized trigram's `base = (base ∪ added) \ removed`
-    ///    and clear its delta; PROMOTE a now-rare unmaterialized one by building its
-    ///    base from a single-trigram live posting scan; DEMOTE a now-common
-    ///    materialized one by dropping its base + delta; leave a still-common
-    ///    unmaterialized one alone).
+    ///    prune ranks on — independent of the bitmap tier).
+    /// 2. For each DIRTY trigram that is MATERIALIZED, fold its pending delta into its
+    ///    base (`base = (base ∪ added) \ removed`) and clear the delta — then DEMOTE it
+    ///    (drop base + delta, serve live) if the folded base is now empty (every row
+    ///    gone) or has grown common (`>= C`). The materialization decision rides the
+    ///    folded base's OWN cardinality — the `trigrams()`-fold DF — never `trigram_df`
+    ///    (FTS5's fold), so the two tokenizers can't fight over a trigram's tier.
     /// 3. Clear `trigram_dirty`.
     ///
-    /// Width-0 hysteresis: the tier flips the instant DF crosses `C` (a flip is cheap —
-    /// a row drop or one rare-trigram scan); a band is a later tune if the churn
-    /// workload shows thrash.
+    /// A newly-RARE unmaterialized trigram is NOT promoted here: rebuilding its
+    /// `trigrams()`-fold posting would mean reading the FTS5-folded live index, whose
+    /// fold can diverge from `trigrams()` (Greek final sigma, Turkish İ) — exactly the
+    /// desync the single-tokenizer base avoids. It stays correct on the live posting
+    /// read and is re-materialized at the next full rebuild. Demote (the delta-growth
+    /// bound) is the tier move that matters for steady-state hygiene; promote is a pure
+    /// read-latency optimization, deferred to the rebuild.
     ///
     /// # Errors
     ///
-    /// Returns an error if the DF refresh, a posting scan, or a table write fails.
+    /// Returns an error if the DF refresh or a table write fails.
     fn fold_trigram_bitmaps(&self) -> NativeResult<()> {
         use roaring::RoaringBitmap;
         let ceiling = self.materialize_ceiling() as u64;
         let mut conn = self.lock();
         let tx = conn.transaction().map_err(db_err)?;
-        // Fresh DF first, in THIS txn — promote/demote reads it.
+        // Keep trigram_df fresh for the query prune (it ranks query trigrams by DF).
         Self::refresh_trigram_df_in(&tx)?;
-        // Candidate set: only the touched trigrams can have changed tier.
+        // Candidate set: only touched trigrams can have a pending delta or a tier flip.
         let dirty: Vec<String> = {
             let mut stmt = tx
                 .prepare("SELECT term FROM trigram_dirty")
@@ -1403,10 +1396,8 @@ impl DerivedEngine {
             tx.commit().map_err(db_err)?;
             return Ok(());
         }
-        let df = Self::trigram_dfs(&tx, &dirty.iter().map(String::as_str).collect::<Vec<_>>())?;
         for term in &dirty {
-            let df_t = df.get(term).copied().unwrap_or(0);
-            let should_materialize = df_t > 0 && (df_t as u64) < ceiling;
+            // Only a materialized trigram carries a base + delta to reconcile.
             let base: Option<Vec<u8>> = tx
                 .query_row(
                     "SELECT bm FROM trigram_bitmap WHERE term = ?1",
@@ -1415,78 +1406,47 @@ impl DerivedEngine {
                 )
                 .optional()
                 .map_err(db_err)?;
-            match (should_materialize, base.is_some()) {
-                (true, true) => {
-                    // FOLD: absorb the pending delta into the base.
-                    let delta: Option<(Vec<u8>, Vec<u8>)> = tx
-                        .query_row(
-                            "SELECT added, removed FROM trigram_delta WHERE term = ?1",
-                            [term],
-                            |r| Ok((r.get(0)?, r.get(1)?)),
-                        )
-                        .optional()
-                        .map_err(db_err)?;
-                    if let Some((added_blob, removed_blob)) = delta {
-                        let mut bm = RoaringBitmap::deserialize_from(&base.unwrap()[..])
-                            .map_err(|e| NativeError::internal(e.to_string()))?;
-                        let added = RoaringBitmap::deserialize_from(&added_blob[..])
-                            .map_err(|e| NativeError::internal(e.to_string()))?;
-                        let removed = RoaringBitmap::deserialize_from(&removed_blob[..])
-                            .map_err(|e| NativeError::internal(e.to_string()))?;
-                        bm |= &added;
-                        bm -= &removed;
-                        let buf = Self::serialize_bitmap(&bm)?;
-                        tx.execute(
-                            "UPDATE trigram_bitmap SET bm = ?2 WHERE term = ?1",
-                            rusqlite::params![term, buf],
-                        )
-                        .map_err(db_err)?;
-                        tx.execute("DELETE FROM trigram_delta WHERE term = ?1", [term])
-                            .map_err(db_err)?;
-                    }
-                }
-                (true, false) => {
-                    // PROMOTE: materialize the base from the live posting (rare → small).
-                    let bm = Self::posting_bitmap(&tx, term)?;
-                    let buf = Self::serialize_bitmap(&bm)?;
-                    tx.execute(
-                        "INSERT OR REPLACE INTO trigram_bitmap(term, bm) VALUES(?1, ?2)",
-                        rusqlite::params![term, buf],
-                    )
-                    .map_err(db_err)?;
-                    tx.execute("DELETE FROM trigram_delta WHERE term = ?1", [term])
-                        .map_err(db_err)?;
-                }
-                (false, true) => {
-                    // DEMOTE: the trigram turned common — drop its base + delta, serve live.
-                    tx.execute("DELETE FROM trigram_bitmap WHERE term = ?1", [term])
-                        .map_err(db_err)?;
-                    tx.execute("DELETE FROM trigram_delta WHERE term = ?1", [term])
-                        .map_err(db_err)?;
-                }
-                (false, false) => {}
+            let Some(base_blob) = base else {
+                continue;
+            };
+            // Fold the pending delta (if any) into the base.
+            let mut bm = RoaringBitmap::deserialize_from(&base_blob[..])
+                .map_err(|e| NativeError::internal(e.to_string()))?;
+            let delta: Option<(Vec<u8>, Vec<u8>)> = tx
+                .query_row(
+                    "SELECT added, removed FROM trigram_delta WHERE term = ?1",
+                    [term],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(db_err)?;
+            if let Some((added_blob, removed_blob)) = delta {
+                let added = RoaringBitmap::deserialize_from(&added_blob[..])
+                    .map_err(|e| NativeError::internal(e.to_string()))?;
+                let removed = RoaringBitmap::deserialize_from(&removed_blob[..])
+                    .map_err(|e| NativeError::internal(e.to_string()))?;
+                bm |= &added;
+                bm -= &removed;
             }
+            if bm.is_empty() || bm.len() >= ceiling {
+                // DEMOTE: every row gone, or grown common — drop base + delta, serve live.
+                tx.execute("DELETE FROM trigram_bitmap WHERE term = ?1", [term])
+                    .map_err(db_err)?;
+            } else {
+                let buf = Self::serialize_bitmap(&bm)?;
+                tx.execute(
+                    "UPDATE trigram_bitmap SET bm = ?2 WHERE term = ?1",
+                    rusqlite::params![term, buf],
+                )
+                .map_err(db_err)?;
+            }
+            tx.execute("DELETE FROM trigram_delta WHERE term = ?1", [term])
+                .map_err(db_err)?;
         }
         tx.execute("DELETE FROM trigram_dirty", [])
             .map_err(db_err)?;
         tx.commit().map_err(db_err)?;
         Ok(())
-    }
-
-    /// One trigram's live posting as a roaring bitmap (its idx rowids), read straight
-    /// off the FTS5 doclist. Used to promote a newly-rare trigram into the base tier.
-    fn posting_bitmap(conn: &Connection, term: &str) -> NativeResult<roaring::RoaringBitmap> {
-        let quoted = fts_quote(term);
-        let mut bm = roaring::RoaringBitmap::new();
-        let mut stmt = conn
-            .prepare_cached("SELECT rowid FROM idx WHERE idx MATCH ?1")
-            .map_err(db_err)?;
-        let mut q = stmt.query([&quoted]).map_err(db_err)?;
-        while let Some(r) = q.next().map_err(db_err)? {
-            let rid: i64 = r.get(0).map_err(db_err)?;
-            bm.insert(rid as u32);
-        }
-        Ok(bm)
     }
 
     /// Drop any leftover shadow tables (a prior aborted rebuild) and create
@@ -5407,11 +5367,13 @@ mod lexical_tests {
     }
 
     #[test]
-    fn fold_promotes_a_newly_rare_trigram_and_demotes_a_newly_common_one() {
-        // Width-0 hysteresis at the ceiling. With C = 3: "xqz" starts at DF 2
-        // (materialized) and "wkj" at DF 4 (unmaterialized). Writes flip both — "xqz"
-        // rises to DF 4 (→ demote) and "wkj" falls to DF 2 (→ promote) — and the fold
-        // reconciles the base tier over the dirty set.
+    fn fold_demotes_a_trigram_that_grew_common_promote_waits_for_rebuild() {
+        // With C = 3: "xqz" starts materialized (DF 2 < 3), "wkj" unmaterialized (DF
+        // 4 ≥ 3). Writes flip both — "xqz" rises to DF 4, "wkj" falls to DF 2. The fold
+        // DEMOTES the now-common "xqz" (drops its base, served live) but does NOT
+        // promote "wkj" (promote is deferred to the rebuild — rebuilding its
+        // trigrams()-fold posting off the FTS5-folded live index could desync). A full
+        // rebuild then materializes "wkj".
         let (e, dir) = fresh_store();
         e.set_materialize_ceiling(3);
         let mut rows: Vec<(i64, String, String, String)> = Vec::new();
@@ -5434,7 +5396,7 @@ mod lexical_tests {
             "wkj unmaterialized (DF 4 ≥ 3)"
         );
 
-        // Raise xqz to DF 4 (demote candidate); drop wkj to DF 2 (promote candidate).
+        // Raise xqz to DF 4 (demote candidate); drop wkj to DF 2 (would-promote).
         e.ingest_many(
             &[
                 (7, vec![("Front".into(), "xqz more".into())]),
@@ -5450,14 +5412,115 @@ mod lexical_tests {
         assert_eq!(
             term_count(&c, "trigram_bitmap", "xqz"),
             0,
-            "xqz demoted (DF 4 ≥ 3)"
+            "xqz demoted by the fold (grew to DF 4 ≥ 3)"
         );
         assert_eq!(
             term_count(&c, "trigram_bitmap", "wkj"),
-            1,
-            "wkj promoted (DF 2 < 3)"
+            0,
+            "wkj NOT promoted by the fold — promote is deferred to the rebuild"
         );
         assert_eq!(term_count(&c, "trigram_dirty", "xqz"), 0, "dirty cleared");
+
+        // A full rebuild materializes the now-rare wkj.
+        e.build(
+            &[
+                (1, "field".into(), "Front".into(), "xqz seed".into()),
+                (2, "field".into(), "Front".into(), "xqz seed".into()),
+                (3, "field".into(), "Front".into(), "wkj seed".into()),
+                (4, "field".into(), "Front".into(), "wkj seed".into()),
+                (7, "field".into(), "Front".into(), "xqz more".into()),
+                (8, "field".into(), "Front".into(), "xqz more".into()),
+            ],
+            &[1, 2, 3, 4, 7, 8],
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            term_count(&c, "trigram_bitmap", "wkj"),
+            1,
+            "the rebuild materialized wkj (DF 2 < 3)"
+        );
+        assert_eq!(
+            term_count(&c, "trigram_bitmap", "xqz"),
+            0,
+            "xqz stays unmaterialized after rebuild (DF 4 ≥ 3)"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn divergent_script_surfaces_via_the_materialized_tier() {
+        // Greek content (whose str::to_lowercase fold diverges from FTS5's on final
+        // sigma) is findable through the materialized base+delta tier: build + an
+        // incremental add of the same word both surface. Sanity that the
+        // single-tokenizer base serves divergent scripts at all.
+        let (e, dir) = fresh_store();
+        let rows: Vec<(i64, String, String, String)> = (1..=3i64)
+            .map(|n| {
+                (
+                    n,
+                    "field".into(),
+                    "Front".into(),
+                    format!("ΛΟΓΟΣ ΘΕΟΣ note {n}"),
+                )
+            })
+            .collect();
+        build_snapshot_live(&e, &rows, 1).unwrap();
+        e.ingest_many(
+            &[(4, vec![("Front".into(), "ΛΟΓΟΣ ΘΕΟΣ late".into())])],
+            "field",
+        )
+        .unwrap();
+        let hits = e.search_fuzzy("ΛΟΓΟΣ ΘΕΟΣ", 10, None, &[]).unwrap();
+        assert!(
+            hits.iter().any(|(nid, ..)| *nid == 1),
+            "built Greek note surfaces"
+        );
+        assert!(
+            hits.iter().any(|(nid, ..)| *nid == 4),
+            "added Greek note surfaces"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn divergent_fold_rowid_reuse_no_false_positive() {
+        // THE fold-divergence regression. The base MUST be keyed by the same tokenizer
+        // (`trigrams()`) as the delta and the query — NOT FTS5's own fold. A note with
+        // two final-sigma words ("ΛΟΓΟΣ ΘΕΟΣ") yields TWO trigrams that FTS5 folds to σ
+        // (γοσ, εοσ) but `trigrams()` folds to ς (γος, εος). With an FTS5-keyed base
+        // (the bug), a delete keyed by `trigrams()` can't shed the rowid from the σ-keyed
+        // base entries, so after a rowid reuse a medial-σ query (which `trigrams()` folds
+        // to γοσ/εοσ) reads the stale base and surfaces the unrelated reusing note with
+        // overlap 2 (≥ FUZZY_MIN_SHARED) — a false positive. A `trigrams()`-keyed base
+        // sheds the rowid under the same keys the query reads, so it cannot.
+        let (e, dir) = fresh_store();
+        let rows: Vec<(i64, String, String, String)> = (1..=3i64)
+            .map(|n| (n, "field".into(), "Front".into(), "ΛΟΓΟΣ ΘΕΟΣ".into()))
+            .collect();
+        build_snapshot_live(&e, &rows, 1).unwrap();
+        e.remove(&[3], None).unwrap(); // frees the max idx rowid
+        e.ingest_many(
+            &[(99, vec![("Front".into(), "hotel india juliet kilo".into())])],
+            "field",
+        )
+        .unwrap();
+        let c = raw(&dir);
+        let reused: Option<i64> = c
+            .query_row(
+                "SELECT note_id FROM rowmap WHERE rowid = 3 AND source = 'field'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(reused, Some(99), "note 99 reused note 3's freed rowid");
+        // Medial sigmas (followed by a letter) → trigrams() keeps σ → γοσ, εοσ.
+        let hits = e.search_fuzzy("αγοσα βεοσγ", 10, None, &[]).unwrap();
+        assert!(
+            !hits.iter().any(|(nid, ..)| *nid == 99),
+            "the reused-rowid note must NOT surface (no false positive from a stale base key)"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
