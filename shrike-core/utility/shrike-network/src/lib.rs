@@ -1191,6 +1191,9 @@ mod tests {
     }
 
     proptest! {
+        // Trust-boundary fuzz: search deeper than proptest's default 256 cases.
+        #![proptest_config(ProptestConfig::with_cases(8192))]
+
         /// FUZZ: `ip_is_allowed` over arbitrary v4 AND v6 bit patterns must be
         /// total — always a clean bool, never a panic (a panic in the classifier
         /// is a fail-open DoS on the media path).

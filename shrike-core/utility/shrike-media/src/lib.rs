@@ -548,6 +548,10 @@ mod tests {
     }
 
     proptest! {
+        // Trust-boundary fuzz (untrusted filename/data): search deeper than the
+        // proptest default 256 cases.
+        #![proptest_config(ProptestConfig::with_cases(8192))]
+
         /// Fuzz: `guess_mime` is total over arbitrary byte-ish strings — it
         /// returns Some/None but never panics or hangs, whatever junk an
         /// untrusted filename carries (control chars, dots, slashes, high code
@@ -707,6 +711,9 @@ mod tests {
     }
 
     proptest! {
+        // Trust-boundary fuzz (untrusted base64): search deeper than default.
+        #![proptest_config(ProptestConfig::with_cases(8192))]
+
         /// Fuzz: `decode_media_b64` is total over arbitrary strings — every
         /// input yields Ok or Err, never a panic, however hostile. This is the
         /// core promise for an untrusted base64 source.
@@ -744,6 +751,9 @@ mod tests {
     }
 
     proptest! {
+        // Trust-boundary fuzz (the path-traversal invariant): search deeper.
+        #![proptest_config(ProptestConfig::with_cases(8192))]
+
         /// Fuzz: the two untrusted-name reducers never panic and never emit a
         /// name containing a path separator (the traversal invariant) over
         /// hostile input.
