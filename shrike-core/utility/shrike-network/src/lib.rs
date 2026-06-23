@@ -107,8 +107,9 @@ fn ipv4_is_global(addr: Ipv4Addr) -> bool {
 
 /// Python `ipaddress.is_global` for IPv6 (the private set; an IPv4-mapped
 /// address defers to the IPv4 classifier, like Python's `ipv4_mapped`
-/// handling rejects ::ffff:10.0.0.1), hardened to refuse the deprecated
-/// IPv4-compatible block (see below) which `is_global` would permit.
+/// handling rejects ::ffff:10.0.0.1), hardened to refuse the v4-in-v6 forms
+/// `is_global` would permit but that can reach an internal v4 — the deprecated
+/// IPv4-compatible `::/96` block and the NAT64 well-known `64:ff9b::/96` prefix.
 fn ipv6_is_global(addr: Ipv6Addr) -> bool {
     if let Some(v4) = addr.to_ipv4_mapped() {
         return ipv4_is_global(v4);
@@ -138,7 +139,14 @@ fn ipv6_is_global(addr: Ipv6Addr) -> bool {
     };
     let private = addr.is_loopback()
         || addr.is_unspecified()
-        || in_net([0x64, 0xff9b, 0x1, 0, 0, 0, 0, 0], 48) // 64:ff9b:1::/48
+        // NAT64 (RFC 6052) embeds a v4 in the low 32 bits, so on a network with a
+        // NAT64 gateway `64:ff9b::<internal-v4>` reaches that internal v4. The
+        // well-known /96 is global per `is_global`; refuse it wholesale (the
+        // over-refuse stance — a deprecated/translation v4-in-v6 form has no
+        // legitimate attacker-supplied-fetch use). Operator-chosen NAT64 NSPs are
+        // unknowable and out of scope.
+        || in_net([0x64, 0xff9b, 0, 0, 0, 0, 0, 0], 96) // 64:ff9b::/96 (NAT64 well-known)
+        || in_net([0x64, 0xff9b, 0x1, 0, 0, 0, 0, 0], 48) // 64:ff9b:1::/48 (NAT64 local-use)
         || in_net([0x100, 0, 0, 0, 0, 0, 0, 0], 64) // 100::/64
         || (in_net([0x2001, 0, 0, 0, 0, 0, 0, 0], 23)
             // exceptions that ARE global inside 2001::/23
@@ -1025,6 +1033,33 @@ mod tests {
                 "{bad} (IPv4-compatible ::/96) is deprecated and must be refused"
             );
         }
+    }
+
+    /// NAT64 well-known `64:ff9b::/96` (RFC 6052) embeds a v4 in the low 32 bits;
+    /// on a network with a NAT64 gateway `64:ff9b::<v4>` reaches that v4. The
+    /// prefix is global per `is_global`, so the classifier refuses it wholesale
+    /// — including a public embedded v4 — the same over-refuse stance as `::/96`.
+    /// The local-use `64:ff9b:1::/48` stays refused too (it always was).
+    #[test]
+    fn allowlist_should_refuse_nat64_well_known_prefix() {
+        for bad in [
+            "64:ff9b::7f00:1",    // NAT64 of 127.0.0.1 — loopback
+            "64:ff9b::a00:1",     // NAT64 of 10.0.0.1 — RFC1918
+            "64:ff9b::a9fe:a9fe", // NAT64 of 169.254.169.254 — cloud metadata
+            "64:ff9b::808:808",   // NAT64 of 8.8.8.8 — PUBLIC, refused too
+            "64:ff9b:1::1",       // local-use /48, refused
+        ] {
+            let ip: IpAddr = bad.parse().unwrap();
+            assert!(
+                !ip_is_allowed(ip),
+                "{bad} (NAT64 v4-in-v6) reaches a routed v4 and must be refused"
+            );
+        }
+        // The boundary just outside the well-known /96 stays globally classified.
+        assert!(
+            ip_is_allowed("64:ff9c::1".parse().unwrap()),
+            "64:ff9c::/32 is outside the NAT64 prefix and must stay allowed"
+        );
     }
 
     // ── parsing / normalization evasions through the resolving API ──────

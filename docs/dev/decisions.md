@@ -672,6 +672,33 @@ unauthenticated from the network*, regardless of how the data plane is exposed.
   front of the loopback-TCP listener) and the management-pane subdomain are out of scope here — they
   are the authn/authz and management-UI tracks. This decision is the transport split they build on.
 
+## Security
+
+### The SSRF classifier over-refuses v4-in-v6 forms, beyond CPython `is_global` parity
+
+The `ip_is_allowed` classifier (`shrike-network`) is parity-tested against Python's
+`ipaddress.is_global`, but on two IPv6 forms it deliberately diverges and refuses
+what `is_global` would permit:
+
+- **IPv4-compatible `::a.b.c.d` (`::/96`, RFC 4291 §2.5.5.1, deprecated)** — `is_global`
+  treats it as global, but it embeds a v4 the OS may route to (`::127.0.0.1`), and
+  unlike the v4-mapped `::ffff:` block, `to_ipv4_mapped()` does not defer it to the v4
+  classifier. Refused wholesale (#1008).
+- **NAT64 well-known `64:ff9b::/96` (RFC 6052)** — embeds a v4 in the low 32 bits; on a
+  network with a NAT64 gateway, `64:ff9b::<internal-v4>` reaches that internal v4.
+  Refused wholesale.
+
+The stance is **over-refuse**: even a *public* embedded v4 (`::8.8.8.8`,
+`64:ff9b::8.8.8.8`) is refused. These are deprecated/translation forms with no
+legitimate attacker-supplied-fetch use, so refusing the whole block is simpler and
+strictly safer than per-embedded-v4 deferral, and it can never under-refuse. The
+v4-mapped `::ffff:` block is the one exception that *keeps* deferring to the embedded
+v4 (legitimately returned by dual-stack resolvers; it already refuses internal mapped
+v4s). Because this diverges from raw `is_global`, the Python parity test's reference
+(`_python_allowed`) encodes the same hardening — the test pins "native matches our
+hardened classifier," not raw `is_global`. Operator-chosen NAT64 NSPs (any /96…/32 a
+site picks) are unknowable and out of scope.
+
 ## Testing
 
 ### The Rust unit bar: API-level, adversarial, no integration backstop
