@@ -3246,8 +3246,9 @@ impl Trigram {
     }
 
     /// Build from exactly [`MIN_TRIGRAM`] code points, encoding them inline (no
-    /// allocation). Caller guarantees the slice length; surplus codepoints would
-    /// overflow `MAX_LEN` and are a bug, so the encode is debug-asserted to fit.
+    /// allocation). `MAX_LEN` holds 3 max-width (4-byte) code points exactly, so the
+    /// encode always fits; a caller passing more than 3 would overflow the buffer slice
+    /// and panic (a bug — the sole caller, `trigrams`, passes a 3-char window).
     #[inline]
     fn from_chars(chars: &[char]) -> Self {
         let mut buf = [0u8; Self::MAX_LEN];
