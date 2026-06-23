@@ -1021,34 +1021,15 @@ mod tests {
 
     // ── parsing / normalization evasions through the resolving API ──────
 
-    /// The famous octal/hex/decimal/integer IPv4 spellings of 127.0.0.1, fed to
-    /// `resolve_public_ip` (the attacker-supplied media path). `getaddrinfo`
-    /// normalizes each spelling to the literal 127.0.0.1, which then hits the
-    /// loopback block — so every alternate encoding is refused as non-public.
-    /// This is THE classic allowlist bypass; pin that the resolve-then-vet shape
-    /// defeats it.
-    #[test]
-    fn resolve_public_ip_refuses_alternate_ipv4_encodings_of_loopback() {
-        for spelling in [
-            "0x7f.0.0.1", // hex first octet
-            "0177.0.0.1", // octal first octet
-            "2130706433", // 32-bit decimal integer
-            "0x7f000001", // 32-bit hex integer
-            "127.0.0.1",  // the canonical form (control)
-        ] {
-            match resolve_public_ip(spelling) {
-                Err(e) => assert!(
-                    e.message.contains("non-public address")
-                        || e.message.contains("could not resolve"),
-                    "{spelling}: unexpected error {e:?}"
-                ),
-                Ok(ip) => panic!(
-                    "{spelling} resolved to {ip} and was ALLOWED — alternate \
-                     encoding bypassed the loopback block (SSRF)"
-                ),
-            }
-        }
-    }
+    // The classic alternate-encoding bypass (octal/hex/decimal spellings of
+    // 127.0.0.1) is NOT unit-tested here: it depends entirely on the platform
+    // resolver's `inet_aton` behaviour (glibc reads `0177.0.0.1` as octal-127;
+    // macOS reads it as decimal `177.0.0.1`, a different public host), so the
+    // outcome is libc-specific, not a property of this crate's vetting. The
+    // crate's contract — whatever the resolver returns is classified by
+    // `ip_is_allowed` and pinned — is covered hermetically by the IP-literal
+    // resolve tests below and the classifier corpus. Running live `getaddrinfo`
+    // over alternate spellings belongs in an end-to-end lane, not the unit lane.
 
     /// `resolve_public_ip` vets the IPv6 loopback and metadata literals too, not
     /// just v4 — the v6 path is the same resolve-then-classify gate.
@@ -1201,22 +1182,20 @@ mod tests {
         const CHARSET: &[u8] = b"0123456789abcdefABCDEF.:/[]@%-_xX vfF\t\n";
         let mut rng = Rng::new(0x0FF1_CEBA_D5EE_D001);
         let from = url::Url::parse("http://base.example.com/v1").unwrap();
-        // Kept modest: each iteration may hit getaddrinfo on a garbage host, so
-        // this is a panic-freedom sweep, not a volume benchmark.
-        for _ in 0..1_500 {
+        // Hermetic: drives only the pure URL parser/classifier. `resolve_public_ip`
+        // and `pinned_endpoint_async_client` are deliberately NOT swept here —
+        // they call `getaddrinfo`, so fuzzing them is live-network I/O (slow,
+        // flaky, blocks offline), which has no place in the unit lane.
+        for _ in 0..5_000 {
             let len = (rng.next_u64() % 40) as usize;
             let mut s = String::with_capacity(len);
             for _ in 0..len {
                 let b = CHARSET[(rng.next_u64() as usize) % CHARSET.len()];
                 s.push(b as char);
             }
-            // The bare-host resolve gate: only Ok/Err, never a panic.
-            let _ = resolve_public_ip(&s);
-            // The redirect vet over the same garbage as a Location header.
+            // The redirect vet over hostile garbage as a Location header: every
+            // outcome is Ok or Err, never a panic.
             let _ = same_host_redirect(&from, &s);
-            // And as a full candidate URL into the endpoint builder.
-            let candidate = format!("http://{s}/p");
-            let _ = pinned_endpoint_async_client(&candidate, T);
         }
     }
 }

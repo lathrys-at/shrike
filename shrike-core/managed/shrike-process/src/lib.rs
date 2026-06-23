@@ -902,12 +902,14 @@ mod tests {
     // 1. Process exits immediately: spawn succeeds but the child is gone before
     //    health can pass. `wait_healthy` must observe `!running` and bail FAST
     //    (not wait out the 30s HEALTH_TIMEOUT), and `start()` must return an
-    //    Unavailable error carrying the exit code (`/bin/true` → 0).
+    //    Unavailable error carrying the exit code (`sleep 0` → 0).
     #[cfg(unix)]
     #[test]
     fn start_errors_fast_when_process_exits_before_healthy() {
-        // healthy_after huge so health never trips; /bin/true exits ~instantly.
-        let mut s = Supervisor::new(CtrlPolicy::new("/bin/true", &[], 18403, usize::MAX));
+        // healthy_after huge so health never trips; `sleep 0` exits ~instantly
+        // with code 0. (`/bin/sleep` is present on Linux and macOS; `/bin/true`
+        // is not — macOS ships it at /usr/bin/true.)
+        let mut s = Supervisor::new(CtrlPolicy::new("/bin/sleep", &["0"], 18403, usize::MAX));
         let started = Instant::now();
         let err = s
             .start()
