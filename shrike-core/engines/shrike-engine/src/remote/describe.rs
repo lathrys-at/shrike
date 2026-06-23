@@ -611,6 +611,369 @@ mod tests {
         );
     }
 
+    // ── Adversarial response parsing (#744): a 200 of the wrong shape either
+    //    degrades to the empty recognition (a missing/absent caption — never
+    //    fatal) or surfaces a clean malformed Err — never a panic. ──
+
+    #[tokio::test]
+    async fn empty_choices_yields_empty_recognition() {
+        // `choices: []` — `.first()` is None, the unwrap_or("") makes the text
+        // empty, so the item degrades rather than panicking on an index.
+        let body = serde_json::json!({"choices": []}).to_string();
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body);
+        let out = engine(url, None, None)
+            .recognize(vec![item(&[1], "a.png")])
+            .await
+            .unwrap();
+        assert_eq!((out[0].text.as_str(), out[0].confidence), ("", 0.0));
+    }
+
+    #[tokio::test]
+    async fn null_content_yields_empty_recognition() {
+        // `content` is `#[serde(default)] Option<String>` — an explicit null (a
+        // tool-call/refusal turn carrying no text) is None → empty recognition.
+        let body = r#"{"choices":[{"message":{"role":"assistant","content":null}}]}"#;
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.into());
+        let out = engine(url, None, None)
+            .recognize(vec![item(&[1], "a.png")])
+            .await
+            .unwrap();
+        assert_eq!((out[0].text.as_str(), out[0].confidence), ("", 0.0));
+    }
+
+    #[tokio::test]
+    async fn missing_content_field_yields_empty_recognition() {
+        // `content` absent entirely (only a role) — the serde default keeps it
+        // None, so the item degrades cleanly.
+        let body = r#"{"choices":[{"message":{"role":"assistant"}}]}"#;
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.into());
+        let out = engine(url, None, None)
+            .recognize(vec![item(&[1], "a.png")])
+            .await
+            .unwrap();
+        assert_eq!(out[0].text, "");
+    }
+
+    #[tokio::test]
+    async fn missing_choices_field_is_a_malformed_error() {
+        // `choices` is required (no serde default): a body without it is a
+        // genuine malformed response, an Internal Err, not an empty recognition.
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", r#"{"object":"chat"}"#.into());
+        let err = engine(url, None, None)
+            .recognize(vec![item(&[1], "a.png")])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("malformed describe response"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_message_field_is_a_malformed_error() {
+        // A choice lacking `message` (required, no default) — malformed Err.
+        let body = r#"{"choices":[{"finish_reason":"stop"}]}"#;
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.into());
+        let err = engine(url, None, None)
+            .recognize(vec![item(&[1], "a.png")])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("malformed describe response"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_json_body_is_a_malformed_error() {
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", "plain text 200".into());
+        let err = engine(url, None, None)
+            .recognize(vec![item(&[1], "a.png")])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("malformed describe response"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_of_multiple_choices_wins() {
+        // A multi-choice (n>1) response uses choice[0]; extra choices ignored.
+        let body = r#"{"choices":[
+            {"message":{"role":"assistant","content":"first"}},
+            {"message":{"role":"assistant","content":"second"}}
+        ]}"#;
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.into());
+        let out = engine(url, None, None)
+            .recognize(vec![item(&[1], "a.png")])
+            .await
+            .unwrap();
+        assert_eq!(out[0].text, "first");
+    }
+
+    #[tokio::test]
+    async fn extra_unknown_fields_are_ignored() {
+        // Real cloud bodies carry id/usage/model + per-choice index/finish_reason
+        // — forward-compat: they parse and the caption is still extracted.
+        let body = r#"{"id":"x","object":"chat.completion","usage":{"total_tokens":5},
+            "choices":[{"index":0,"finish_reason":"stop",
+            "message":{"role":"assistant","content":"A cat."}}]}"#;
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.into());
+        let out = engine(url, None, None)
+            .recognize(vec![item(&[1], "a.png")])
+            .await
+            .unwrap();
+        assert_eq!(out[0].text, "A cat.");
+    }
+
+    // ── Request building (#744): the body/headers reflect the config knobs. ──
+
+    #[tokio::test]
+    async fn detail_and_overrides_ride_the_request() {
+        // detail/max_tokens/temperature/prompt overrides + a non-png mime from
+        // the named item must all appear in the request body verbatim.
+        let (url, rx) = canned_server(vec![("HTTP/1.1 200 OK", chat_ok("ok"))]);
+        let eng = RemoteDescriber::new(RemoteDescriberConfig {
+            base_url: url,
+            api_key: None,
+            model: Some("gpt-5-mini".into()),
+            prompt: Some("CUSTOM PROMPT".into()),
+            max_tokens: 99,
+            temperature: 0.5,
+            detail: Some("low".into()),
+            timeout: None,
+        })
+        .unwrap();
+        eng.recognize(vec![item(&[1, 2, 3], "a.jpg")])
+            .await
+            .unwrap();
+        let raw = rx.recv().unwrap();
+        assert!(raw.contains(r#""detail":"low""#), "{raw}");
+        assert!(raw.contains(r#""max_tokens":99"#), "{raw}");
+        assert!(raw.contains(r#""temperature":0.5"#), "{raw}");
+        assert!(raw.contains("CUSTOM PROMPT"), "{raw}");
+        assert!(raw.contains(r#""model":"gpt-5-mini""#), "{raw}");
+        // jpg item → image/jpeg data URL (mime from the engine's name table).
+        assert!(raw.contains("data:image/jpeg;base64,AQID"), "{raw}");
+    }
+
+    #[tokio::test]
+    async fn no_detail_knob_omits_the_field() {
+        // Default config (detail None) must NOT emit a `detail` key.
+        let (url, rx) = canned_server(vec![("HTTP/1.1 200 OK", chat_ok("ok"))]);
+        engine(url, None, None)
+            .recognize(vec![item(&[1], "a.png")])
+            .await
+            .unwrap();
+        let raw = rx.recv().unwrap();
+        assert!(!raw.contains("\"detail\""), "no detail field: {raw}");
+    }
+
+    #[tokio::test]
+    async fn no_model_omits_the_field() {
+        // No configured model → no `model` key in the body (a single-model
+        // llama-server resolves it regardless).
+        let (url, rx) = canned_server(vec![("HTTP/1.1 200 OK", chat_ok("ok"))]);
+        engine(url, None, None)
+            .recognize(vec![item(&[1], "a.png")])
+            .await
+            .unwrap();
+        let raw = rx.recv().unwrap();
+        assert!(!raw.contains("\"model\""), "no model field: {raw}");
+    }
+
+    #[tokio::test]
+    async fn unicode_prompt_and_text_round_trip() {
+        // A unicode prompt rides the JSON body and a unicode caption survives
+        // the trim/extract path intact (no byte-boundary slicing).
+        let (url, rx) = canned_server(vec![("HTTP/1.1 200 OK", chat_ok("  café — 図 🎴  "))]);
+        let eng = RemoteDescriber::new(RemoteDescriberConfig {
+            base_url: url,
+            prompt: Some("décris l'image 図".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let out = eng.recognize(vec![item(&[1], "a.png")]).await.unwrap();
+        assert_eq!(out[0].text, "café — 図 🎴");
+        let raw = rx.recv().unwrap();
+        assert!(
+            raw.contains("d\\u00e9cris") || raw.contains("décris"),
+            "{raw}"
+        );
+    }
+
+    // ── Batch semantics (#744): recognize is per-item; an endpoint failure on
+    //    item 2 aborts the whole chunk (the kernel re-offers all on the next
+    //    sweep), while a per-item 4xx degrades only its own slot. ──
+
+    #[tokio::test]
+    async fn batch_preserves_order_across_items() {
+        let (url, _rx) = canned_server(vec![
+            ("HTTP/1.1 200 OK", chat_ok("one")),
+            ("HTTP/1.1 200 OK", chat_ok("two")),
+        ]);
+        let out = engine(url, None, None)
+            .recognize(vec![item(&[1], "a.png"), item(&[2], "b.png")])
+            .await
+            .unwrap();
+        assert_eq!(
+            out.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+    }
+
+    #[tokio::test]
+    async fn one_item_level_4xx_in_a_batch_degrades_only_its_slot() {
+        // Item 1 OK, item 2 a 415 (item-level) → empty, item 3 OK: the batch
+        // completes with the middle slot degraded, never erroring the chunk.
+        let (url, _rx) = canned_server(vec![
+            ("HTTP/1.1 200 OK", chat_ok("first")),
+            ("HTTP/1.1 415 Unsupported Media Type", "{}".into()),
+            ("HTTP/1.1 200 OK", chat_ok("third")),
+        ]);
+        let out = engine(url, None, None)
+            .recognize(vec![
+                item(&[1], "a.png"),
+                item(&[2], "b.png"),
+                item(&[3], "c.png"),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].text, "first");
+        assert_eq!((out[1].text.as_str(), out[1].confidence), ("", 0.0));
+        assert_eq!(out[2].text, "third");
+    }
+
+    #[tokio::test]
+    async fn endpoint_failure_mid_batch_aborts_the_whole_chunk() {
+        // Item 1 OK, then a 401 (endpoint-level) on item 2: the WHOLE chunk
+        // errors so nothing is persisted and every item stays pending.
+        let (url, _rx) = canned_server(vec![
+            ("HTTP/1.1 200 OK", chat_ok("first")),
+            ("HTTP/1.1 401 Unauthorized", "{}".into()),
+        ]);
+        let err = engine(url, None, None)
+            .recognize(vec![item(&[1], "a.png"), item(&[2], "b.png")])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("describe request failed"), "{err}");
+    }
+
+    // ── compose_fingerprint (#744): the host-side recipe is pure and
+    //    deterministic. The existing test pins three shapes; these pin the
+    //    precedence, single-field meta, mmproj-without-meta, determinism, and
+    //    distinctness/stability invariants. ──
+
+    #[test]
+    fn fingerprint_is_deterministic_and_namespaced() {
+        // Same inputs → byte-identical output, and every fingerprint carries the
+        // stable `describe:` family prefix + `:prompt=N` suffix (the namespacing
+        // that keeps an embed and a describe identity from ever colliding).
+        let info = ModelInfo {
+            id: Some("m".into()),
+            meta: serde_json::Map::new(),
+        };
+        let a = compose_fingerprint(&info, None, None);
+        let b = compose_fingerprint(&info, None, None);
+        assert_eq!(a, b);
+        assert!(a.starts_with("describe:"), "{a}");
+        assert!(a.ends_with(":prompt=1"), "{a}");
+    }
+
+    #[test]
+    fn fingerprint_reported_id_beats_configured_model() {
+        // `/v1/models` id takes precedence over the configured model name (the
+        // endpoint is the source of truth when it serves an id).
+        let info = ModelInfo {
+            id: Some("served-id".into()),
+            meta: serde_json::Map::new(),
+        };
+        assert_eq!(
+            compose_fingerprint(&info, Some("configured"), None),
+            "describe:served-id:prompt=1"
+        );
+    }
+
+    #[test]
+    fn fingerprint_single_meta_field_pads_the_rest() {
+        // Any one of the five meta fields present triggers the whole meta
+        // segment; the absent four render as `?` in fixed order.
+        let mut meta = serde_json::Map::new();
+        meta.insert("n_ctx_train".into(), 8192u64.into());
+        let info = ModelInfo {
+            id: Some("m".into()),
+            meta,
+        };
+        assert_eq!(
+            compose_fingerprint(&info, None, None),
+            "describe:m:meta=?/?/?/8192/?:prompt=1"
+        );
+    }
+
+    #[test]
+    fn fingerprint_mmproj_without_meta() {
+        // mmproj folds in even when no meta block is served (a local server
+        // whose /v1/models carries no numeric meta).
+        let info = ModelInfo {
+            id: Some("m".into()),
+            meta: serde_json::Map::new(),
+        };
+        assert_eq!(
+            compose_fingerprint(&info, None, Some("proj.gguf")),
+            "describe:m:mmproj=proj.gguf:prompt=1"
+        );
+    }
+
+    #[test]
+    fn fingerprint_distinct_configs_distinct_strings() {
+        // The dimensions that must each move the fingerprint: id, a meta value,
+        // and mmproj. No two of these distinct configs may collide.
+        let base = ModelInfo {
+            id: Some("m".into()),
+            meta: serde_json::Map::new(),
+        };
+        let other_id = ModelInfo {
+            id: Some("n".into()),
+            meta: serde_json::Map::new(),
+        };
+        let mut m2 = serde_json::Map::new();
+        m2.insert("size".into(), 1u64.into());
+        let with_meta = ModelInfo {
+            id: Some("m".into()),
+            meta: m2,
+        };
+        let fps = vec![
+            compose_fingerprint(&base, None, None),
+            compose_fingerprint(&other_id, None, None),
+            compose_fingerprint(&with_meta, None, None),
+            compose_fingerprint(&base, None, Some("p")),
+        ];
+        let mut uniq = fps.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), fps.len(), "fingerprints collided: {fps:?}");
+    }
+
+    #[test]
+    fn fingerprint_meta_value_types_render_compactly() {
+        // Meta values come straight off /v1/models JSON; a string or float meta
+        // value must render via Value::to_string without panicking. Pin the
+        // exact rendering (strings keep their JSON quotes — the recipe folds the
+        // raw Value, by design, so a re-quant with a different string differs).
+        let mut meta = serde_json::Map::new();
+        meta.insert("n_params".into(), serde_json::Value::String("7B".into()));
+        let info = ModelInfo {
+            id: Some("m".into()),
+            meta,
+        };
+        assert_eq!(
+            compose_fingerprint(&info, None, None),
+            r#"describe:m:meta="7B"/?/?/?/?:prompt=1"#
+        );
+    }
+
     /// A 64×64 solid-red PNG, generated once and inlined — the live tier's
     /// self-contained fixture (no cross-crate include_bytes!).
     #[rustfmt::skip]

@@ -770,4 +770,383 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("zero-width"), "{err}");
     }
+
+    // ── Adversarial response parsing (#744): malformed/edge JSON bodies on a
+    //    200 must surface as a clean `Err`, never a panic. The engine has no
+    //    expected-dim policy (that's host-side), so the invariants it owns are
+    //    shape (the `data`/`embedding` fields), arity, and width-uniformity. ──
+
+    #[tokio::test]
+    async fn missing_data_field_is_a_malformed_error() {
+        // A 200 whose body has no `data` key at all — serde must fail the
+        // required field, mapped to the "malformed embeddings response" Internal
+        // error rather than panicking or silently yielding nothing.
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", r#"{"object":"list"}"#.into());
+        let err = engine(url, None, None)
+            .embed(vec!["a".into()])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("malformed embeddings response"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_embedding_field_is_a_malformed_error() {
+        // `embedding` is a required field on each item; an item without it is a
+        // malformed response, not an empty vector.
+        let body = serde_json::json!({"data": [{"index": 0}]}).to_string();
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body);
+        let err = engine(url, None, None)
+            .embed(vec!["a".into()])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("malformed embeddings response"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn embedding_of_wrong_element_type_is_a_malformed_error() {
+        // `embedding` carrying strings rather than numbers cannot deserialize
+        // into `Vec<f32>` — a clean Err, not a panic.
+        let body = r#"{"data":[{"index":0,"embedding":["a","b"]}]}"#;
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.into());
+        let err = engine(url, None, None)
+            .embed(vec!["a".into()])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("malformed embeddings response"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_data_array_for_nonempty_input_is_arity_mismatch() {
+        // `data: []` while one text was sent: the arity guard fires (0 vs 1),
+        // and critically does NOT reach the `items[0]` width probe and panic on
+        // an empty vec.
+        let body = serde_json::json!({"data": []}).to_string();
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body);
+        let err = engine(url, None, None)
+            .embed(vec!["a".into()])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("0 embeddings for 1 inputs"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn extra_unknown_fields_are_ignored() {
+        // A response carrying extra top-level and per-item keys (object, model,
+        // usage, an item `object`) parses fine — forward-compat with richer
+        // OpenAI bodies.
+        let body = r#"{"object":"list","model":"x","usage":{"total_tokens":3},
+            "data":[{"index":0,"embedding":[1.0,2.0],"object":"embedding"}]}"#;
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.into());
+        let out = engine(url, None, None)
+            .embed(vec!["a".into()])
+            .await
+            .unwrap();
+        assert_eq!(out, vec![vec![1.0, 2.0]]);
+    }
+
+    #[tokio::test]
+    async fn missing_index_defaults_to_zero() {
+        // `index` has `#[serde(default)]`: a single item omitting it lands at 0.
+        // With one input the sort is a no-op and the vector is returned as-is.
+        let body = r#"{"data":[{"embedding":[5.0,6.0]}]}"#;
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.into());
+        let out = engine(url, None, None)
+            .embed(vec!["a".into()])
+            .await
+            .unwrap();
+        assert_eq!(out, vec![vec![5.0, 6.0]]);
+    }
+
+    #[tokio::test]
+    async fn out_of_range_float_widens_to_infinity_not_rejected() {
+        // A magnitude past f32::MAX deserializes to f32::INFINITY (serde_json
+        // saturates rather than erroring). The engine owns no value policy, so
+        // it passes the (uniform-width) vector through — pin that it does NOT
+        // panic and does NOT spuriously reject. Host policy guards values.
+        let body = r#"{"data":[{"index":0,"embedding":[1e40,1.0]}]}"#;
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.into());
+        let out = engine(url, None, None)
+            .embed(vec!["a".into()])
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0][0].is_infinite(),
+            "1e40 widened to f32 inf: {:?}",
+            out[0]
+        );
+        assert_eq!(out[0][1], 1.0);
+    }
+
+    #[tokio::test]
+    async fn non_json_body_on_200_is_a_malformed_error() {
+        // A 200 carrying a plain-text body (a proxy error page, an HTML 200)
+        // must fail JSON parsing cleanly, not panic.
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", "not json at all".into());
+        let err = engine(url, None, None)
+            .embed(vec!["a".into()])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("malformed embeddings response"),
+            "{err}"
+        );
+    }
+
+    // ── props parsing edge cases (#744): /props is best-effort — a 200 of the
+    //    wrong shape yields a conservative LlamaProps (no capabilities), never
+    //    an error and never a panic. ──
+
+    #[tokio::test]
+    async fn props_without_modalities_key_is_none() {
+        // A 200 lacking `modalities` entirely: `props()` returns None (the `?`
+        // on the missing key), i.e. "no native multimodal dialect here".
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", r#"{"foo":"bar"}"#.into());
+        assert!(engine(url, None, None).props().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn props_with_nonbool_modalities_defaults_false() {
+        // `vision`/`audio` present but not booleans (a string, a number):
+        // `as_bool()` is None → defaulted false rather than erroring.
+        let body = r#"{"modalities":{"vision":"yes","audio":1},"media_marker":"<m>"}"#;
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.into());
+        let props = engine(url, None, None).props().await.unwrap();
+        assert!(!props.vision && !props.audio);
+        assert_eq!(props.media_marker.as_deref(), Some("<m>"));
+    }
+
+    #[tokio::test]
+    async fn props_with_nonstring_marker_is_none_marker() {
+        // `media_marker` present but not a string → None; with vision:true this
+        // is exactly the state `embed_images` rejects as "vision but no marker".
+        let body = r#"{"modalities":{"vision":true,"audio":false},"media_marker":42}"#;
+        let (url, _rx) = canned_server(vec![("HTTP/1.1 200 OK", body.into())]);
+        let props = engine(url, None, None).props().await.unwrap();
+        assert!(props.vision);
+        assert!(props.media_marker.is_none());
+    }
+
+    #[tokio::test]
+    async fn vision_without_marker_is_an_internal_error() {
+        // The narrow "vision advertised but no usable marker" branch: /props
+        // says vision:true with a non-string marker, so `embed_images` must hit
+        // the dedicated internal error, not silently send a null marker.
+        let body = r#"{"modalities":{"vision":true,"audio":false},"media_marker":null}"#;
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.into());
+        let err = engine(url, None, None)
+            .embed_images(vec![MediaItem::untyped(vec![1])])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no media_marker"), "{err}");
+    }
+
+    // ── native (image) response parsing edge cases (#744) ──
+
+    #[tokio::test]
+    async fn native_response_with_no_items_is_an_internal_error() {
+        // An empty top-level array (no per-sequence item) — `pop()` is None.
+        let (url, _rx) = canned_server(vec![
+            ("HTTP/1.1 200 OK", PROPS_MM.to_string()),
+            ("HTTP/1.1 200 OK", "[]".into()),
+        ]);
+        let err = engine(url, None, None)
+            .embed_images(vec![MediaItem::untyped(vec![1])])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no vector"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn native_response_with_multiple_items_is_an_internal_error() {
+        // Two outer items for one input image — the per-request invariant is one
+        // sequence; the count is reported (body.len()+1 == 2).
+        let native = r#"[{"index":0,"embedding":[[1.0]]},{"index":1,"embedding":[[2.0]]}]"#;
+        let (url, _rx) = canned_server(vec![
+            ("HTTP/1.1 200 OK", PROPS_MM.to_string()),
+            ("HTTP/1.1 200 OK", native.into()),
+        ]);
+        let err = engine(url, None, None)
+            .embed_images(vec![MediaItem::untyped(vec![1])])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("2 items for one input"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn native_response_malformed_shape_is_a_malformed_error() {
+        // The OpenAI single-nested shape ([f32], not [[f32]]) fed to the native
+        // parser cannot deserialize into Vec<Vec<f32>> — a clean Err.
+        let native = r#"[{"index":0,"embedding":[1.0,2.0]}]"#;
+        let (url, _rx) = canned_server(vec![
+            ("HTTP/1.1 200 OK", PROPS_MM.to_string()),
+            ("HTTP/1.1 200 OK", native.into()),
+        ]);
+        let err = engine(url, None, None)
+            .embed_images(vec![MediaItem::untyped(vec![1])])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("malformed native embeddings response"),
+            "{err}"
+        );
+    }
+
+    // ── model_info parsing edge cases (#744): identity falls back to host
+    //    config, so a wrong-shape /v1/models yields a partial/empty ModelInfo,
+    //    never an error. ──
+
+    #[tokio::test]
+    async fn model_info_empty_data_array_is_default() {
+        let (url, _rx) = one_shot_server(
+            "HTTP/1.1 200 OK",
+            serde_json::json!({"data": []}).to_string(),
+        );
+        assert_eq!(
+            engine(url, None, None).model_info().await,
+            ModelInfo::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn model_info_entry_without_id_keeps_meta() {
+        // `data[0]` with meta but no id: id is None, meta still extracted.
+        let body = serde_json::json!({"data": [{"meta": {"n_embd": 7}}]}).to_string();
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body);
+        let info = engine(url, None, None).model_info().await;
+        assert!(info.id.is_none());
+        assert_eq!(info.meta["n_embd"], 7);
+    }
+
+    #[tokio::test]
+    async fn model_info_nonobject_meta_defaults_empty() {
+        // `meta` present but a string, not an object → empty map, id still read.
+        let body = r#"{"data":[{"id":"m","meta":"oops"}]}"#;
+        let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.into());
+        let info = engine(url, None, None).model_info().await;
+        assert_eq!(info.id.as_deref(), Some("m"));
+        assert!(info.meta.is_empty());
+    }
+
+    #[tokio::test]
+    async fn model_info_non2xx_is_default() {
+        // A 500 on /v1/models → default (get_json returns None on non-success).
+        let (url, _rx) = one_shot_server("HTTP/1.1 500 Internal Server Error", "{}".into());
+        assert_eq!(
+            engine(url, None, None).model_info().await,
+            ModelInfo::default()
+        );
+    }
+
+    // ── error_detail extraction via the terminal error string (#744). The
+    //    private helper is exercised through a non-transient 400's message. ──
+
+    #[tokio::test]
+    async fn error_body_without_message_falls_back_to_status() {
+        // A 400 whose JSON has no error.message — the terminal detail is the
+        // bare `status 400`, not a panic on the missing nested field.
+        let (url, _rx) = one_shot_server(
+            "HTTP/1.1 400 Bad Request",
+            r#"{"error":{"code":400}}"#.into(),
+        );
+        let err = engine(url, None, None)
+            .embed(vec!["a".into()])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("status 400"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn error_body_with_string_error_falls_back_to_status() {
+        // `error` is a bare string, not an object: `.get("message")` on a
+        // string is None → status fallback, no panic.
+        let (url, _rx) = one_shot_server("HTTP/1.1 400 Bad Request", r#"{"error":"nope"}"#.into());
+        let err = engine(url, None, None)
+            .embed(vec!["a".into()])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("status 400"), "{err}");
+        assert!(
+            !err.to_string().contains("nope"),
+            "string error not surfaced: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_body_non_json_falls_back_to_status() {
+        // A non-JSON error body (HTML error page) → status fallback.
+        let (url, _rx) = one_shot_server("HTTP/1.1 400 Bad Request", "<html>oops</html>".into());
+        let err = engine(url, None, None)
+            .embed(vec!["a".into()])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("status 400"), "{err}");
+    }
+
+    // ── Fuzz: panic-freedom over random response bytes on a 200 (#744). Every
+    //    response is either a clean Ok or a clean Err — never a panic, even on
+    //    truncated/garbage bytes. SplitMix64 keeps it dependency-free and
+    //    deterministic. ──
+
+    struct SplitMix64(u64);
+    impl SplitMix64 {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+    }
+
+    #[tokio::test]
+    async fn fuzz_random_bodies_never_panic() {
+        let mut rng = SplitMix64(0xDEAD_BEEF_CAFE);
+        // A pool of structurally-suggestive tokens so the fuzzer reaches deep
+        // parse branches, not just "invalid JSON" at the first byte.
+        let toks = [
+            "{",
+            "}",
+            "[",
+            "]",
+            "\"data\"",
+            ":",
+            ",",
+            "\"embedding\"",
+            "1.0",
+            "null",
+            "1e400",
+            "true",
+            "\"index\"",
+            "0",
+            "[[",
+            "]]",
+            "\"x\"",
+            "NaN",
+            " ",
+        ];
+        for _ in 0..200 {
+            let n = (rng.next_u64() % 12) as usize;
+            let mut body = String::new();
+            for _ in 0..n {
+                body.push_str(toks[(rng.next_u64() as usize) % toks.len()]);
+            }
+            let (url, _rx) = one_shot_server("HTTP/1.1 200 OK", body.clone());
+            // The only contract under fuzz: no panic. Ok or Err both fine.
+            let _ = engine(url, None, None).embed(vec!["a".into()]).await;
+        }
+    }
 }

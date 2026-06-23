@@ -5042,3 +5042,689 @@ mod hardening_tests {
         std::fs::remove_dir_all(dir).ok();
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    //! Adversarial / property gaps the inline suites miss: a generative
+    //! write→read round-trip, cross-source replace isolation, the
+    //! watermark/meta/segments bookkeeping under overwrite + extreme values,
+    //! generative batch==serial parity, and panic-free hostile queries
+    //! (FTS5 metacharacters, NFC). Each test names the invariant it defends and
+    //! says WHY the lexical-search / drift-watermark contracts rely on it.
+
+    use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    /// SplitMix64 — a tiny deterministic, seed-reproducible generator (inlined
+    /// from `shrike-store`'s contract tests, so the property lane needs no
+    /// `rand`/`proptest` dep). A failure reproduces from its seed; widen the
+    /// loop counts to search harder.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        /// A value in `0..n` (n > 0).
+        fn below(&mut self, n: u64) -> u64 {
+            self.next_u64() % n
+        }
+    }
+
+    fn store() -> (DerivedEngine, std::path::PathBuf) {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "shrike-derived-adv-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shrike.db");
+        (DerivedEngine::open(path.to_str().unwrap(), 1).unwrap(), dir)
+    }
+
+    // ── 1. build/ingest round-trip property (generative) ──────────────────────
+
+    #[test]
+    fn build_round_trip_reads_back_exactly_what_was_written() {
+        // PROPERTY: after a build, texts_for_source / refs_for_source /
+        // texts_for_source_for_notes return EXACTLY the non-blank rows written
+        // for that source (set-equal), scoped correctly, and count() equals the
+        // total non-blank rows across sources. This is the bedrock the lexical
+        // signals stand on: a row written but not read back is a note silently
+        // invisible to search; a row read back but never written is a phantom hit.
+        // Generated over random (note_id, source, ref, text) rows, several seeds.
+        for seed in [1u64, 7, 42, 1234, 0xDEAD_BEEF] {
+            let mut rng = Rng::new(seed);
+            let (e, dir) = store();
+            let sources = ["field", "ocr", "asr"];
+            // Build the authoritative expectation as we generate. The store skips
+            // blank-text rows and stores NFC-normalized text, so the oracle mirrors
+            // both: key (source -> set of (note_id, ref, nfc(text))).
+            let mut rows: Vec<(i64, String, String, String)> = Vec::new();
+            let mut expected: BTreeMap<&str, BTreeSet<(i64, String, String)>> = BTreeMap::new();
+            // Distinct (note_id, source, ref) keys — a build snapshot has no
+            // intra-build duplicate keys (the collection render is per field/ref).
+            let mut used: BTreeSet<(i64, String, String)> = BTreeSet::new();
+            let n = 30 + rng.below(40) as usize;
+            for _ in 0..n {
+                let note_id = rng.below(12) as i64 + 1;
+                let source = sources[rng.below(sources.len() as u64) as usize];
+                let reference = format!("r{}", rng.below(5));
+                if !used.insert((note_id, source.to_string(), reference.clone())) {
+                    continue; // skip a duplicate key for this build snapshot
+                }
+                // A mix of blank (skipped) and substantive text.
+                let text = if rng.below(5) == 0 {
+                    "   ".to_string() // blank → skipped by the insert
+                } else {
+                    format!("body {} term{}", rng.below(1000), rng.below(50))
+                };
+                rows.push((note_id, source.to_string(), reference.clone(), text.clone()));
+                if !text.trim().is_empty() {
+                    expected.entry(source).or_default().insert((
+                        note_id,
+                        reference,
+                        nfc(&text).into_owned(),
+                    ));
+                }
+            }
+            let live: Vec<i64> = rows.iter().map(|r| r.0).collect();
+            e.build(&rows, &live, 1).unwrap();
+
+            // count() == total non-blank rows across every source.
+            let total: i64 = expected.values().map(|s| s.len() as i64).sum();
+            assert_eq!(e.count().unwrap(), total, "seed {seed}: count mismatch");
+
+            for source in sources {
+                let want = expected.get(source).cloned().unwrap_or_default();
+                // texts_for_source is set-equal to the written non-blank rows.
+                let got_texts: BTreeSet<(i64, String, String)> =
+                    e.texts_for_source(source).unwrap().into_iter().collect();
+                assert_eq!(got_texts, want, "seed {seed}: texts_for_source({source})");
+                // refs_for_source is the (note_id, ref) projection of the same set.
+                let got_refs: BTreeSet<(i64, String)> =
+                    e.refs_for_source(source).unwrap().into_iter().collect();
+                let want_refs: BTreeSet<(i64, String)> =
+                    want.iter().map(|(n, r, _)| (*n, r.clone())).collect();
+                assert_eq!(
+                    got_refs, want_refs,
+                    "seed {seed}: refs_for_source({source})"
+                );
+
+                // texts_for_source_for_notes(source, ids) == the in-scope slice,
+                // for an arbitrary id subset — the per-upsert scoped read must equal
+                // filtering the full read, never over- or under-return.
+                let scope: Vec<i64> = (1..=12).filter(|i| i % 2 == 0).collect();
+                let got_scoped: BTreeSet<(i64, String, String)> = e
+                    .texts_for_source_for_notes(source, &scope)
+                    .unwrap()
+                    .into_iter()
+                    .collect();
+                let want_scoped: BTreeSet<(i64, String, String)> = want
+                    .iter()
+                    .filter(|(n, _, _)| scope.contains(n))
+                    .cloned()
+                    .collect();
+                assert_eq!(
+                    got_scoped, want_scoped,
+                    "seed {seed}: texts_for_source_for_notes({source}) scoped slice"
+                );
+            }
+            // An empty note-id scope is always empty, never the full set.
+            assert!(e
+                .texts_for_source_for_notes("field", &[])
+                .unwrap()
+                .is_empty());
+            std::fs::remove_dir_all(dir).ok();
+        }
+    }
+
+    // ── 2. ingest is replace-per-(note,source), other sources untouched ───────
+
+    #[test]
+    fn ingest_replaces_only_the_targeted_note_and_source() {
+        // INVARIANT: ingest replaces a note's rows FOR ONE SOURCE; it must leave
+        // (a) the same note's OTHER sources and (b) other notes' rows of the same
+        // source untouched. The recognition bookkeeping depends on this: a field
+        // re-ingest (drift heal) must NOT wipe a note's expensive OCR/ASR rows, and
+        // an OCR re-ingest must not disturb sibling notes' OCR.
+        let (e, dir) = store();
+        e.ingest(1, "field", &[("Front".into(), "field one v1".into())])
+            .unwrap();
+        e.ingest(1, "ocr", &[("img.png".into(), "ocr one v1".into())])
+            .unwrap();
+        e.ingest(2, "ocr", &[("img2.png".into(), "ocr two".into())])
+            .unwrap();
+        assert_eq!(e.count().unwrap(), 3);
+
+        // Re-ingest note 1's FIELD source: replaces only that.
+        e.ingest(1, "field", &[("Front".into(), "field one v2".into())])
+            .unwrap();
+        // note 1 field replaced...
+        assert!(e
+            .search_substring("field one v1", 10, None, &[])
+            .unwrap()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            e.search_substring("field one v2", 10, None, &[])
+                .unwrap()
+                .unwrap()
+                .iter()
+                .map(|r| r.0)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        // ...note 1's OCR row survives untouched (NOT collateral'd by the field replace).
+        assert_eq!(
+            e.texts_for_source("ocr")
+                .unwrap()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                (1, "img.png".to_string(), "ocr one v1".to_string()),
+                (2, "img2.png".to_string(), "ocr two".to_string()),
+            ]),
+            "a field re-ingest must not touch any OCR row"
+        );
+
+        // Re-ingest note 1's OCR: replaces only note 1's OCR, leaves note 2's OCR.
+        e.ingest(1, "ocr", &[("img.png".into(), "ocr one v2".into())])
+            .unwrap();
+        assert_eq!(
+            e.texts_for_source("ocr")
+                .unwrap()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                (1, "img.png".to_string(), "ocr one v2".to_string()),
+                (2, "img2.png".to_string(), "ocr two".to_string()),
+            ]),
+            "an OCR re-ingest must replace only the targeted note's OCR"
+        );
+        // The field row is still v2 (the OCR replace didn't touch it).
+        assert_eq!(
+            e.texts_for_source("field").unwrap(),
+            vec![(1, "Front".to_string(), "field one v2".to_string())]
+        );
+        assert_eq!(e.count().unwrap(), 3, "replace never grows the row count");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn ingest_to_empty_rows_clears_the_notes_source_only() {
+        // Re-ingesting a note's source with NO non-blank rows clears that source's
+        // rows for the note (the delete half runs unconditionally) without
+        // disturbing its other sources — the "all fields blanked" edit case.
+        let (e, dir) = store();
+        e.ingest(1, "field", &[("Front".into(), "to be cleared".into())])
+            .unwrap();
+        e.ingest(1, "ocr", &[("img.png".into(), "keep me".into())])
+            .unwrap();
+        e.ingest(1, "field", &[("Front".into(), "   ".into())])
+            .unwrap();
+        assert!(
+            e.texts_for_source("field").unwrap().is_empty(),
+            "the blanked field row is cleared"
+        );
+        assert_eq!(
+            e.texts_for_source("ocr").unwrap(),
+            vec![(1, "img.png".to_string(), "keep me".to_string())],
+            "the OCR row is untouched by the field clear"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ── 3. build live_notes pruning (the trait's stressed invariant) ──────────
+
+    #[test]
+    fn build_prunes_recognition_only_for_notes_absent_from_live_notes() {
+        // The contract's stressed invariant: build prunes recognition rows ONLY
+        // for notes ABSENT from live_notes, never merely for notes absent from the
+        // field-row snapshot. A note can be live yet contribute no field rows
+        // (all-blank, or a snapshot taken before it was written) — its OCR/ASR rows
+        // must survive. Over-pruning is unrecoverable: a recognition ingest does
+        // not bump col.mod, so the converge loop cannot heal a wrongly-pruned row.
+        let (e, dir) = store();
+        // Three notes carry OCR rows; none carries a field row yet.
+        e.ingest(1, "ocr", &[("a.png".into(), "ocr one".into())])
+            .unwrap();
+        e.ingest(2, "ocr", &[("b.png".into(), "ocr two".into())])
+            .unwrap();
+        e.ingest(3, "ocr", &[("c.png".into(), "ocr three".into())])
+            .unwrap();
+
+        // Build with an EMPTY field snapshot but live_notes = {1, 3}.
+        // Note 2 is absent from live_notes (deleted) → its OCR is pruned.
+        // Notes 1 and 3 are live but contribute no field rows → OCR survives.
+        e.build(&[], &[1, 3], 50).unwrap();
+        assert_eq!(
+            e.refs_for_source("ocr")
+                .unwrap()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([(1, "a.png".to_string()), (3, "c.png".to_string())]),
+            "live notes with no field rows keep their recognition rows; the dead note is pruned"
+        );
+        assert_eq!(e.get_col_mod(), Some(50));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn build_with_empty_live_notes_prunes_all_recognition() {
+        // The degenerate prune: live_notes == [] means every note is gone, so all
+        // recognition rows are pruned. (A field-only rebuild with no live notes
+        // leaves an empty store.) Guards the boundary where the live set is empty
+        // but recognition rows exist — they must not survive on "absent from rows".
+        let (e, dir) = store();
+        e.ingest(1, "ocr", &[("a.png".into(), "ocr one".into())])
+            .unwrap();
+        e.ingest(2, "asr", &[("clip.wav".into(), "asr two".into())])
+            .unwrap();
+        e.build(&[], &[], 9).unwrap();
+        assert!(e.refs_for_source("ocr").unwrap().is_empty());
+        assert!(e.refs_for_source("asr").unwrap().is_empty());
+        assert_eq!(e.count().unwrap(), 0);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ── 4. adversarial queries: panic-free, injection-free, NFC ───────────────
+
+    #[test]
+    fn hostile_queries_never_error_or_inject() {
+        // ADVERSARIAL: FTS5 metacharacters, quotes, operators, and column filters
+        // in the QUERY must NOT cause a SQL error, an injection, or a panic — both
+        // search paths return Ok. fts_quote wraps user text as an FTS5 string
+        // literal (substring) and the fuzzy path quotes each derived trigram, so
+        // every metacharacter is inert. An empty / whitespace / sub-trigram query
+        // returns None (substring) or empty (fuzzy), never an error.
+        let (e, dir) = store();
+        build_snapshot_live(
+            &e,
+            &[
+                (
+                    1,
+                    "field".into(),
+                    "Front".into(),
+                    "ordinary searchable text".into(),
+                ),
+                (2, "field".into(), "Front".into(), "another row here".into()),
+            ],
+            1,
+        )
+        .unwrap();
+
+        let hostile = [
+            "",
+            "   ",
+            "a",                           // sub-trigram
+            "\"",                          // bare double quote
+            "\"\"\"",                      // run of quotes
+            "AND OR NOT",                  // FTS5 boolean operators
+            "text*",                       // prefix wildcard
+            "field:text",                  // a column filter syntax
+            "NEAR(a b, 3)",                // NEAR query
+            "row\" OR \"1\"=\"1",          // an injection-shaped payload
+            "'; DROP TABLE idx; --",       // a classic SQLi payload
+            "(((",                         // unbalanced parens
+            "^anchor$",                    // anchor metacharacters
+            "text -another",               // a NOT operator
+            "🦀🦀🦀",                      // multibyte / emoji
+            "a\u{0301}b\u{0301}c\u{0301}", // combining marks (NFD shape)
+        ];
+        for q in hostile {
+            // Neither path may error or panic; the RESULT may be empty/None, but
+            // the call must succeed for every hostile string.
+            let sub = e.search_substring(q, 10, None, &[]);
+            assert!(
+                sub.is_ok(),
+                "search_substring({q:?}) must not error: {sub:?}"
+            );
+            let fz = e.search_fuzzy(q, 10, None, &[]);
+            assert!(fz.is_ok(), "search_fuzzy({q:?}) must not error: {fz:?}");
+            // The table is intact after the SQLi-shaped payloads: a real injection
+            // would have dropped idx and the next count would fail.
+            assert!(e.count().is_ok(), "store corrupted by query {q:?}");
+            assert_eq!(e.count().unwrap(), 2, "no rows lost to query {q:?}");
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn substring_with_internal_quotes_matches_the_literal() {
+        // A query carrying the very metacharacter fts_quote escapes (a double
+        // quote) must still match a stored row that literally contains it —
+        // proving the escape preserves the literal, not merely that it's safe.
+        let (e, dir) = store();
+        build_snapshot_live(
+            &e,
+            &[(
+                1,
+                "field".into(),
+                "Front".into(),
+                r#"he said "hello there" loudly"#.into(),
+            )],
+            1,
+        )
+        .unwrap();
+        let hits = e
+            .search_substring(r#"said "hello"#, 10, None, &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            hits.iter().map(|r| r.0).collect::<Vec<_>>(),
+            vec![1],
+            "a query with an embedded quote matches the literal substring"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn nfd_indexed_text_is_fuzzy_searchable_by_an_nfc_query() {
+        // NFC PROPERTY (the complement of the inline nfc test, on the fuzzy path):
+        // text stored in NFD is found by an NFC query and vice-versa, because both
+        // the index and the query are NFC-normalized before trigrams are taken — so
+        // canonically-equivalent forms produce the same trigrams. Without this an
+        // accented note would be lexically invisible to the form a user types.
+        let composed = "préçis café"; // NFC accents
+        let decomposed = "pre\u{0301}c\u{0327}is cafe\u{0301}"; // same string, NFD
+        assert_ne!(composed, decomposed, "the two forms differ byte-wise");
+
+        // (a) NFD stored, NFC queried.
+        let (e, dir) = store();
+        build_snapshot_live(&e, &[(1, "field".into(), "F".into(), decomposed.into())], 1).unwrap();
+        assert!(
+            e.search_fuzzy(composed, 10, None, &[])
+                .unwrap()
+                .iter()
+                .any(|(nid, ..)| *nid == 1),
+            "NFC fuzzy query finds NFD-indexed text"
+        );
+        std::fs::remove_dir_all(dir).ok();
+
+        // (b) NFC stored, NFD queried.
+        let (e, dir) = store();
+        build_snapshot_live(&e, &[(1, "field".into(), "F".into(), composed.into())], 1).unwrap();
+        assert!(
+            e.search_fuzzy(decomposed, 10, None, &[])
+                .unwrap()
+                .iter()
+                .any(|(nid, ..)| *nid == 1),
+            "NFD fuzzy query finds NFC-indexed text"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ── 5. batch == loop of singular (generative) ─────────────────────────────
+
+    #[test]
+    fn batch_equals_loop_of_singular_generative() {
+        // INVARIANT: the batch override is a perf optimization and MUST equal
+        // mapping the singular method, for ANY mix of queries, scopes, and
+        // excludes. The inline parity test fixes its query set; this generates
+        // random query batches and random scopes/excludes over a fixed corpus and
+        // asserts the override never diverges from the documented default.
+        let (e, dir) = store();
+        let words = [
+            "mitochondria",
+            "powerhouse",
+            "ribosome",
+            "chloroplast",
+            "cytoplasm",
+            "membrane",
+        ];
+        let mut rows: Vec<(i64, String, String, String)> = Vec::new();
+        for n in 1..=20i64 {
+            let a = words[(n as usize) % words.len()];
+            let b = words[(n as usize + 2) % words.len()];
+            rows.push((
+                n,
+                "field".into(),
+                "Front".into(),
+                format!("{a} and {b} cell"),
+            ));
+            // Half the notes get a hidden vlm source sharing a term.
+            if n % 2 == 0 {
+                rows.push((n, "vlm".into(), "img.png".into(), format!("{a} described")));
+            }
+        }
+        build_snapshot_live(&e, &rows, 1).unwrap();
+
+        let mut rng = Rng::new(0xA5A5_1234);
+        // A pool of query strings: literal hits, typos, sub-trigram, no-match.
+        let pool = [
+            "mitochondria",
+            "mitochondira", // transposition typo
+            "powerhuse",    // deletion typo
+            "ribosome",
+            "mi",         // sub-trigram → None / empty
+            "zzznomatch", // no match
+            "chloroplast",
+            "cell",
+        ];
+        for _ in 0..40 {
+            // Build a random query batch (1..=5 queries).
+            let k = 1 + rng.below(5) as usize;
+            let queries: Vec<&str> = (0..k)
+                .map(|_| pool[rng.below(pool.len() as u64) as usize])
+                .collect();
+            // A random scope: None, an explicit subset, or empty.
+            let subset: Vec<i64> = (1..=20).filter(|_| rng.below(2) == 0).collect();
+            let empty: [i64; 0] = [];
+            let scope: Option<&[i64]> = match rng.below(3) {
+                0 => None,
+                1 => Some(&subset),
+                _ => Some(&empty),
+            };
+            // A random exclude.
+            let excl_vlm: [&str; 1] = ["vlm"];
+            let exclude: &[&str] = if rng.below(2) == 0 { &[] } else { &excl_vlm };
+            let limit = 10i64;
+
+            let want_sub: Vec<Option<Vec<LexicalRow>>> = queries
+                .iter()
+                .map(|q| e.search_substring(q, limit, scope, exclude).unwrap())
+                .collect();
+            let got_sub = e
+                .search_substring_batch(&queries, limit, scope, exclude)
+                .unwrap();
+            assert_eq!(
+                got_sub, want_sub,
+                "substring batch != loop (queries={queries:?} scope={scope:?} exclude={exclude:?})"
+            );
+
+            let want_fz: Vec<Vec<LexicalRow>> = queries
+                .iter()
+                .map(|q| e.search_fuzzy(q, limit, scope, exclude).unwrap())
+                .collect();
+            let got_fz = e
+                .search_fuzzy_batch(&queries, limit, scope, exclude)
+                .unwrap();
+            assert_eq!(
+                got_fz, want_fz,
+                "fuzzy batch != loop (queries={queries:?} scope={scope:?} exclude={exclude:?})"
+            );
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn empty_query_batch_returns_empty_vec() {
+        // The fixed per-call cost is paid once; an empty batch must short-circuit
+        // to an empty result vec (not error, not a one-element vec) on both paths.
+        let (e, dir) = store();
+        build_snapshot_live(
+            &e,
+            &[(1, "field".into(), "F".into(), "alpha beta".into())],
+            1,
+        )
+        .unwrap();
+        assert!(e
+            .search_substring_batch(&[], 10, None, &[])
+            .unwrap()
+            .is_empty());
+        assert!(e.search_fuzzy_batch(&[], 10, None, &[]).unwrap().is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ── 6. watermark + meta bookkeeping ───────────────────────────────────────
+
+    #[test]
+    fn col_mod_watermark_round_trips_overwrites_and_holds_extremes() {
+        // The watermark is the SOLE drift signal: a wrong read certifies an
+        // un-ingested note as searchable forever (over-stamp) or re-rebuilds
+        // endlessly (under-read). Pin: None before any set; round-trips after set;
+        // an overwrite returns the latest (NOT max — the engine stamps whatever the
+        // kernel's tracker computed); and extreme i64 values survive intact.
+        let (e, dir) = store();
+        assert_eq!(e.get_col_mod(), None, "no watermark before the first set");
+        e.set_col_mod(100).unwrap();
+        assert_eq!(e.get_col_mod(), Some(100));
+        // Overwrite with a LOWER value: the store reflects exactly what was set
+        // (it does not silently keep the max — the kernel owns monotonicity).
+        e.set_col_mod(50).unwrap();
+        assert_eq!(
+            e.get_col_mod(),
+            Some(50),
+            "set_col_mod is a plain overwrite, not a max"
+        );
+        for v in [i64::MIN, i64::MAX, 0, -1, i64::MAX - 1] {
+            e.set_col_mod(v).unwrap();
+            assert_eq!(e.get_col_mod(), Some(v), "watermark must hold extreme {v}");
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn col_mod_survives_reopen_at_the_same_schema() {
+        // The watermark is durable: it must survive a close+reopen at the SAME
+        // schema version (only a schema bump or corruption clears it). Otherwise
+        // every restart would re-rebuild the whole derived store.
+        let (e, dir) = store();
+        let path = dir.join("shrike.db");
+        e.set_col_mod(777).unwrap();
+        drop(e);
+        let e2 = DerivedEngine::open(path.to_str().unwrap(), 1).unwrap();
+        assert_eq!(
+            e2.get_col_mod(),
+            Some(777),
+            "watermark persists across reopen"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn meta_round_trips_overwrites_and_missing_key_is_none() {
+        // Meta keys (the recognizer fingerprint home) round-trip, a missing key is
+        // None, an overwrite returns the latest value, and an empty-string value is
+        // distinct from absent (Some("") != None) — the fingerprint comparison
+        // relies on "" not collapsing to "unset".
+        let (e, dir) = store();
+        assert_eq!(e.meta_get("nope").unwrap(), None);
+        e.meta_set("fp", "v1").unwrap();
+        assert_eq!(e.meta_get("fp").unwrap().as_deref(), Some("v1"));
+        e.meta_set("fp", "v2").unwrap();
+        assert_eq!(
+            e.meta_get("fp").unwrap().as_deref(),
+            Some("v2"),
+            "overwrite wins"
+        );
+        e.meta_set("empty", "").unwrap();
+        assert_eq!(
+            e.meta_get("empty").unwrap().as_deref(),
+            Some(""),
+            "an empty value is stored, distinct from a missing key"
+        );
+        assert_eq!(e.meta_get("still_missing").unwrap(), None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ── 7. gated markers + segments bookkeeping ───────────────────────────────
+
+    #[test]
+    fn segments_round_trip_overwrite_and_key_scoping() {
+        // put/get_segments round-trips opaque JSON, an absent key is None, a
+        // re-put REPLACES (INSERT OR REPLACE on the (note,source,ref) PK), and the
+        // (note_id, source, ref) triple is the full key — a different source or ref
+        // is a different segment. Occlusion reads these boxes back, so a key
+        // collision would hand it the wrong segment structure.
+        let (e, dir) = store();
+        assert_eq!(e.get_segments(1, "ocr", "a.png").unwrap(), None);
+        let j1 = r#"[{"text":"alpha","box":[0,0,10,10]}]"#;
+        e.put_segments(1, "ocr", "a.png", j1).unwrap();
+        assert_eq!(
+            e.get_segments(1, "ocr", "a.png").unwrap().as_deref(),
+            Some(j1)
+        );
+        // Overwrite the SAME key.
+        let j2 = r#"[{"text":"beta","box":[1,1,2,2]}]"#;
+        e.put_segments(1, "ocr", "a.png", j2).unwrap();
+        assert_eq!(
+            e.get_segments(1, "ocr", "a.png").unwrap().as_deref(),
+            Some(j2),
+            "a re-put replaces, never accumulates"
+        );
+        // The full triple is the key: a different source / ref / note is distinct.
+        assert_eq!(
+            e.get_segments(1, "asr", "a.png").unwrap(),
+            None,
+            "source is part of the key"
+        );
+        assert_eq!(
+            e.get_segments(1, "ocr", "b.png").unwrap(),
+            None,
+            "ref is part of the key"
+        );
+        assert_eq!(
+            e.get_segments(2, "ocr", "a.png").unwrap(),
+            None,
+            "note_id is part of the key"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn gated_markers_round_trip_are_source_scoped_and_clear() {
+        // Below-gate markers are the "judged once" bookkeeping: a marker lost makes
+        // the pending sweep re-recognize forever; a stray marker hides a note from
+        // recognition. Pin: round-trip, source scoping, empty-input no-op, and
+        // clear_gated removing only its source.
+        let (e, dir) = store();
+        assert!(e.gated_refs_for_source("ocr").unwrap().is_empty());
+        // An empty mark is a no-op (the early return), not an error.
+        e.mark_gated("ocr", &[]).unwrap();
+        assert!(e.gated_refs_for_source("ocr").unwrap().is_empty());
+
+        e.mark_gated("ocr", &[(1, "x.png".into()), (2, "y.png".into())])
+            .unwrap();
+        e.mark_gated("asr", &[(3, "clip.wav".into())]).unwrap();
+        assert_eq!(
+            e.gated_refs_for_source("ocr")
+                .unwrap()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([(1, "x.png".to_string()), (2, "y.png".to_string())])
+        );
+        // Source-scoped: the asr marker is not visible under ocr.
+        assert_eq!(
+            e.gated_refs_for_source("asr").unwrap(),
+            vec![(3, "clip.wav".to_string())]
+        );
+        // clear_gated drops ONLY its source.
+        e.clear_gated("ocr").unwrap();
+        assert!(e.gated_refs_for_source("ocr").unwrap().is_empty());
+        assert_eq!(
+            e.gated_refs_for_source("asr").unwrap(),
+            vec![(3, "clip.wav".to_string())],
+            "clearing ocr must not touch asr markers"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+}

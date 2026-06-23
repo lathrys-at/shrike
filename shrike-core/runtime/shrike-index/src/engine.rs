@@ -1053,4 +1053,612 @@ mod tests {
         assert_eq!(modality, "image");
         assert_eq!(*count, 40.0);
     }
+
+    // ---- Adversarial: a deterministic generative Rng (SplitMix64) ----------
+    //
+    // Copied from `shrike-store`'s test Rng so the generative round-trip tests
+    // ride the existing `rust_test` target without an external `rand`/`proptest`
+    // dependency (the crate forbids new deps; SIMD-less usearch core only). A
+    // failure is reproducible from its fixed seed.
+
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+    }
+
+    /// A deterministic unit vector drawn from the generative Rng (distinct from
+    /// the seed-indexed `unit` helper — this one consumes the shared stream so a
+    /// property loop draws fresh vectors per key).
+    fn rng_unit(rng: &mut Rng, ndim: usize) -> Vec<f32> {
+        let mut v: Vec<f32> = (0..ndim)
+            .map(|_| (rng.next_u64() >> 40) as f32 / (1u64 << 24) as f32 - 0.5)
+            .collect();
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        // A zero vector can't be unit-normalized; nudge it (vanishingly rare).
+        let norm = if norm > 0.0 { norm } else { 1.0 };
+        for x in &mut v {
+            *x /= norm;
+        }
+        v
+    }
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static C: AtomicU64 = AtomicU64::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "shrike-index-adv-{tag}-{}-{}",
+            std::process::id(),
+            C.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    // ---- Dimension-mismatch errors ----------------------------------------
+
+    #[test]
+    fn add_second_vector_of_wrong_dim_to_a_modality_is_error() {
+        // The modality's width is fixed by its first vector. A later add of a
+        // mismatched-width vector must be rejected (usearch's dimension guard
+        // surfaced as InvalidInput), not silently stored at the wrong width —
+        // a wrong-width vector in the graph would corrupt every later search.
+        let e = engine();
+        e.add("text", &[1], &[unit(1, 8)]).unwrap();
+        let err = e.add("text", &[2], &[unit(2, 16)]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        // The good vector is still the only one stored.
+        assert_eq!(e.size(), 1);
+        assert!(e.contains(1));
+        assert!(!e.contains(2));
+    }
+
+    #[test]
+    fn search_query_of_wrong_dim_is_error_not_garbage() {
+        // A query whose width disagrees with the searched sub-index must fail
+        // loudly (the contract: "a query's dimension conflicts ... is an error"),
+        // never return distances computed over a truncated/padded buffer.
+        let e = engine();
+        e.add("text", &[1, 2], &[unit(1, 8), unit(2, 8)]).unwrap();
+        let bad = unit(1, 16);
+        let res = e.search_by_modality(&[bad], 5, Some(&["text".to_string()]), None);
+        assert!(res.is_err(), "wrong-dim query must error, got {res:?}");
+    }
+
+    #[test]
+    fn search_query_of_wrong_dim_under_scope_predicate_is_error() {
+        // Same guard on the filtered (scoped) walk — the predicate path must not
+        // bypass usearch's dimension check.
+        let e = engine();
+        e.add("text", &[1, 2], &[unit(1, 8), unit(2, 8)]).unwrap();
+        let bad = unit(1, 4);
+        let res = e.search_by_modality(&[bad], 5, Some(&["text".to_string()]), Some(&[1i64, 2]));
+        assert!(
+            res.is_err(),
+            "wrong-dim scoped query must error, got {res:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "DEFECT #1009: ensure() silently ignores a dimension mismatch on an \
+                existing modality instead of erroring (contract: shrike-store \
+                VectorIndex::ensure — 'a dimension mismatch is an error'). \
+                engine.rs ensure() only inserts when the modality is absent."]
+    fn ensure_at_a_conflicting_ndim_is_error() {
+        // The contract on `ensure` is explicit: idempotent at the SAME ndim, an
+        // error at a DIFFERENT ndim. A silent no-op lets a caller believe the
+        // modality is the width it asked for while it is actually another — the
+        // next add/search at the assumed width then mismatches far from the
+        // ensure() that caused it. Assert the documented behaviour; this is the
+        // spec the fix must satisfy.
+        let e = engine();
+        e.ensure("text", 8).unwrap();
+        e.ensure("text", 8).unwrap(); // idempotent at the same width
+        let err = e.ensure("text", 16).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    // ---- Length disagreement ----------------------------------------------
+
+    #[test]
+    fn add_with_misaligned_keys_and_vectors_is_error() {
+        // The explicit guard: keys/vectors lengths must align (the contract
+        // stresses it). A mismatch is InvalidInput and writes nothing.
+        let e = engine();
+        let err = e
+            .add("text", &[1, 2, 3], &[unit(1, 8), unit(2, 8)])
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert_eq!(e.size(), 0);
+        // Reverse imbalance too (more vectors than keys).
+        let err = e.add("text", &[1], &[unit(1, 8), unit(2, 8)]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert_eq!(e.size(), 0);
+    }
+
+    #[test]
+    fn add_empty_is_a_noop_not_an_error() {
+        // Empty/empty aligns trivially; the add short-circuits to Ok without
+        // creating a sub-index (so ndim stays unknown).
+        let e = engine();
+        e.add("text", &[], &[]).unwrap();
+        assert_eq!(e.size(), 0);
+        assert_eq!(e.ndim(), None);
+        assert!(e.modality_names().is_empty());
+    }
+
+    // ---- Empty / degenerate states ----------------------------------------
+
+    #[test]
+    fn search_on_empty_index_returns_empty_rankings_no_panic() {
+        // No sub-index loaded at all: every query maps to an empty per-modality
+        // map (the engine returns one entry per query, never panics).
+        let e = engine();
+        let out = e
+            .search_by_modality(&[unit(1, 8), unit(2, 8)], 5, None, None)
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out[0].is_empty() && out[1].is_empty());
+    }
+
+    #[test]
+    fn search_with_no_queries_returns_no_rows() {
+        let e = engine();
+        e.add("text", &[1], &[unit(1, 8)]).unwrap();
+        let out = e.search_by_modality(&[], 5, None, None).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn search_k_zero_yields_no_kept_hits() {
+        // k=0 means "keep zero per modality": the dedup loop breaks before
+        // pushing any key, so the modality contributes no ranking entry. Must
+        // not panic or under/over-fetch into a usearch reservation.
+        let e = engine();
+        e.add("text", &[1, 2, 3], &[unit(1, 8), unit(2, 8), unit(3, 8)])
+            .unwrap();
+        let out = e
+            .search_by_modality(&[unit(1, 8)], 0, Some(&["text".to_string()]), None)
+            .unwrap();
+        assert!(out[0].is_empty(), "k=0 keeps nothing, got {:?}", out[0]);
+    }
+
+    #[test]
+    fn search_modality_filter_to_an_unloaded_modality_returns_empty() {
+        // Filtering to a modality with no sub-index yields no rows for it.
+        let e = engine();
+        e.add("text", &[1], &[unit(1, 8)]).unwrap();
+        let out = e
+            .search_by_modality(&[unit(1, 8)], 5, Some(&["image".to_string()]), None)
+            .unwrap();
+        assert!(out[0].is_empty());
+    }
+
+    #[test]
+    fn calibration_on_empty_index_is_empty_no_panic() {
+        let e = engine();
+        assert!(e.calibrate_activation(256, 2, 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn calibration_with_no_nontext_modality_is_empty() {
+        // Text-only: nothing to calibrate against (calibration ranks text
+        // pseudo-queries against NON-text modalities only).
+        let e = engine();
+        let keys: Vec<i64> = (1..=10).collect();
+        let vecs: Vec<Vec<f32>> = keys.iter().map(|k| unit(*k as u64, 8)).collect();
+        e.add("text", &keys, &vecs).unwrap();
+        assert!(e.calibrate_activation(256, 2, 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn calibration_sample_size_zero_yields_no_stats() {
+        // sample_size=0 draws no pseudo-queries, so no modality reaches
+        // min_count and the stats are empty (the gate stays disabled).
+        let e = engine();
+        let keys: Vec<i64> = (1..=20).collect();
+        let tvecs: Vec<Vec<f32>> = keys.iter().map(|k| unit(*k as u64, 8)).collect();
+        let ivecs: Vec<Vec<f32>> = keys.iter().map(|k| unit(*k as u64 + 1000, 8)).collect();
+        e.add("text", &keys, &tvecs).unwrap();
+        e.add("image", &keys, &ivecs).unwrap();
+        assert!(e.calibrate_activation(0, 2, 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn calibration_min_count_above_sample_disables_the_gate() {
+        // min_count larger than every modality's collected pairs → no stats
+        // (the gate disables rather than reporting an under-powered estimate).
+        let e = engine();
+        let keys: Vec<i64> = (1..=20).collect();
+        let tvecs: Vec<Vec<f32>> = keys.iter().map(|k| unit(*k as u64, 8)).collect();
+        let ivecs: Vec<Vec<f32>> = keys.iter().map(|k| unit(*k as u64 + 1000, 8)).collect();
+        e.add("text", &keys, &tvecs).unwrap();
+        e.add("image", &keys, &ivecs).unwrap();
+        assert!(e.calibrate_activation(256, 2, 10_000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn calibration_sample_size_and_k_exceeding_size_are_clamped() {
+        // sample_size and k far past the stored count must clamp, not over-read:
+        // the sample is the whole text set, k clamps to the image sub-index size,
+        // and the stats still come back for the one non-text modality.
+        let e = engine();
+        let keys: Vec<i64> = (1..=12).collect();
+        let tvecs: Vec<Vec<f32>> = keys.iter().map(|k| unit(*k as u64, 8)).collect();
+        let ivecs: Vec<Vec<f32>> = keys.iter().map(|k| unit(*k as u64 + 1000, 8)).collect();
+        e.add("text", &keys, &tvecs).unwrap();
+        e.add("image", &keys, &ivecs).unwrap();
+        let stats = e.calibrate_activation(10_000, 10_000, 1).unwrap();
+        assert_eq!(stats.len(), 1);
+        let (modality, count, _mean, _std) = &stats[0];
+        assert_eq!(modality, "image");
+        assert!(*count >= 1.0 && *count <= 12.0);
+    }
+
+    // ---- remove: count semantics ------------------------------------------
+
+    #[test]
+    fn remove_returns_text_modality_count_not_other_modalities() {
+        // The contract stresses: remove returns the count removed from the TEXT
+        // modality (one text vector per note), NOT the total across modalities
+        // and NOT the remaining count. Here key 1 has 1 text + 3 image vectors;
+        // removing it must report 1 (text), with all 4 actually gone.
+        let e = engine();
+        e.add("text", &[1, 2], &[unit(1, 8), unit(2, 8)]).unwrap();
+        e.add("image", &[1, 1, 1], &[unit(3, 8), unit(4, 8), unit(5, 8)])
+            .unwrap();
+        assert_eq!(e.size(), 5);
+        let removed = e.remove(&[1]).unwrap();
+        assert_eq!(removed, 1, "text-modality removed count, not 4 (total)");
+        assert!(!e.contains(1));
+        assert_eq!(e.modality_keys("image"), Vec::<i64>::new());
+        assert_eq!(e.size(), 1); // only key 2's text vector remains
+    }
+
+    #[test]
+    fn remove_of_image_only_key_reports_zero_text_removed() {
+        // A key that exists ONLY in a non-text modality removes >0 image
+        // vectors but 0 text vectors — remove still reports 0 (text count),
+        // and the image vectors are gone.
+        let e = engine();
+        e.add("text", &[1], &[unit(1, 8)]).unwrap();
+        e.add("image", &[2, 2], &[unit(2, 8), unit(3, 8)]).unwrap();
+        assert_eq!(e.remove(&[2]).unwrap(), 0, "no text vector under key 2");
+        assert!(!e.modality_contains("image", 2));
+        assert!(e.contains(1));
+    }
+
+    #[test]
+    fn remove_missing_key_is_noop_returning_zero() {
+        let e = engine();
+        e.add("text", &[1], &[unit(1, 8)]).unwrap();
+        assert_eq!(e.remove(&[999]).unwrap(), 0);
+        assert_eq!(e.size(), 1);
+        // Empty key list and empty index both short-circuit to 0.
+        assert_eq!(e.remove(&[]).unwrap(), 0);
+        let empty = engine();
+        assert_eq!(empty.remove(&[1, 2, 3]).unwrap(), 0);
+    }
+
+    #[test]
+    fn readd_same_key_appends_under_multi_semantics() {
+        // The index is multi=true: re-adding an existing key APPENDS a vector
+        // (the caller does replace via remove-then-add). Pin the count growth so
+        // a future "update in place" change can't silently drop the old vector.
+        let e = engine();
+        e.add("text", &[1], &[unit(1, 8)]).unwrap();
+        e.add("text", &[1], &[unit(2, 8)]).unwrap();
+        assert_eq!(e.size(), 2);
+        assert_eq!(e.get(1).unwrap().len(), 2, "both vectors retained");
+        assert_eq!(e.keys(), vec![1], "still one distinct key");
+        assert_eq!(e.modality_keys("text"), vec![1, 1], "one entry per vector");
+    }
+
+    // ---- search correctness oracle ----------------------------------------
+
+    #[test]
+    fn search_ranks_self_vector_first_and_orders_by_similarity() {
+        // A query equal to a stored vector ranks that key first at ~zero IP
+        // distance; on a tiny single-vector modality the dedup keeps best-first
+        // order. This is the recall floor the RRF fusion builds on.
+        let e = engine();
+        e.add(
+            "text",
+            &[10, 20, 30],
+            &[unit(10, 8), unit(20, 8), unit(30, 8)],
+        )
+        .unwrap();
+        let out = e
+            .search_by_modality(&[unit(20, 8)], 3, Some(&["text".to_string()]), None)
+            .unwrap();
+        let (keys, dists) = &out[0]["text"];
+        assert_eq!(keys[0], 20, "the self-vector ranks first");
+        assert!(dists[0].abs() < 1e-5, "self IP distance ~0");
+        // Distances are non-decreasing (best-first).
+        for w in dists.windows(2) {
+            assert!(
+                w[0] <= w[1] + 1e-6,
+                "rankings must be best-first: {dists:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_multiple_modalities_returns_a_ranking_per_modality() {
+        // modalities=None searches every loaded sub-index; each contributes its
+        // own ranking entry keyed by modality name.
+        let e = engine();
+        e.add("text", &[1, 2], &[unit(1, 8), unit(2, 8)]).unwrap();
+        e.add("image", &[1, 2], &[unit(1, 8), unit(2, 8)]).unwrap();
+        let out = e.search_by_modality(&[unit(1, 8)], 5, None, None).unwrap();
+        assert!(out[0].contains_key("text"));
+        assert!(out[0].contains_key("image"));
+        assert_eq!(out[0]["text"].0[0], 1);
+        assert_eq!(out[0]["image"].0[0], 1);
+    }
+
+    #[test]
+    fn scope_with_no_in_scope_keys_returns_empty_ranking() {
+        // A scope set disjoint from every stored key yields no in-scope
+        // neighbours — the predicate rejects all candidates, so the modality
+        // contributes nothing (no over-fetch-then-filter leak of out-of-scope
+        // keys).
+        let e = engine();
+        e.add("text", &[1, 2, 3], &[unit(1, 8), unit(2, 8), unit(3, 8)])
+            .unwrap();
+        let out = e
+            .search_by_modality(
+                &[unit(1, 8)],
+                5,
+                Some(&["text".to_string()]),
+                Some(&[404i64, 505]),
+            )
+            .unwrap();
+        assert!(out[0].is_empty(), "no key is in scope, got {:?}", out[0]);
+    }
+
+    // ---- multi-modality with differing ndim -------------------------------
+
+    #[test]
+    fn modalities_with_different_ndim_coexist_and_stats_report_each_own_width() {
+        // CLIP-shaped: text 8-dim, image 4-dim. Each sub-index keeps its OWN
+        // width; modality_stats surfaces it per modality (the single top-level
+        // ndim — the text width — can't express the image width).
+        let e = engine();
+        e.add("text", &[1, 2], &[unit(1, 8), unit(2, 8)]).unwrap();
+        e.add("image", &[1], &[unit(3, 4)]).unwrap();
+        let stats: std::collections::BTreeMap<String, (usize, Option<usize>)> = e
+            .modality_stats()
+            .into_iter()
+            .map(|(m, sz, d)| (m, (sz, d)))
+            .collect();
+        assert_eq!(stats["text"], (2, Some(8)));
+        assert_eq!(stats["image"], (1, Some(4)));
+        // The top-level ndim is the LAST-set width; both sub-indexes keep theirs
+        // for their own searches (an 8-dim text query and a 4-dim image query
+        // each succeed against their own modality).
+        assert!(e
+            .search_by_modality(&[unit(9, 8)], 2, Some(&["text".to_string()]), None)
+            .is_ok());
+        assert!(e
+            .search_by_modality(&[unit(9, 4)], 2, Some(&["image".to_string()]), None)
+            .is_ok());
+    }
+
+    #[test]
+    fn drop_modality_removes_one_and_leaves_the_other() {
+        let e = engine();
+        e.add("text", &[1], &[unit(1, 8)]).unwrap();
+        e.add("image", &[1], &[unit(2, 8)]).unwrap();
+        e.drop_modality("image");
+        assert_eq!(e.modality_names(), vec!["text".to_string()]);
+        assert!(e.contains(1));
+        assert!(!e.modality_contains("image", 1));
+        // Dropping a never-loaded modality is a harmless no-op.
+        e.drop_modality("audio");
+        assert_eq!(e.modality_names(), vec!["text".to_string()]);
+    }
+
+    #[test]
+    fn modality_stats_reports_explicit_width_of_an_ensured_empty_subindex() {
+        // `ensure(m, ndim)` builds the sub-index via `new_index(ndim)`, which
+        // sets the usearch dimension up front — so an ensured-but-empty
+        // sub-index already reports `Some(ndim)` (size 0, width known). The
+        // `None` branch in `modality_stats` is reserved for the restore
+        // placeholder path (a sub-index whose width is not yet set from a file).
+        let e = engine();
+        e.ensure("text", 8).unwrap();
+        let stats = e.modality_stats();
+        assert_eq!(stats.len(), 1);
+        let (modality, size, dim) = &stats[0];
+        assert_eq!(modality, "text");
+        assert_eq!(*size, 0);
+        assert_eq!(
+            *dim,
+            Some(8),
+            "ensure() fixes the width even with no vectors"
+        );
+    }
+
+    #[test]
+    fn clear_drops_every_subindex_and_resets_ndim() {
+        let e = engine();
+        e.add("text", &[1], &[unit(1, 8)]).unwrap();
+        e.add("image", &[1], &[unit(2, 8)]).unwrap();
+        e.clear();
+        assert_eq!(e.size(), 0);
+        assert_eq!(e.ndim(), None);
+        assert!(e.modality_names().is_empty());
+        assert!(!e.contains(1));
+    }
+
+    // ---- restore corners --------------------------------------------------
+
+    #[test]
+    fn restore_from_empty_dir_loads_nothing_and_leaves_index_empty() {
+        // No sub-index files present: restore finds nothing to load. It returns
+        // true (no corruption signalled) but the index stays empty — distinct
+        // from a corrupt-file false.
+        let dir = tmp("empty");
+        let dirs = dir.to_str().unwrap();
+        let e = engine();
+        assert!(e.restore(dirs, Some(&[1, 2, 3])));
+        assert_eq!(e.size(), 0);
+        assert_eq!(e.ndim(), None);
+        assert!(e.modality_names().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn restore_from_nonexistent_dir_loads_nothing() {
+        // A directory that does not exist behaves like an empty one (every file
+        // probe is is_file()==false): nothing loaded, no panic.
+        let missing = std::env::temp_dir().join(format!(
+            "shrike-index-adv-nope-{}-does-not-exist",
+            std::process::id()
+        ));
+        let e = engine();
+        assert!(e.restore(missing.to_str().unwrap(), Some(&[1])));
+        assert_eq!(e.size(), 0);
+    }
+
+    #[test]
+    fn restore_over_a_populated_index_replaces_its_state() {
+        // A restore from an empty dir into a populated engine replaces state
+        // wholesale — the prior vectors must not survive as a phantom.
+        let dir = tmp("replace");
+        let dirs = dir.to_str().unwrap();
+        let e = engine();
+        e.add("text", &[1, 2], &[unit(1, 8), unit(2, 8)]).unwrap();
+        assert!(e.restore(dirs, Some(&[1, 2])));
+        assert_eq!(e.size(), 0, "restore from empty dir cleared prior state");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_get_and_keys_for_every_key() {
+        // The reconcile-rebuild path saves then restores; size/keys/get must be
+        // bit-stable across the round trip (get returns the stored vectors, so
+        // an exact compare pins the on-disk fidelity for the dedup/centroid
+        // reads that follow a restore).
+        let dir = tmp("rt-get");
+        let dirs = dir.to_str().unwrap();
+        let mut rng = Rng::new(0xA5A5_1234);
+        let ndim = 6usize;
+        let keys: Vec<i64> = (1..=15).collect();
+        let tvecs: Vec<Vec<f32>> = keys.iter().map(|_| rng_unit(&mut rng, ndim)).collect();
+        let ivecs: Vec<Vec<f32>> = keys.iter().map(|_| rng_unit(&mut rng, ndim)).collect();
+
+        let e = engine();
+        e.add("text", &keys, &tvecs).unwrap();
+        e.add("image", &keys, &ivecs).unwrap();
+        let before_text: Vec<Vec<Vec<f32>>> = keys.iter().map(|k| e.get(*k).unwrap()).collect();
+        e.save(dirs).unwrap();
+
+        let fresh = engine();
+        assert!(fresh.restore(dirs, Some(&keys)));
+        assert_eq!(fresh.size(), e.size());
+        assert_eq!(fresh.keys(), e.keys());
+        for (k, before) in keys.iter().zip(&before_text) {
+            assert_eq!(
+                fresh.get(*k).as_ref(),
+                Some(before),
+                "text get drift on key {k}"
+            );
+            assert!(fresh.modality_contains("image", *k));
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- generative round-trip property -----------------------------------
+
+    #[test]
+    fn property_add_get_contains_round_trip_over_random_keys() {
+        // Over a deterministic random key/vector set: every added key is
+        // contained, its text get() returns exactly the stored vector, and a
+        // modality_get for image likewise — the invariant the whole read surface
+        // (dedup, centroid, calibration) relies on.
+        let mut rng = Rng::new(0xDEAD_C0DE);
+        let ndim = 5usize;
+        let e = engine();
+        // Distinct keys (a set) so each holds exactly one vector.
+        let mut keys: Vec<i64> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        while keys.len() < 40 {
+            let k = (rng.next_u64() % 10_000) as i64;
+            if seen.insert(k) {
+                keys.push(k);
+            }
+        }
+        let tvecs: Vec<Vec<f32>> = keys.iter().map(|_| rng_unit(&mut rng, ndim)).collect();
+        let ivecs: Vec<Vec<f32>> = keys.iter().map(|_| rng_unit(&mut rng, ndim)).collect();
+        e.add("text", &keys, &tvecs).unwrap();
+        e.add("image", &keys, &ivecs).unwrap();
+
+        // size() sums every sub-index (text + image), pinned by
+        // `add_remove_contains_keys`.
+        assert_eq!(e.size(), keys.len() * 2);
+        for (i, k) in keys.iter().enumerate() {
+            assert!(e.contains(*k), "missing key {k}");
+            assert_eq!(e.get(*k), Some(vec![tvecs[i].clone()]), "text get on {k}");
+            assert_eq!(
+                e.modality_get("image", *k),
+                Some(vec![ivecs[i].clone()]),
+                "image get on {k}"
+            );
+        }
+        // get on an absent key is None, never a panic.
+        let absent = (0..i64::MAX).find(|k| !seen.contains(k)).unwrap();
+        assert_eq!(e.get(absent), None);
+        assert!(!e.contains(absent));
+    }
+
+    #[test]
+    fn property_remove_drops_all_modalities_and_reports_text_count() {
+        // Remove a random subset; every removed key vanishes from BOTH
+        // modalities, the survivors stay, and the reported count equals the
+        // number of those keys that had a text vector (here all do — one text
+        // vector each).
+        let mut rng = Rng::new(0x000F_F1CE);
+        let ndim = 4usize;
+        let e = engine();
+        let keys: Vec<i64> = (1..=50).collect();
+        let tvecs: Vec<Vec<f32>> = keys.iter().map(|_| rng_unit(&mut rng, ndim)).collect();
+        let ivecs: Vec<Vec<f32>> = keys.iter().map(|_| rng_unit(&mut rng, ndim)).collect();
+        e.add("text", &keys, &tvecs).unwrap();
+        e.add("image", &keys, &ivecs).unwrap();
+
+        let to_remove: Vec<i64> = keys
+            .iter()
+            .copied()
+            .filter(|_| rng.next_u64().is_multiple_of(2))
+            .collect();
+        let expected = to_remove.len();
+        assert_eq!(e.remove(&to_remove).unwrap(), expected);
+        for k in &to_remove {
+            assert!(!e.contains(*k), "removed key {k} still in text");
+            assert!(
+                !e.modality_contains("image", *k),
+                "removed key {k} still in image"
+            );
+        }
+        for k in keys.iter().filter(|k| !to_remove.contains(k)) {
+            assert!(e.contains(*k), "survivor key {k} dropped");
+            assert!(
+                e.modality_contains("image", *k),
+                "survivor image {k} dropped"
+            );
+        }
+        // size() sums both modalities; the survivors keep one text + one image
+        // vector each.
+        assert_eq!(e.size(), (keys.len() - expected) * 2);
+    }
 }

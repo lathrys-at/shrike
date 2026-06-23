@@ -244,7 +244,7 @@ Developer docs — how the code works — in [`docs/dev/`](docs/dev/):
 |-----|--------|
 | [`architecture.md`](docs/dev/architecture.md) | The Rust/Python split, the plugin kernel, the runtime, the action exchange. |
 | [`layout.md`](docs/dev/layout.md) | Where every crate and package lives; the `scripts`/`tools`/`bin` boundary. |
-| [`testing.md`](docs/dev/testing.md) | Dev setup, the suites, the native build, coverage, linting. |
+| [`testing.md`](docs/dev/testing.md) | Dev setup, the suites, the native build, the Rust test taxonomy & adversarial quality bar, coverage, linting. |
 | [`server-runtime.md`](docs/dev/server-runtime.md) | Collection lifecycle and locking, the transport trust boundary, the daemon, config. |
 | [`embedding-and-recognition.md`](docs/dev/embedding-and-recognition.md) | The embedding service, its backends, and OCR/recognition. |
 | [`indexing-and-search.md`](docs/dev/indexing-and-search.md) | Vector-index consistency, the derived-text sidecar, search fusion (RRF). |
