@@ -6792,6 +6792,84 @@ mod no_cpython_smoke {
         });
     }
 
+    /// #1002: a per-op write that OVERLAPS a `rebuild_derived` is never silently
+    /// dropped by the build's shadow-swap. `rebuild_derived` runs as an awaited Job on
+    /// the SOLE-writer ingest actor, so a concurrent upsert's derived ingest is
+    /// serialized behind it — it lands either inside the rebuild's snapshot or in the
+    /// freshly-swapped live index after it, never clobbered between the snapshot and
+    /// the swap. `settle()` is a pure drain barrier (NOT a drift-heal), so this passing
+    /// demonstrates the SERIALIZATION rather than a recovery rebuild: were the upsert
+    /// clobbered, it would be unsearchable here and the watermarks would disagree.
+    #[test]
+    fn rebuild_derived_serializes_a_concurrent_upsert() {
+        crate::runtime::testing::run_with_collection(async move {
+            let dir = temp_dir();
+            let kernel = Arc::new(
+                Kernel::open(
+                    dir.join("c.anki2").to_str().unwrap(),
+                    dir.join("cache").to_str().unwrap(),
+                )
+                .await
+                .unwrap(),
+            );
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+            // Seed enough notes that the rebuild streams several chunks — a real window
+            // for the concurrent upsert below to land inside.
+            let n = index_orchestrator::STREAM_CHUNK * 3;
+            let notes: Vec<NoteSpec> = (0..n)
+                .map(|i| NoteSpec {
+                    notetype_id: basic,
+                    deck_id: 1,
+                    fields: vec![format!("seed note {i}"), format!("back {i}")],
+                    tags: vec![],
+                })
+                .collect();
+            kernel
+                .upsert_notes(notes, DuplicatePolicy::Error)
+                .await
+                .unwrap();
+            kernel.rebuild_derived().await.unwrap();
+
+            // Drive a real upsert CONCURRENTLY with `rebuild_derived`. The upsert's
+            // collection write races the rebuild's snapshot, and its derived ingest is
+            // serialized behind the rebuild Job on the sole-writer actor.
+            let kb = Arc::clone(&kernel);
+            let upsert = crate::spawn_op(async move {
+                kb.upsert_note(
+                    basic,
+                    1,
+                    vec!["oxaloacetate condenses".into(), "concurrent".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .map(|_| ())
+            });
+            let (rebuilt, upserted) = futures::join!(kernel.rebuild_derived(), upsert);
+            rebuilt.unwrap();
+            upserted.unwrap();
+            kernel.settle().await;
+
+            assert!(
+                !kernel
+                    .derived
+                    .search_substring("oxaloacetate", 5, None, &[])
+                    .unwrap()
+                    .unwrap()
+                    .is_empty(),
+                "a note upserted concurrently with rebuild_derived survives — serialized on \
+                 the actor, never clobbered by the swap"
+            );
+            assert_eq!(
+                kernel.col_mod().await.unwrap(),
+                kernel.derived.get_col_mod().unwrap(),
+                "the derived watermark equals the live col_mod — the concurrent write is \
+                 certified, not silently dropped"
+            );
+            kernel.close().await.unwrap();
+        });
+    }
+
     // ── watermark over-certification + best-effort tail ──────────
 
     /// An embedder that, on the FIRST text containing "bravo", PARKS (so a
