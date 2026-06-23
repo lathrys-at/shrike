@@ -44,10 +44,12 @@ deterministic given the run's RNG seed, so two runs that pin the same ``--seed``
 mutate identically and stay comparable).
 
 The synthetic data each workload generates (search queries, upsert/delete/churn
-note bodies) is drawn from ONE RNG the harness seeds — from real entropy by
-default, logged so a run is reproducible; pin ``--seed`` to replay a run's data,
-e.g. to compare two builds over the identical query set. The RNG is passed into
-each workload (``build_workload(..., rng=...)``); no workload self-seeds.
+note bodies) is drawn from a PER-WORKLOAD RNG the harness seeds from the run seed
+and the workload name. Keying on the name makes each workload's data a function
+of (seed, name) only — reproducible regardless of which other workloads share the
+invocation, while still globally pinned by one ``--seed`` (real entropy by
+default, logged so a run is reproducible). The RNG is passed into each workload
+(``build_workload(..., rng=...)``); no workload self-seeds.
 
 A workload MAY define an optional ``prepare(booted, iteration)`` coroutine: per-
 iteration setup run UNTIMED before each timed ``run_one`` (see ``driver.Workload``).
@@ -576,7 +578,7 @@ def build_workload(
     its query topics to the corpus (one deck per ~500 notes); the other workloads
     accept and ignore it (uniform construction, like ``count`` for ``rebuild``).
 
-    ``rng`` is the run's single shared RNG (the harness seeds it once from real
-    entropy; see ``run.py``), passed to every workload so the synthetic data is
-    drawn from one reproducible stream rather than each workload self-seeding."""
+    ``rng`` is this workload's RNG, seeded by the harness from (run-seed, name)
+    (see ``run.py``), so the synthetic data is reproducible from one ``--seed``
+    regardless of the co-run set rather than each workload self-seeding."""
     return WORKLOADS[name](count=ops, corpus_size=corpus_size, rng=rng)

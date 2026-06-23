@@ -2,9 +2,10 @@
 
 The full eval (build the corpus, run every arm) is gated behind
 ``SHRIKE_FUZZY_RECALL=1`` and is a manual lane — it is heavy and its absolute
-numbers are a tuning signal, not a pass/fail. The generator unit tests run
-unconditionally (they are pure and fast, no corpus, offline) so the typo model and
-gold-by-construction logic stay pinned.
+numbers are a tuning signal, not a pass/fail. The generator unit tests below are
+pure and fast (no corpus, offline) and run on a direct pytest invocation — but the
+whole fuzzy_recall target is manual-tagged, so they run by name, NOT in the per-PR
+``bazel test //...``.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ def _gated() -> bool:
     return os.environ.get(_GATE) == "1"
 
 
-# ── generator unit tests (pure, fast, always run) ───────────────────────────────
+# ── generator unit tests (pure, fast; manual lane — run by name) ─────────────────
 
 
 def test_length_buckets_straddle_the_floor_and_ceiling() -> None:
@@ -117,7 +118,7 @@ def test_misspellings_fallback_parses() -> None:
     assert all(w.isalpha() and r.isalpha() for w, r in pairs.items())
 
 
-# ── cap grid + frontier unit tests (pure, fast, always run) ─────────────────────
+# ── cap grid + frontier unit tests (pure, fast; manual lane — run by name) ───────
 
 
 def test_cap_grid_is_control_then_full_k_by_ceiling() -> None:

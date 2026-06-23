@@ -109,6 +109,7 @@ def inner_run_argv(
     repeats: int,
     warmup: int,
     ops: int,
+    seed: int,
     baseline: Path | None,
 ) -> list[str]:
     """The ``python run.py ...`` argv the profiler launches: ONE workload (one per
@@ -129,6 +130,7 @@ def inner_run_argv(
         "--repeats", str(repeats),
         "--warmup", str(warmup),
         "--ops", str(ops),
+        "--seed", str(seed),
     ]  # fmt: skip
     if baseline is not None:
         inner += ["--baseline", str(baseline)]
@@ -150,6 +152,7 @@ def instrument_command(
     repeats: int,
     warmup: int,
     ops: int,
+    seed: int,
     baseline: Path | None,
 ) -> list[str]:
     """The full argv that profiles ONE workload under ``tool`` and writes its
@@ -168,6 +171,7 @@ def instrument_command(
         repeats=repeats,
         warmup=warmup,
         ops=ops,
+        seed=seed,
         baseline=baseline,
     )
     artifact = str(artifact_path(run_dir, workload, tool))
