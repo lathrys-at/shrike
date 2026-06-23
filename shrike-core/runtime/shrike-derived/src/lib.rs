@@ -1280,25 +1280,27 @@ impl DerivedEngine {
         Ok(())
     }
 
-    /// Fully (re)materialize the BASE posting bitmaps from the live index, via ONE
-    /// term-ordered scan of the `instance` fts5vocab, and RESET the incremental
-    /// tier. Materializes only the RARE trigrams — `DF < C` ([`Self::materialize_ceiling`])
-    /// — since `DF` equals a trigram's distinct-rowid count, which is exactly the
-    /// bitmap's cardinality, so the threshold is read straight off the bitmap with no
-    /// separate `DF` lookup. Commoner trigrams get no base row and fall to the live
-    /// posting read; the prune keeps only the rarest trigrams per query, so the
-    /// query-relevant ones are materialized and the bound stays off the `O(collection)`
-    /// common postings.
+    /// Fully (re)materialize the BASE posting bitmaps from the live index — by
+    /// trigramming each `idx` row's text with `trigrams()` — and RESET the incremental
+    /// tier. Keying the base by the SAME tokenizer the delta and the query use (NOT
+    /// FTS5's own fold, which diverges on e.g. Greek final sigma) is what keeps the
+    /// materialized tier self-consistent without a global freshness gate.
+    /// Materializes only the RARE trigrams — `DF < C` ([`Self::materialize_ceiling`])
+    /// — where `DF` is the posting's cardinality, read straight off the accumulated
+    /// bitmap with no separate lookup. Commoner trigrams get no base row and fall to
+    /// the live posting read; the prune keeps only the rarest trigrams per query, so
+    /// the query-relevant ones are materialized and the bound stays off the
+    /// `O(collection)` common postings.
     ///
     /// Clears `trigram_delta`/`trigram_dirty`: the build rebuilt `idx` rowids from
     /// scratch (the shadow swap), so any prior delta keys stale rowids — the fresh
     /// base IS the live truth, with an empty delta. This is the one place a full
-    /// `O(vocab)` scan is acceptable (the heavy, infrequent rebuild); the steady-state
-    /// path folds incrementally ([`Self::fold_trigram_bitmaps`]).
+    /// scan of every row's text is acceptable (the heavy, infrequent rebuild); the
+    /// steady-state path folds incrementally ([`Self::fold_trigram_bitmaps`]).
     ///
     /// # Errors
     ///
-    /// Returns an error if the vocabulary scan or the table rewrite fails.
+    /// Returns an error if the index scan or the table rewrite fails.
     fn materialize_trigram_bitmaps(&self) -> NativeResult<()> {
         use roaring::RoaringBitmap;
         let ceiling = self.materialize_ceiling() as u64;
