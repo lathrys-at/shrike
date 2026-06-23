@@ -1003,7 +1003,7 @@ mod tests {
     /// hardening gap beyond strict parity, tracked as a DEFECT and left red-but-
     /// ignored rather than fixed here (trust-boundary change → security review).
     #[test]
-    #[ignore = "DEFECT #743: IPv4-compatible ::a.b.c.d (e.g. ::127.0.0.1) is is_global-true per Python parity but reaches an internal v4 where the OS routes it; ip_is_allowed should refuse the whole ::/96 v4-compatible block on top of parity"]
+    #[ignore = "DEFECT #1008: IPv4-compatible ::a.b.c.d (e.g. ::127.0.0.1) is is_global-true per Python parity but reaches an internal v4 where the OS routes it; ip_is_allowed should refuse the whole ::/96 v4-compatible block on top of parity"]
     fn allowlist_should_refuse_ipv4_compatible_internal_addresses() {
         for bad in [
             "::127.0.0.1",       // ::7f00:1 — loopback
