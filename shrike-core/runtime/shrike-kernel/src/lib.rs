@@ -2779,6 +2779,93 @@ impl Kernel {
         .await
     }
 
+    /// The freshness bracket shared by [`Self::search_fused`] and
+    /// [`Self::search_lexical_single`]: the Phase-1 start stamps + deck/tag scope on
+    /// the collection actor, the caller's distinct `discover` middle (the query-bank
+    /// fan-out, or the single compute job), then the Phase-3 assembly + end stamps on
+    /// the actor, and the [`actions::is_stale_read`] verdict. The two entry points
+    /// keep their divergent middles; the bracket lives here so a new freshness signal
+    /// lands in one place, not two copies that drift.
+    ///
+    /// The freshness bracket spans the whole read — `col_mod` AND `settled` are both
+    /// sampled INSIDE the first and last collection jobs. Co-locating `settled` with
+    /// `col_mod` (rather than reading it on the io thread) is load-bearing: the
+    /// collection actor is FIFO and the ingest bumps `outstanding` before its send
+    /// inside the write's job, so a write ordered before phase 1 has its bump visible
+    /// to phase 1's `settled` read — an io-thread read before the job is enqueued can
+    /// miss it and report a committed-but-unindexed note as fresh.
+    ///
+    /// `discover` receives the `Arc`-shared lexical scope and yields the
+    /// [`actions::Discovery`] the assembly fuses; `vectors` is the per-source query
+    /// embedding the assembly ranks on (empty for a lexical-only read).
+    async fn search_bracketed<F, Fut>(
+        &self,
+        args: actions::SearchArgs,
+        sources: Vec<actions::SearchSource>,
+        vectors: Vec<Vec<f32>>,
+        engine: Arc<dyn VectorIndex>,
+        discover: F,
+    ) -> NativeResult<(Vec<shrike_schemas::SearchResultGroup>, bool)>
+    where
+        F: FnOnce(Arc<Option<Vec<i64>>>) -> Fut,
+        Fut: std::future::Future<Output = NativeResult<actions::Discovery>>,
+    {
+        let tag_keys = Arc::clone(&self.tag_keys);
+        let settled = self.ingest.settled_probe();
+
+        // Phase 1 (collection): the freshness start stamps + the deck/tag scope.
+        let (start_mod, start_settled, lex_scope) = {
+            let args = args.clone();
+            let settled = settled.clone();
+            self.collection
+                .run(move |core| -> NativeResult<_> {
+                    Ok((
+                        core.col_mod()?,
+                        settled.is_settled(),
+                        actions::compute_lex_scope(core, &args)?,
+                    ))
+                })
+                .await??
+        };
+        // Scope is shared by Arc across the discovery middle and Phase 3 assembly —
+        // a job clones a pointer, not the set.
+        let lex_scope = Arc::new(lex_scope);
+
+        // The caller's distinct discovery middle (Phase 2).
+        let discovery = discover(Arc::clone(&lex_scope)).await?;
+
+        // Phase 3 (collection): the prefetch hydration + assembly + end stamps.
+        let (groups, end_mod, end_settled) = self
+            .collection
+            .run(move |core| -> NativeResult<_> {
+                let groups = actions::search_assemble(
+                    core,
+                    Some(&*engine),
+                    Some(&tag_keys),
+                    &sources,
+                    &vectors,
+                    &args,
+                    lex_scope.as_deref(),
+                    discovery,
+                )?;
+                Ok((groups, core.col_mod()?, settled.is_settled()))
+            })
+            .await??;
+        Ok((
+            groups,
+            actions::is_stale_read(
+                actions::FreshnessStamp {
+                    col_mod: start_mod,
+                    settled: start_settled,
+                },
+                actions::FreshnessStamp {
+                    col_mod: end_mod,
+                    settled: end_settled,
+                },
+            ),
+        ))
+    }
+
     /// The full fused search the host surface exposes — the kernel-internal
     /// counterpart to the old host-orchestrated `action_search_notes`. The query
     /// embeds HERE (on the kernel runtime, where `await` is legal), so query
@@ -2875,168 +2962,141 @@ impl Kernel {
                 cross_space_tau,
                 cross_space_budget,
             };
-            // Thread-domain orchestration (TIER C): the discovery reads run OFF
-            // the collection actor (on the compute pool); only the lexical scope
-            // and the prefetch hydration sit on `core`. The freshness bracket
-            // spans the whole read — `col_mod` AND `settled` are both sampled
-            // INSIDE the first and last collection jobs. Co-locating `settled`
-            // with `col_mod` (rather than reading it on the io thread) is
-            // load-bearing: the collection actor is FIFO and the ingest bumps
-            // `outstanding` before its send inside the write's job, so a write
-            // ordered before phase 1 has its bump visible to phase 1's `settled`
-            // read — an io-thread read before the job is enqueued can miss it and
-            // report a committed-but-unindexed note as fresh.
+            // Thread-domain orchestration (TIER C): the discovery reads run OFF the
+            // collection actor (on the compute pool); only the lexical scope and the
+            // prefetch hydration sit on `core`, inside the shared freshness bracket
+            // ([`Self::search_bracketed`]).
             let engine = self.index_set.primary().engine_arc();
             let derived = Arc::clone(&self.derived);
-            let tag_keys = Arc::clone(&self.tag_keys);
-            let settled = self.ingest.settled_probe();
-
-            // Phase 1 (collection): the freshness start stamps + the deck/tag scope.
-            let (start_mod, start_settled, lex_scope) = {
-                let args = args.clone();
-                let settled = settled.clone();
-                self.collection
-                    .run(move |core| -> NativeResult<_> {
-                        Ok((
-                            core.col_mod()?,
-                            settled.is_settled(),
-                            actions::compute_lex_scope(core, &args)?,
-                        ))
-                    })
-                    .await??
-            };
-            // Scope is shared by Arc across every Phase 2 job (the semantic walk +
-            // the lexical chunks) and Phase 3 assembly — a job clones a pointer, not
-            // the set.
-            let lex_scope = Arc::new(lex_scope);
-
-            // Phase 2 (compute): the semantic read as ONE job (the per-modality
-            // USearch lookups are fast — not worth subdividing), and the two
-            // lexical reads CHUNKED across the compute pool. `search-batch` carries
-            // the whole query bank in one call, so a single substring (or fuzzy)
-            // job would grind every query serially on one thread while the rest of
-            // the pool idles. Splitting the query batch into ~`compute_width` chunks
-            // per read spreads the per-query work across the workers (each chunk
-            // checks out its own derived read connection, concurrent under WAL).
-            // All jobs are scheduled eagerly and run concurrently; results are
-            // collected BY INDEX (chunk then source order), never completion order,
-            // so RRF position and the exact-tier insertion order stay deterministic.
-            let sem_fut = {
-                let engine = Arc::clone(&engine);
-                let vectors = vectors.clone();
-                let args = args.clone();
-                let lex_scope = Arc::clone(&lex_scope);
-                crate::runtime::dispatch_compute(move || {
-                    if args.semantic {
-                        actions::search_semantic(&*engine, &vectors, &args, lex_scope.as_deref())
-                    } else {
-                        Ok(Vec::new())
-                    }
-                })
-            };
-            // One owned query text per query source (in source order), chunked
-            // across the pool. The hidden set, scope, and args are shared by Arc so
-            // a chunk job clones a pointer, not the (potentially large) data.
+            // One owned query text per query source (in source order), chunked across
+            // the pool.
             let query_texts: Vec<String> = sources
                 .iter()
                 .filter(|s| s.is_query)
                 .map(|s| s.text.clone())
                 .collect();
-            let hidden = Arc::new(args.hidden_lexical_sources.clone());
-            let lex_args = Arc::new(args.clone());
-            let chunk_size = query_texts
-                .len()
-                .div_ceil(crate::runtime::compute_width().max(1))
-                .max(1);
-            let chunk_ranges: Vec<(usize, usize)> = (0..query_texts.len())
-                .step_by(chunk_size)
-                .map(|start| (start, (start + chunk_size).min(query_texts.len())))
-                .collect();
-            let substr_futs: Vec<_> = chunk_ranges
-                .iter()
-                .map(|&(s, e)| {
-                    let chunk = query_texts[s..e].to_vec();
-                    let derived = Arc::clone(&derived);
-                    let hidden = Arc::clone(&hidden);
-                    let lex_scope = Arc::clone(&lex_scope);
-                    let args = Arc::clone(&lex_args);
-                    crate::runtime::dispatch_compute(move || {
-                        let qt: Vec<&str> = chunk.iter().map(String::as_str).collect();
-                        let hid: Vec<&str> = hidden.iter().map(String::as_str).collect();
-                        actions::search_substring_chunk(
-                            &*derived,
-                            &qt,
-                            &hid,
-                            lex_scope.as_deref(),
-                            &args,
-                        )
+
+            // Phase 2 (compute): the semantic read AND the two lexical reads CHUNKED
+            // across the compute pool. `search-batch` carries the whole query bank in
+            // ONE call, so a single job per read would grind every query serially on one
+            // thread while the rest of the pool idles. Splitting each read's batch into
+            // ~`compute_width` mini-batches spreads the per-query work across the
+            // workers: the semantic chunks each take a usearch READ guard (concurrent
+            // HNSW walks), the lexical chunks each check out their own derived read
+            // connection (concurrent under WAL). All jobs are scheduled eagerly and run
+            // concurrently; results are collected BY INDEX (chunk then source order),
+            // never completion order, so RRF position and the exact-tier insertion order
+            // stay deterministic.
+            let discover = {
+                let engine = Arc::clone(&engine);
+                let d_args = args.clone();
+                let d_vectors = vectors.clone();
+                move |lex_scope: Arc<Option<Vec<i64>>>| async move {
+                    // The hidden set, scope, and args are shared by Arc so a chunk job
+                    // clones a pointer, not the (potentially large) data.
+                    let hidden = Arc::new(d_args.hidden_lexical_sources.clone());
+                    let lex_args = Arc::new(d_args);
+                    // Semantic over ALL source vectors (queries + anchors), aligned with
+                    // `sources` by index; chunked like the lexical reads. Empty (no
+                    // dispatch) when the request isn't semantic.
+                    let sem_futs: Vec<_> = if lex_args.semantic {
+                        let sem_chunk_size = d_vectors
+                            .len()
+                            .div_ceil(crate::runtime::compute_width().max(1))
+                            .max(1);
+                        (0..d_vectors.len())
+                            .step_by(sem_chunk_size)
+                            .map(|start| {
+                                let end = (start + sem_chunk_size).min(d_vectors.len());
+                                let chunk = d_vectors[start..end].to_vec();
+                                let engine = Arc::clone(&engine);
+                                let lex_scope = Arc::clone(&lex_scope);
+                                let args = Arc::clone(&lex_args);
+                                crate::runtime::dispatch_compute(move || {
+                                    actions::search_semantic(
+                                        &*engine,
+                                        &chunk,
+                                        &args,
+                                        lex_scope.as_deref(),
+                                    )
+                                })
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let chunk_size = query_texts
+                        .len()
+                        .div_ceil(crate::runtime::compute_width().max(1))
+                        .max(1);
+                    let chunk_ranges: Vec<(usize, usize)> = (0..query_texts.len())
+                        .step_by(chunk_size)
+                        .map(|start| (start, (start + chunk_size).min(query_texts.len())))
+                        .collect();
+                    let substr_futs: Vec<_> = chunk_ranges
+                        .iter()
+                        .map(|&(s, e)| {
+                            let chunk = query_texts[s..e].to_vec();
+                            let derived = Arc::clone(&derived);
+                            let hidden = Arc::clone(&hidden);
+                            let lex_scope = Arc::clone(&lex_scope);
+                            let args = Arc::clone(&lex_args);
+                            crate::runtime::dispatch_compute(move || {
+                                let qt: Vec<&str> = chunk.iter().map(String::as_str).collect();
+                                let hid: Vec<&str> = hidden.iter().map(String::as_str).collect();
+                                actions::search_substring_chunk(
+                                    &*derived,
+                                    &qt,
+                                    &hid,
+                                    lex_scope.as_deref(),
+                                    &args,
+                                )
+                            })
+                        })
+                        .collect();
+                    let fuzzy_futs: Vec<_> = chunk_ranges
+                        .iter()
+                        .map(|&(s, e)| {
+                            let chunk = query_texts[s..e].to_vec();
+                            let derived = Arc::clone(&derived);
+                            let hidden = Arc::clone(&hidden);
+                            let lex_scope = Arc::clone(&lex_scope);
+                            let args = Arc::clone(&lex_args);
+                            crate::runtime::dispatch_compute(move || {
+                                let qt: Vec<&str> = chunk.iter().map(String::as_str).collect();
+                                let hid: Vec<&str> = hidden.iter().map(String::as_str).collect();
+                                actions::search_fuzzy_chunk(
+                                    &*derived,
+                                    &qt,
+                                    &hid,
+                                    lex_scope.as_deref(),
+                                    &args,
+                                )
+                            })
+                        })
+                        .collect();
+                    let mut sem_by_source = Vec::with_capacity(d_vectors.len());
+                    for fut in sem_futs {
+                        sem_by_source.extend(fut.await?);
+                    }
+                    let mut substr_batch = Vec::with_capacity(query_texts.len());
+                    for fut in substr_futs {
+                        substr_batch.extend(fut.await?);
+                    }
+                    let mut fuzzy_batch = Vec::with_capacity(query_texts.len());
+                    for fut in fuzzy_futs {
+                        fuzzy_batch.extend(fut.await?);
+                    }
+                    Ok::<_, NativeError>(actions::Discovery {
+                        sem_by_source,
+                        substr_batch,
+                        fuzzy_batch,
                     })
-                })
-                .collect();
-            let fuzzy_futs: Vec<_> = chunk_ranges
-                .iter()
-                .map(|&(s, e)| {
-                    let chunk = query_texts[s..e].to_vec();
-                    let derived = Arc::clone(&derived);
-                    let hidden = Arc::clone(&hidden);
-                    let lex_scope = Arc::clone(&lex_scope);
-                    let args = Arc::clone(&lex_args);
-                    crate::runtime::dispatch_compute(move || {
-                        let qt: Vec<&str> = chunk.iter().map(String::as_str).collect();
-                        let hid: Vec<&str> = hidden.iter().map(String::as_str).collect();
-                        actions::search_fuzzy_chunk(
-                            &*derived,
-                            &qt,
-                            &hid,
-                            lex_scope.as_deref(),
-                            &args,
-                        )
-                    })
-                })
-                .collect();
-            let sem_by_source = sem_fut.await?;
-            let mut substr_batch = Vec::with_capacity(query_texts.len());
-            for fut in substr_futs {
-                substr_batch.extend(fut.await?);
-            }
-            let mut fuzzy_batch = Vec::with_capacity(query_texts.len());
-            for fut in fuzzy_futs {
-                fuzzy_batch.extend(fut.await?);
-            }
-            let discovery = actions::Discovery {
-                sem_by_source,
-                substr_batch,
-                fuzzy_batch,
+                }
             };
 
-            // Phase 3 (collection): the prefetch hydration + assembly + end stamps.
-            let (groups, end_mod, end_settled) = self
-                .collection
-                .run(move |core| -> NativeResult<_> {
-                    let groups = actions::search_assemble(
-                        core,
-                        Some(&*engine),
-                        Some(&tag_keys),
-                        &sources,
-                        &vectors,
-                        &args,
-                        lex_scope.as_deref(),
-                        discovery,
-                    )?;
-                    Ok((groups, core.col_mod()?, settled.is_settled()))
-                })
-                .await??;
-            let stale = actions::is_stale_read(
-                actions::FreshnessStamp {
-                    col_mod: start_mod,
-                    settled: start_settled,
-                },
-                actions::FreshnessStamp {
-                    col_mod: end_mod,
-                    settled: end_settled,
-                },
-            );
-            Ok((groups, stale))
+            self.search_bracketed(args, sources, vectors, engine, discover)
+                .await
         }
         .instrument(span)
         .await
@@ -3094,74 +3154,33 @@ impl Kernel {
 
             let engine = self.index_set.primary().engine_arc();
             let derived = Arc::clone(&self.derived);
-            let tag_keys = Arc::clone(&self.tag_keys);
-            let settled = self.ingest.settled_probe();
-
-            // Phase 1 (collection): freshness start stamps + the deck/tag scope.
-            let (start_mod, start_settled, lex_scope) = {
-                let args = args.clone();
-                let settled = settled.clone();
-                self.collection
-                    .run(move |core| -> NativeResult<_> {
-                        Ok((
-                            core.col_mod()?,
-                            settled.is_settled(),
-                            actions::compute_lex_scope(core, &args)?,
-                        ))
-                    })
-                    .await??
-            };
-            let lex_scope = Arc::new(lex_scope);
 
             // Phase 2 (compute): the substring + fuzzy reads as ONE job. A single
             // query has nothing to fan across the pool, so `search_fused`'s chunk
             // machinery would be pure overhead; the reads block on SQLite, so they
             // ride the compute pool rather than the runtime thread.
-            let discovery = {
-                let derived = Arc::clone(&derived);
-                let lex_scope = Arc::clone(&lex_scope);
-                let args = args.clone();
-                let sources = sources.clone();
-                crate::runtime::dispatch_compute(move || -> NativeResult<actions::Discovery> {
-                    let (substr_batch, fuzzy_batch) =
-                        actions::search_lexical(&*derived, &sources, lex_scope.as_deref(), &args)?;
-                    Ok(actions::Discovery {
-                        sem_by_source: Vec::new(),
-                        substr_batch,
-                        fuzzy_batch,
+            let discover = {
+                let d_args = args.clone();
+                let d_sources = sources.clone();
+                move |lex_scope: Arc<Option<Vec<i64>>>| {
+                    crate::runtime::dispatch_compute(move || -> NativeResult<actions::Discovery> {
+                        let (substr_batch, fuzzy_batch) = actions::search_lexical(
+                            &*derived,
+                            &d_sources,
+                            lex_scope.as_deref(),
+                            &d_args,
+                        )?;
+                        Ok(actions::Discovery {
+                            sem_by_source: Vec::new(),
+                            substr_batch,
+                            fuzzy_batch,
+                        })
                     })
-                })
-                .await?
+                }
             };
 
-            // Phase 3 (collection): prefetch hydration + assembly + end stamps.
-            let (groups, end_mod, end_settled) = self
-                .collection
-                .run(move |core| -> NativeResult<_> {
-                    let groups = actions::search_assemble(
-                        core,
-                        Some(&*engine),
-                        Some(&tag_keys),
-                        &sources,
-                        &[],
-                        &args,
-                        lex_scope.as_deref(),
-                        discovery,
-                    )?;
-                    Ok((groups, core.col_mod()?, settled.is_settled()))
-                })
-                .await??;
-            let stale = actions::is_stale_read(
-                actions::FreshnessStamp {
-                    col_mod: start_mod,
-                    settled: start_settled,
-                },
-                actions::FreshnessStamp {
-                    col_mod: end_mod,
-                    settled: end_settled,
-                },
-            );
-            Ok((groups, stale))
+            self.search_bracketed(args, sources, Vec::new(), engine, discover)
+                .await
         }
         .instrument(span)
         .await
@@ -6782,6 +6801,84 @@ mod no_cpython_smoke {
                     .unwrap()
                     .is_empty(),
                 "the rebuild restored B's rows"
+            );
+            kernel.close().await.unwrap();
+        });
+    }
+
+    /// #1002: a per-op write that OVERLAPS a `rebuild_derived` is never silently
+    /// dropped by the build's shadow-swap. `rebuild_derived` runs as an awaited Job on
+    /// the SOLE-writer ingest actor, so a concurrent upsert's derived ingest is
+    /// serialized behind it — it lands either inside the rebuild's snapshot or in the
+    /// freshly-swapped live index after it, never clobbered between the snapshot and
+    /// the swap. `settle()` is a pure drain barrier (NOT a drift-heal), so this passing
+    /// demonstrates the SERIALIZATION rather than a recovery rebuild: were the upsert
+    /// clobbered, it would be unsearchable here and the watermarks would disagree.
+    #[test]
+    fn rebuild_derived_serializes_a_concurrent_upsert() {
+        crate::runtime::testing::run_with_collection(async move {
+            let dir = temp_dir();
+            let kernel = Arc::new(
+                Kernel::open(
+                    dir.join("c.anki2").to_str().unwrap(),
+                    dir.join("cache").to_str().unwrap(),
+                )
+                .await
+                .unwrap(),
+            );
+            let basic = kernel.notetype_id("Basic").await.unwrap();
+            // Seed enough notes that the rebuild streams several chunks — a real window
+            // for the concurrent upsert below to land inside.
+            let n = index_orchestrator::STREAM_CHUNK * 3;
+            let notes: Vec<NoteSpec> = (0..n)
+                .map(|i| NoteSpec {
+                    notetype_id: basic,
+                    deck_id: 1,
+                    fields: vec![format!("seed note {i}"), format!("back {i}")],
+                    tags: vec![],
+                })
+                .collect();
+            kernel
+                .upsert_notes(notes, DuplicatePolicy::Error)
+                .await
+                .unwrap();
+            kernel.rebuild_derived().await.unwrap();
+
+            // Drive a real upsert CONCURRENTLY with `rebuild_derived`. The upsert's
+            // collection write races the rebuild's snapshot, and its derived ingest is
+            // serialized behind the rebuild Job on the sole-writer actor.
+            let kb = Arc::clone(&kernel);
+            let upsert = crate::spawn_op(async move {
+                kb.upsert_note(
+                    basic,
+                    1,
+                    vec!["oxaloacetate condenses".into(), "concurrent".into()],
+                    vec![],
+                    DuplicatePolicy::Error,
+                )
+                .await
+                .map(|_| ())
+            });
+            let (rebuilt, upserted) = futures::join!(kernel.rebuild_derived(), upsert);
+            rebuilt.unwrap();
+            upserted.unwrap();
+            kernel.settle().await;
+
+            assert!(
+                !kernel
+                    .derived
+                    .search_substring("oxaloacetate", 5, None, &[])
+                    .unwrap()
+                    .unwrap()
+                    .is_empty(),
+                "a note upserted concurrently with rebuild_derived survives — serialized on \
+                 the actor, never clobbered by the swap"
+            );
+            assert_eq!(
+                kernel.col_mod().await.unwrap(),
+                kernel.derived.get_col_mod().unwrap(),
+                "the derived watermark equals the live col_mod — the concurrent write is \
+                 certified, not silently dropped"
             );
             kernel.close().await.unwrap();
         });

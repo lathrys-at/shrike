@@ -1862,6 +1862,61 @@ mod search_tests {
     }
 
     #[test]
+    fn chunked_semantic_matches_whole_batch_at_every_width() {
+        // `search_fused` splits the semantic batch over the source vectors into
+        // ~compute_width mini-batches and reassembles BY INDEX. Each query's usearch
+        // walk is independent of the others in the batch, so the chunked result must
+        // equal the whole-batch `search_semantic` at EVERY width — the parity gate
+        // behind fanning the semantic read across the pool.
+        let (_dir, core) = temp_collection();
+        let a = add_note(&core, "alpha", "first");
+        let b = add_note(&core, "beta", "second");
+        let c = add_note(&core, "gamma", "third");
+        let index = MultiModalIndex::new(vec!["text".to_owned()]).unwrap();
+        index
+            .add(
+                "text",
+                &[a, b, c],
+                &[vec![1.0, 0.0], vec![0.0, 1.0], at_distance(0.3)],
+            )
+            .unwrap();
+
+        let mut sem_args = args(5);
+        sem_args.semantic = true;
+        sem_args.threshold = 0.0;
+        // More query vectors than the small widths, so chunking yields >1 mini-batch.
+        let vectors: Vec<Vec<f32>> = vec![
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+            at_distance(0.1),
+            at_distance(0.5),
+            vec![1.0, 0.0],
+            at_distance(0.9),
+            vec![0.0, 1.0],
+        ];
+        let scope: Option<&[i64]> = None;
+        let whole = search_semantic(&index, &vectors, &sem_args, scope).unwrap();
+
+        for width in [1usize, 2, 3, 4, 8, 16] {
+            let chunk_size = vectors.len().div_ceil(width.max(1)).max(1);
+            let mut chunked: Vec<ModalityHits> = Vec::new();
+            let mut start = 0;
+            while start < vectors.len() {
+                let end = (start + chunk_size).min(vectors.len());
+                chunked.extend(
+                    search_semantic(&index, &vectors[start..end], &sem_args, scope).unwrap(),
+                );
+                start = end;
+            }
+            assert_eq!(
+                chunked, whole,
+                "semantic chunked@width={width} != whole batch"
+            );
+        }
+        core.close().unwrap();
+    }
+
+    #[test]
     fn scoped_lexical_search_serves_from_the_store() {
         // A deck-scoped literal/fuzzy search rides the FTS5 store with the scope
         // id set pushed into the query — exact recall inside the scope, zero

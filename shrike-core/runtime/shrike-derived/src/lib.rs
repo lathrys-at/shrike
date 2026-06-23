@@ -2368,6 +2368,92 @@ mod tests {
     }
 
     #[test]
+    fn build_streamed_swap_clobbers_a_mid_build_ingest_but_stamps_the_snapshot_col_mod() {
+        // #1002: an `ingest_many` landing in the LIVE store AFTER `build_streamed`'s
+        // snapshot but BEFORE its swap is discarded by the swap — the shadow was built
+        // from the snapshot, which didn't include it. The recovery hook is the col_mod
+        // stamp: the swap stamps the SNAPSHOT col_mod it was given, NEVER a value
+        // covering the concurrent ingest, so the derived watermark stays BELOW the
+        // collection `col.mod` that ingest advanced → the kernel's drift check re-fires
+        // and a later rebuild re-includes it (rather than the stamp masking the gap).
+        //
+        // The production kernel path serializes `rebuild_derived` on the sole-writer
+        // ingest actor, so this interleaving can't occur there (pinned by
+        // `rebuild_derived_serializes_a_concurrent_upsert` in the kernel crate); this
+        // pins the build_streamed-level stamping the recovery rides on if it ever could.
+        let (e, dir) = store();
+        build_snapshot_live(
+            &e,
+            &[(1, "field".into(), "F".into(), "alpha unique".into())],
+            100,
+        )
+        .unwrap();
+
+        let injected = std::cell::Cell::new(false);
+        let yielded = std::cell::Cell::new(false);
+        #[allow(clippy::type_complexity)]
+        let mut next = || -> Option<NativeResult<Vec<(i64, String, String, String)>>> {
+            if !injected.get() {
+                injected.set(true);
+                // Note B lands in the LIVE index mid-build (the lock is free between
+                // chunks), after the snapshot the producer is replaying below.
+                e.ingest_many(
+                    &[(2, vec![("F".to_string(), "bravo unique".to_string())])],
+                    "field",
+                )
+                .unwrap();
+                assert!(
+                    !e.search_substring("bravo", 10, None, &[])
+                        .unwrap()
+                        .unwrap_or_default()
+                        .is_empty(),
+                    "B is in the LIVE index mid-build"
+                );
+            }
+            if yielded.get() {
+                None
+            } else {
+                yielded.set(true);
+                // The snapshot the producer captured: note 1 only (B landed after it).
+                Some(Ok(vec![(
+                    1i64,
+                    "field".to_string(),
+                    "F".to_string(),
+                    "alpha unique".to_string(),
+                )]))
+            }
+        };
+        // Live set + col_mod are the SNAPSHOT's (note 1 @ 100); B is not in either.
+        e.build_streamed(&mut next, &[1], 100).unwrap();
+
+        // The swap replaced live with the snapshot-built shadow → B's mid-build rows
+        // are gone (the hazard).
+        assert!(
+            e.search_substring("bravo", 10, None, &[])
+                .unwrap()
+                .unwrap_or_default()
+                .is_empty(),
+            "the swap discarded B's mid-build ingest"
+        );
+        // …but the stamp is the SNAPSHOT col_mod (100), never advanced to cover B — so
+        // the derived watermark trails the live col.mod and drift catches the gap.
+        assert_eq!(
+            e.get_col_mod(),
+            Some(100),
+            "the swap stamps the snapshot col_mod, not a value masking the concurrent ingest"
+        );
+        // The snapshot's own note survived the swap.
+        assert!(
+            !e.search_substring("alpha", 10, None, &[])
+                .unwrap()
+                .unwrap_or_default()
+                .is_empty(),
+            "alpha (in the snapshot) survived the swap"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn streamed_rebuild_error_leaves_the_live_index_untouched() {
         // Build-and-swap atomicity: a mid-stream chunk error aborts the rebuild
         // BEFORE the swap, so the live index + col_mod are exactly as they were —
