@@ -187,18 +187,35 @@ impl MultiModalIndex {
         self.lock().indexes.keys().cloned().collect()
     }
 
-    /// Create `modality`'s sub-index at `ndim` if absent (idempotent).
+    /// Create/verify `modality`'s sub-index at `ndim`: idempotent at the same
+    /// width, an error at a conflicting one.
     ///
     /// # Errors
     ///
-    /// Returns an error if the sub-index cannot be created.
+    /// Returns [`ErrorKind::InvalidInput`] if `modality` already has a sub-index
+    /// at a different dimension (a silent no-op would let the caller believe the
+    /// modality is the width it asked for while it is another, so the next
+    /// add/search at the assumed width mismatches far from the cause), or an
+    /// error if a new sub-index cannot be created. usearch reports a sub-index's
+    /// configured width via `dimensions()` from creation, before any vector.
     pub fn ensure(&self, modality: &str, ndim: usize) -> NativeResult<()> {
         let mut state = self.lock();
-        if !state.indexes.contains_key(modality) {
-            state
-                .indexes
-                .insert(modality.to_string(), Sub::new(new_index(ndim)?));
-            state.ndim = Some(ndim);
+        match state.indexes.get(modality) {
+            Some(sub) => {
+                let existing = sub.index.dimensions();
+                if existing != ndim {
+                    return Err(NativeError::invalid_input(format!(
+                        "modality '{modality}' already exists at dimension {existing}, \
+                         cannot ensure at {ndim}"
+                    )));
+                }
+            }
+            None => {
+                state
+                    .indexes
+                    .insert(modality.to_string(), Sub::new(new_index(ndim)?));
+                state.ndim = Some(ndim);
+            }
         }
         Ok(())
     }
@@ -1154,17 +1171,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "DEFECT #1009: ensure() silently ignores a dimension mismatch on an \
-                existing modality instead of erroring (contract: shrike-store \
-                VectorIndex::ensure — 'a dimension mismatch is an error'). \
-                engine.rs ensure() only inserts when the modality is absent."]
     fn ensure_at_a_conflicting_ndim_is_error() {
         // The contract on `ensure` is explicit: idempotent at the SAME ndim, an
         // error at a DIFFERENT ndim. A silent no-op lets a caller believe the
         // modality is the width it asked for while it is actually another — the
         // next add/search at the assumed width then mismatches far from the
-        // ensure() that caused it. Assert the documented behaviour; this is the
-        // spec the fix must satisfy.
+        // ensure() that caused it.
         let e = engine();
         e.ensure("text", 8).unwrap();
         e.ensure("text", 8).unwrap(); // idempotent at the same width
