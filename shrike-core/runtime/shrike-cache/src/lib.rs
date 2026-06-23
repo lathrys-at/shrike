@@ -605,4 +605,421 @@ mod tests {
         assert!(!derived_db_path(cache.to_str().unwrap(), coll).exists());
         std::fs::remove_dir_all(&cache).ok();
     }
+
+    // ===================================================================
+    // Adversarial layer (#743): path derivation is security-relevant. A
+    // namespacing collision = two collections sharing one index/derived db
+    // (search cross-contamination); a path that escapes the cache root = a
+    // hostile collection path writing outside its sandbox. Each test below
+    // pins one such invariant.
+    // ===================================================================
+
+    /// Inlined SplitMix64 for generative tests (no external dep). Copied from
+    /// `shrike-store`'s test Rng.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+    }
+
+    /// Build a pseudo-random *absolute* path string. Absolute so the result is
+    /// cwd-independent: the only filesystem-touching step is `canonicalize`,
+    /// which fails for these never-created paths, so derivation is a pure
+    /// function of the string (lexical absolutize) and the test is hermetic.
+    fn random_abs_path(rng: &mut Rng) -> String {
+        let alphabet: &[u8] = b"abcdef0123456789-_.XY";
+        let depth = (rng.next_u64() % 5) as usize + 1;
+        let mut s = String::from("/adv");
+        for _ in 0..depth {
+            s.push('/');
+            let seg_len = (rng.next_u64() % 8) as usize + 1;
+            for _ in 0..seg_len {
+                let idx = (rng.next_u64() as usize) % alphabet.len();
+                s.push(alphabet[idx] as char);
+            }
+        }
+        s.push_str("/c.anki2");
+        s
+    }
+
+    // -- 2. Determinism / stability pin -------------------------------------
+
+    /// The derivation scheme is PINNED to a known output. A refactor that
+    /// changes the hash (algorithm, digest size, hex casing, canonicalization
+    /// fallback) silently orphans every existing user's cache — every
+    /// collection rebuilds from scratch. This test forces such a change to be
+    /// deliberate. The input is an *absolute, non-existent* path so the value
+    /// is independent of cwd, platform tmp dir, and filesystem state.
+    #[test]
+    fn namespace_derivation_is_pinned_to_a_known_value() {
+        assert_eq!(
+            index_namespace("/srv/anki/profiles/main/collection.anki2"),
+            "cb4321a318d7d5c70619c4c53f98db3e",
+        );
+    }
+
+    /// Stability across many calls (not just two): the same path always maps to
+    /// the same namespace within a run. Re-derivation must be a pure function.
+    #[test]
+    fn namespace_is_idempotent_across_many_calls() {
+        let p = "/srv/anki/profiles/main/collection.anki2";
+        let first = index_namespace(p);
+        for _ in 0..1000 {
+            assert_eq!(index_namespace(p), first);
+        }
+    }
+
+    // -- 1. Namespace injectivity (the cache-sharing hazard) ----------------
+
+    /// Paths that are genuinely distinct files must not collide. These are the
+    /// adversarial near-misses: case-only difference, trailing slash, prefix
+    /// relationships, deep nesting, separator runs. A collision here means two
+    /// collections share an index — the exact bug this crate exists to prevent.
+    ///
+    /// All inputs are absolute & non-existent, so canonicalize never runs and
+    /// the namespace is a pure function of the lexically-absolutized string.
+    #[test]
+    fn distinct_canonical_paths_do_not_collide() {
+        // Each pair (or set) must canonicalize-for-identity to *distinct*
+        // strings, hence distinct namespaces. Anything that collapses to the
+        // same lexical string (e.g. `/a/./b` == `/a/b`) is deliberately NOT
+        // here — that is a correct same-file identification, not a collision.
+        let distinct = [
+            "/adv/Collection.anki2",      // case A
+            "/adv/collection.anki2",      // case B (case-sensitive identity)
+            "/adv/sub/collection.anki2",  // prefix-related: deeper
+            "/adv/sub",                   // prefix-related: the parent as a path
+            "/adv/sub2/collection.anki2", // sibling
+            "/adv/a/b/c/d/e/collection.anki2",
+            "/adv/a/b/c/d/f/collection.anki2",
+            "/adv/x.anki2",
+            "/adv/x.anki22", // suffix near-miss
+            "/adv/xy.anki2", // join-ambiguity: "x"+"y" vs "xy"
+            "/adv/x/y.anki2",
+        ];
+        let mut seen = std::collections::HashMap::new();
+        for p in distinct {
+            let ns = index_namespace(p);
+            if let Some(prev) = seen.insert(ns.clone(), p) {
+                panic!("namespace collision: {prev:?} and {p:?} both hash to {ns}");
+            }
+        }
+    }
+
+    /// Trailing-slash and separator-run spellings: `/a/b` vs `/a/b/` vs
+    /// `/a//b`. The lexical absolutize normalizes redundant separators, so
+    /// these are the SAME file and SHOULD share a namespace (a slash typo must
+    /// not orphan the cache). This pins the intended folding direction.
+    #[test]
+    fn separator_noise_folds_to_one_identity() {
+        let base = index_namespace("/adv/sepnoise/c.anki2");
+        // Trailing slash on a file path is unusual but must not fork identity.
+        assert_eq!(index_namespace("/adv/sepnoise//c.anki2"), base);
+        assert_eq!(index_namespace("/adv/sepnoise/./c.anki2"), base);
+        assert_eq!(index_namespace("/adv/sepnoise/x/../c.anki2"), base);
+    }
+
+    /// Unicode normalization forms (NFC vs NFD) of the *same* visual filename
+    /// are distinct byte sequences. The derivation hashes raw bytes and does
+    /// NOT Unicode-normalize, so NFC and NFD spellings produce DIFFERENT
+    /// namespaces. This is the conservative/safe direction: never *merge* two
+    /// byte-distinct paths (a merge would risk cache-sharing); a refactor that
+    /// started normalizing would change every affected user's namespace and
+    /// must be deliberate. Pin the non-normalizing behavior.
+    #[test]
+    fn unicode_nfc_and_nfd_are_distinct_namespaces() {
+        // "é": NFC = U+00E9; NFD = "e" + U+0301 (combining acute).
+        let nfc = "/adv/caf\u{00e9}/c.anki2";
+        let nfd = "/adv/cafe\u{0301}/c.anki2";
+        assert_ne!(nfc, nfd, "test inputs must be byte-distinct");
+        assert_ne!(
+            index_namespace(nfc),
+            index_namespace(nfd),
+            "byte-distinct paths must not be merged into one cache",
+        );
+    }
+
+    /// Very long paths (well past common PATH_MAX) must derive without panic
+    /// and still produce a fixed-width 32-hex namespace — a hash compresses any
+    /// length to 16 bytes, so the directory name never blows up.
+    #[test]
+    fn very_long_path_derives_to_fixed_width_namespace() {
+        let mut p = String::from("/adv");
+        for i in 0..5000 {
+            p.push_str(&format!("/seg{i}"));
+        }
+        p.push_str("/c.anki2");
+        let ns = index_namespace(&p);
+        assert_eq!(ns.len(), 32);
+        assert!(ns.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // -- 3. Subdir structure invariants -------------------------------------
+
+    /// The index dir, the derived dir, and the cache root are three distinct
+    /// places. If the index and derived subtrees ever resolved equal, the
+    /// vector index and the SQLite store would write into one directory and
+    /// corrupt each other. Pin: index_dir != derived parent != root, and both
+    /// nest strictly under the root.
+    #[test]
+    fn index_and_derived_dirs_are_distinct_and_under_root() {
+        let root = Path::new("/cache");
+        let coll = "/adv/structure/c.anki2";
+        let idx = index_dir("/cache", coll);
+        let der = derived_db_path("/cache", coll);
+        let der_dir = der.parent().unwrap();
+
+        // Both strictly under the root, neither equal to it.
+        assert!(idx.starts_with(root));
+        assert!(der_dir.starts_with(root));
+        assert_ne!(idx, root);
+        assert_ne!(der_dir, root);
+        // Index and derived never collide (separate subtrees).
+        assert_ne!(idx, der_dir);
+        // The db file itself is under its namespace dir, not the root.
+        assert!(der.starts_with(root));
+        assert_ne!(der, idx);
+    }
+
+    /// Re-deriving every layout path for one collection yields identical paths.
+    /// The layout is a deterministic function; a stray per-call randomness or
+    /// reliance on mutable global state would break cache reuse across calls.
+    #[test]
+    fn layout_is_self_consistent_on_redrivation() {
+        let coll = "/adv/consistent/c.anki2";
+        assert_eq!(index_dir("/cache", coll), index_dir("/cache", coll));
+        assert_eq!(
+            derived_db_path("/cache", coll),
+            derived_db_path("/cache", coll)
+        );
+        // The shared namespace component is identical between the two subtrees.
+        let idx_ns = index_dir("/cache", coll).file_name().unwrap().to_owned();
+        let der_ns = derived_db_path("/cache", coll)
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_owned();
+        assert_eq!(idx_ns, der_ns);
+    }
+
+    // -- 4. Path-escape safety (the traversal hazard) -----------------------
+
+    /// A hostile collection path cannot steer the derived cache paths out of
+    /// the cache root. The defense is structural: the namespace is a blake2b
+    /// HEX digest — 32 chars from `[0-9a-f]`, containing no `/`, no `.`, no NUL
+    /// — so it can only ever be a single leaf directory name under the subdir.
+    /// Whatever `..`, absolute prefixes, embedded separators, or NUL bytes the
+    /// attacker puts in the collection path, the *output* path is always
+    /// `<root>/<subdir>/<32-hex>/...`. This sweeps a battery of hostile inputs
+    /// and asserts containment + a clean namespace component.
+    #[test]
+    fn hostile_collection_paths_cannot_escape_the_cache_root() {
+        let root = Path::new("/cache");
+        let hostile = [
+            "../../../../etc/passwd",
+            "/../../../../etc/shadow",
+            "....//....//etc",
+            "/a/../../../../../../tmp/evil",
+            "foo/../../../../bar",
+            "/cache/index/../../escape", // try to climb back out of our own tree
+            "..",
+            "/..",
+            "/",
+            "",
+            "a\nb/c.anki2", // newline in a segment
+            "seg with spaces/c.anki2",
+            "weird:colon/c.anki2",
+            "*?[]glob/c.anki2",
+            "\u{0}embedded-nul", // NUL: representable in &str, lossy-rendered
+            "/adv/\u{0}/c.anki2",
+        ];
+        for h in hostile {
+            let idx = index_dir("/cache", h);
+            let der = derived_db_path("/cache", h);
+
+            // Containment: both stay strictly under the cache root.
+            assert!(
+                idx.starts_with(root),
+                "index_dir escaped root for {h:?}: {}",
+                idx.display()
+            );
+            assert!(
+                der.starts_with(root),
+                "derived path escaped root for {h:?}: {}",
+                der.display()
+            );
+
+            // No `..` component ever appears in the derived output — the
+            // structural proof there is no traversal in the produced path.
+            for comp in idx.components() {
+                assert_ne!(
+                    comp,
+                    std::path::Component::ParentDir,
+                    "index_dir for {h:?} contains a `..` component"
+                );
+            }
+
+            // The namespace leaf is always clean 32-hex, regardless of input.
+            let ns = index_namespace(h);
+            assert_eq!(ns.len(), 32, "namespace not 32 chars for {h:?}");
+            assert!(
+                ns.chars().all(|c| c.is_ascii_hexdigit()),
+                "namespace for {h:?} contains a non-hex char: {ns}"
+            );
+            // And that leaf is exactly the dir name the layout used.
+            assert_eq!(idx.file_name().unwrap().to_str().unwrap(), ns);
+        }
+    }
+
+    /// The namespace digest, on its own, can never contain a path separator or
+    /// `..` regardless of input — the hash output alphabet is hex. This is the
+    /// load-bearing reason `index_dir`/`derived_db_path` cannot be steered out
+    /// of the namespace by crafting the collection path. Fuzz it to be sure no
+    /// input ever produces a non-hex namespace.
+    #[test]
+    fn namespace_alphabet_is_hex_only_under_fuzz() {
+        let mut rng = Rng::new(0xCACE_F00D_1234_5678);
+        for _ in 0..5000 {
+            // Mix structured random paths with raw random byte-ish strings.
+            let p = if rng.next_u64() & 1 == 0 {
+                random_abs_path(&mut rng)
+            } else {
+                // Build a string from arbitrary (but valid UTF-8) chars,
+                // including separators and dots, to stress the alphabet.
+                let len = (rng.next_u64() % 40) as usize;
+                let pool: &[char] = &['/', '.', '.', '\\', ':', 'a', 'Z', '9', '-', ' ', '\u{e9}'];
+                let mut s = String::new();
+                for _ in 0..len {
+                    let i = (rng.next_u64() as usize) % pool.len();
+                    s.push(pool[i]);
+                }
+                s
+            };
+            let ns = index_namespace(&p);
+            assert_eq!(ns.len(), 32);
+            assert!(
+                ns.chars().all(|c| c.is_ascii_hexdigit()),
+                "non-hex namespace {ns:?} for input {p:?}"
+            );
+        }
+    }
+
+    // -- 6. Generative injectivity + containment fuzz -----------------------
+
+    /// Feed thousands of distinct random absolute paths through the full
+    /// derivation. Asserts, together: (a) panic-freedom, (b) injectivity —
+    /// distinct lexical identities map to distinct namespaces (no collision
+    /// across the corpus), and (c) containment — every produced index/derived
+    /// path nests under the cache root. This is the broad net for the
+    /// cache-sharing and path-escape hazards combined.
+    #[test]
+    fn generative_paths_are_injective_and_contained() {
+        let root = Path::new("/cache");
+        let mut rng = Rng::new(0x5EED_1357_9BDF_2468);
+        // Map namespace -> the canonical identity string that produced it, so a
+        // collision (two different identities, one namespace) is caught while a
+        // legitimate same-identity repeat (two spellings of one file) is not.
+        let mut by_ns: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for _ in 0..8000 {
+            let p = random_abs_path(&mut rng);
+            let ns = index_namespace(&p);
+            let identity = owner_identity(&p); // the canonicalized string hashed
+
+            // Containment.
+            let idx = index_dir("/cache", &p);
+            let der = derived_db_path("/cache", &p);
+            assert!(idx.starts_with(root.join(INDEX_SUBDIR)));
+            assert!(der.starts_with(root.join(DERIVED_SUBDIR)));
+
+            // Injectivity: same namespace must mean same identity.
+            if let Some(prev_identity) = by_ns.insert(ns.clone(), identity.clone()) {
+                assert_eq!(
+                    prev_identity, identity,
+                    "namespace collision: distinct identities {prev_identity:?} and \
+                     {identity:?} share namespace {ns}"
+                );
+            }
+        }
+    }
+
+    // -- 5. Canonicalization / symlink edges --------------------------------
+
+    /// A symlink to a real collection file resolves (via `canonicalize`) to the
+    /// same identity as the target's real path — so opening a collection
+    /// through a symlink reuses the same cache, not a second orphaned one.
+    /// Beyond the existing dot-segment test: this exercises the symlink leg.
+    #[test]
+    fn symlink_resolves_to_the_targets_identity() {
+        let tmp = std::env::temp_dir().join(format!(
+            "shrike-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let target = tmp.join("real.anki2");
+        std::fs::write(&target, b"x").unwrap();
+        let link = tmp.join("link.anki2");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert_eq!(
+                index_namespace(target.to_str().unwrap()),
+                index_namespace(link.to_str().unwrap()),
+                "a symlink must resolve to the target's cache identity",
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = &link; // symlink creation is privileged on Windows; skip.
+        }
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A collection accessed once before it exists (fresh, lexical fallback) and
+    /// again after it is created on disk (canonicalize succeeds) keeps a STABLE
+    /// identity, AS LONG AS the pre-creation spelling was already the real path
+    /// (no symlinks, already absolute, no `..`). This pins that the two
+    /// derivation legs agree for the common fresh-collection lifecycle, so the
+    /// index built before first save is not orphaned the moment the file lands.
+    #[test]
+    fn lexical_and_canonical_legs_agree_for_a_plain_absolute_path() {
+        let tmp = std::env::temp_dir().join(format!(
+            "shrike-fresh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("collection.anki2");
+        let spelling = file.to_str().unwrap();
+
+        // Pre-creation: file absent → lexical_absolute leg.
+        assert!(!file.exists());
+        let before = index_namespace(spelling);
+
+        // Create it → canonicalize leg now succeeds.
+        std::fs::write(&file, b"x").unwrap();
+        let after = index_namespace(spelling);
+
+        assert_eq!(
+            before, after,
+            "a plain absolute path's identity must not shift when the file lands",
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 }

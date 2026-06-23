@@ -492,4 +492,95 @@ mod tests {
              this is the recycled-PID bystander guard"
         );
     }
+
+    // ---- Adversarial reaper boundary tests (#744) ----
+
+    // `pid_owns_port` is gated on a positive port→PID match: a non-positive PID
+    // can never own a port (it is not a real PID), so the kill gate that ANDs on
+    // it can never fire for one. Pins the guard against a garbage recorded PID.
+    #[cfg(unix)]
+    #[test]
+    fn pid_owns_port_is_false_for_nonpositive_pids() {
+        // Bind a real listener so SOMETHING owns the port — proving the false is
+        // the PID guard, not merely "no owner".
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!pid_owns_port(0, port), "PID 0 never owns a port");
+        assert!(!pid_owns_port(-1, port), "a negative PID never owns a port");
+        drop(listener);
+    }
+
+    // `pid_alive` rejects non-positive PIDs without ever calling kill() — a
+    // recorded "0" or negative must read dead so the reaper short-circuits.
+    #[cfg(unix)]
+    #[test]
+    fn pid_alive_is_false_for_nonpositive_pids() {
+        assert!(!pid_alive(0));
+        assert!(!pid_alive(-1));
+        assert!(!pid_alive(i64::MIN));
+    }
+
+    // On a port nothing LISTENs on, ownership is authoritatively "no owner":
+    // `pid_owns_port` reads false for ANY pid. Where the platform can introspect
+    // ownership at all (lsof / Linux /proc), `port_owner_pids` is `Some(empty)`
+    // — never `None` (which would mean "unprovable") and never a guess.
+    #[cfg(unix)]
+    #[test]
+    fn no_owner_on_a_free_port_yields_empty_not_a_guess() {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe); // free the port — nothing LISTENs now
+        let self_pid = std::process::id() as i64;
+        // Capability gate: only assert Some(empty) where ownership is observable
+        // here (a positive self-ownership probe), mirroring the existing
+        // positive-reap test's skip discipline so an lsof-less sandbox doesn't
+        // fail on an unprovable-by-design platform.
+        let observable = {
+            let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let p = l.local_addr().unwrap().port();
+            let ok = pid_owns_port(self_pid, p);
+            drop(l);
+            ok
+        };
+        if observable {
+            assert_eq!(
+                port_owner_pids(port),
+                Some(Vec::new()),
+                "a free port is authoritatively 'no owner', never None or a guess"
+            );
+        }
+        assert!(!pid_owns_port(self_pid, port), "no PID owns a free port");
+    }
+
+    // `wait_pid_dead` returns true immediately for an already-dead PID — no spin
+    // to the timeout. Use a high, almost-certainly-unused PID number.
+    #[cfg(unix)]
+    #[test]
+    fn wait_pid_dead_returns_immediately_for_a_dead_pid() {
+        let started = Instant::now();
+        // 0x7FFF_FFFF is far above any realistic live PID; even if taken, the
+        // function still returns a bool — we assert on the dead case via a PID we
+        // know is invalid (0 reads dead through pid_alive's guard).
+        assert!(wait_pid_dead(0, Duration::from_secs(5)));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a dead PID must not spin to the timeout"
+        );
+    }
+
+    // `port_held` distinguishes EADDRINUSE from other bind errors only — pinned
+    // here for the unresolvable-host case independently of the bind-probe test:
+    // a bind failure that is NOT AddrInUse must never read as "held" (that false
+    // positive, paired with a recycled PID, was the original mis-kill).
+    #[test]
+    fn port_held_only_true_for_address_in_use() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(port_held("127.0.0.1", port), "a live listener reads held");
+        assert!(
+            !port_held("host.invalid.shrike-test-xyz", port),
+            "a non-EADDRINUSE bind failure must not read as held"
+        );
+        drop(listener);
+    }
 }

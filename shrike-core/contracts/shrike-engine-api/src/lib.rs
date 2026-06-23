@@ -1142,4 +1142,552 @@ mod tests {
                 .unwrap();
         assert_eq!(boxed.locator, Some(Locator::Bbox([0.0, 0.1, 0.2, 0.3])));
     }
+
+    // ── adversarial gaps (#742) ────────────────────────────────────────────
+
+    use shrike_error::ErrorKind;
+
+    /// SplitMix64 — a tiny deterministic PRNG for the generative pins below.
+    /// Inlined (no rand dep): the leaf crate carries no new dependency.
+    struct Rng(u64);
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        /// A finite f32 in roughly [-1e3, 1e3) — bounded so squares stay finite
+        /// and a non-zero vector's norm never overflows to inf in the property.
+        fn next_f32(&mut self) -> f32 {
+            let u = (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32; // [0, 1)
+            (u - 0.5) * 2.0e3
+        }
+    }
+
+    fn norm(v: &[f32]) -> f32 {
+        v.iter().map(|x| x * x).sum::<f32>().sqrt()
+    }
+
+    // ── l2_normalize edge cases ────────────────────────────────────────────
+
+    /// An empty slice normalizes without panic and stays empty — the index
+    /// materializes a zero-dim vector at the boundary without a special case.
+    #[test]
+    fn l2_normalize_empty_slice_is_noop() {
+        let mut v: Vec<f32> = vec![];
+        l2_normalize(&mut v);
+        assert!(v.is_empty());
+    }
+
+    /// A single-element vector normalizes to ±1 (its sign preserved): the
+    /// degenerate dim-1 case the divide-guard must still handle.
+    #[test]
+    fn l2_normalize_single_element_becomes_unit_signed() {
+        let mut p = vec![7.5f32];
+        l2_normalize(&mut p);
+        assert!((p[0] - 1.0).abs() < 1e-6, "positive → +1, got {}", p[0]);
+        let mut n = vec![-0.001f32];
+        l2_normalize(&mut n);
+        assert!((n[0] + 1.0).abs() < 1e-6, "negative → -1, got {}", n[0]);
+    }
+
+    /// Re-normalizing an already-unit vector is idempotent to fp tolerance —
+    /// the documented near-no-op on the ONNX paths that already emit unit
+    /// vectors (no slow drift across repeated passes through the boundary).
+    #[test]
+    fn l2_normalize_is_idempotent_on_unit_vectors() {
+        let mut v = vec![0.6f32, 0.8];
+        l2_normalize(&mut v);
+        let once = v.clone();
+        l2_normalize(&mut v);
+        for (a, b) in once.iter().zip(&v) {
+            assert!((a - b).abs() < 1e-7, "{a} vs {b}");
+        }
+        assert!((norm(&v) - 1.0).abs() < 1e-6);
+    }
+
+    /// A component large enough that its square overflows f32 (>~1.8e38) makes
+    /// the norm `inf`; `x/inf == 0`, so every element collapses to 0 rather
+    /// than NaN. Pins the documented behaviour: the guard is `norm > 0.0`, and
+    /// `inf > 0.0` is true, so this divides — and a stored all-zero vector is
+    /// recoverable downstream where a NaN-laden one would poison the index.
+    #[test]
+    fn l2_normalize_overflowing_component_collapses_to_zero_not_nan() {
+        let mut v = vec![1e38f32, 1e38];
+        l2_normalize(&mut v);
+        assert!(
+            v.iter().all(|x| *x == 0.0),
+            "overflowed norm divides to zero, got {v:?}"
+        );
+        assert!(v.iter().all(|x| !x.is_nan()), "no NaN leaks");
+    }
+
+    /// Property: ANY non-zero finite input normalizes to unit length (norm ≈ 1).
+    /// This is the contract the index relies on to use inner-product as cosine —
+    /// it must hold across the whole input space, not just the [3,4] hand case.
+    #[test]
+    fn l2_normalize_property_unit_norm_for_nonzero_finite() {
+        let mut rng = Rng(0xC0FFEE_u64);
+        for _ in 0..2000 {
+            let dim = 1 + (rng.next_u64() % 16) as usize;
+            let mut v: Vec<f32> = (0..dim).map(|_| rng.next_f32()).collect();
+            // Skip a vector whose squared sum underflows to exactly 0 (all tiny);
+            // the documented zero-vector branch (left unchanged) owns that case.
+            let pre = norm(&v);
+            if pre == 0.0 {
+                continue;
+            }
+            l2_normalize(&mut v);
+            let n = norm(&v);
+            assert!(
+                (n - 1.0).abs() < 1e-4,
+                "non-zero finite input must become unit; norm={n} pre={pre} v={v:?}"
+            );
+        }
+    }
+
+    // ── Blocking<E> chunk-boundary edge cases ──────────────────────────────
+
+    fn toy(batch_cap: usize) -> Arc<Toy> {
+        Arc::new(Toy {
+            batch_cap,
+            calls: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn strings(n: usize) -> Vec<String> {
+        (0..n).map(|i| "x".repeat(i + 1)).collect()
+    }
+
+    fn run_embed(adapted: &Blocking<Toy>, texts: Vec<String>) -> Vec<Vec<f32>> {
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        rt.block_on(adapted.embed(texts)).unwrap()
+    }
+
+    /// Zero items: the empty input short-circuits to an empty result and the
+    /// engine is NEVER called — an empty ingest batch costs no compute. The
+    /// `chunks` loop over an empty slice yields no chunk, so this is a pin on
+    /// "no spurious empty-chunk call".
+    #[test]
+    fn blocking_empty_input_yields_empty_without_engine_call() {
+        let t = toy(4);
+        let adapted = Blocking::new(Arc::clone(&t));
+        let out = run_embed(&adapted, vec![]);
+        assert!(out.is_empty());
+        assert!(
+            t.calls.lock().unwrap().is_empty(),
+            "no engine call for empty input"
+        );
+    }
+
+    /// Input length exactly equal to safe_batch → one full chunk, no trailing
+    /// partial — the off-by-one a `<=`/`<` boundary slip would expose.
+    #[test]
+    fn blocking_input_exactly_safe_batch_is_one_chunk() {
+        let t = toy(4);
+        let adapted = Blocking::new(Arc::clone(&t));
+        let out = run_embed(&adapted, strings(4));
+        assert_eq!(out.len(), 4);
+        assert_eq!(*t.calls.lock().unwrap(), vec![4], "exactly one full chunk");
+    }
+
+    /// safe_batch + 1 → a full chunk then a singleton remainder (the partial
+    /// tail), in order.
+    #[test]
+    fn blocking_input_safe_batch_plus_one_splits_full_then_remainder() {
+        let t = toy(4);
+        let adapted = Blocking::new(Arc::clone(&t));
+        let out = run_embed(&adapted, strings(5));
+        assert_eq!(
+            out,
+            (1..=5).map(|n| vec![n as f32]).collect::<Vec<_>>(),
+            "order preserved across the partial-tail boundary"
+        );
+        assert_eq!(*t.calls.lock().unwrap(), vec![4, 1]);
+    }
+
+    /// safe_batch - 1 → a single under-full chunk (input smaller than the cap).
+    #[test]
+    fn blocking_input_below_safe_batch_is_single_short_chunk() {
+        let t = toy(4);
+        let adapted = Blocking::new(Arc::clone(&t));
+        let out = run_embed(&adapted, strings(3));
+        assert_eq!(out.len(), 3);
+        assert_eq!(*t.calls.lock().unwrap(), vec![3], "one under-full chunk");
+    }
+
+    /// safe_batch larger than the whole input → still one chunk (the cap is a
+    /// ceiling, not a required fill); a 64-cap engine fed 2 texts calls once.
+    #[test]
+    fn blocking_safe_batch_larger_than_input_is_one_chunk() {
+        let t = toy(64);
+        let adapted = Blocking::new(Arc::clone(&t));
+        let out = run_embed(&adapted, strings(2));
+        assert_eq!(out.len(), 2);
+        assert_eq!(*t.calls.lock().unwrap(), vec![2]);
+    }
+
+    /// safe_batch = 1 (a probed batch-variant engine) → strictly serial: one
+    /// chunk per item, order preserved. The text mirror of the existing vision
+    /// `variant_vision_safe_batch_embeds_images_serially` pin.
+    #[test]
+    fn blocking_safe_batch_one_embeds_serially() {
+        let t = toy(1);
+        let adapted = Blocking::new(Arc::clone(&t));
+        let out = run_embed(&adapted, strings(4));
+        assert_eq!(out, (1..=4).map(|n| vec![n as f32]).collect::<Vec<_>>());
+        assert_eq!(
+            *t.calls.lock().unwrap(),
+            vec![1, 1, 1, 1],
+            "each text embedded alone"
+        );
+    }
+
+    // ── Blocking<E> error propagation ──────────────────────────────────────
+
+    /// An engine that errors once it has been called `fail_on_call`-many times.
+    /// Records every chunk size it saw (including the failing one) so a test can
+    /// pin which chunks were attempted before the failure.
+    struct FailingToy {
+        batch_cap: usize,
+        fail_on_call: usize,
+        calls: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl EmbedText for FailingToy {
+        fn embed_chunk(&self, texts: &[String]) -> NativeResult<Vec<Vec<f32>>> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(texts.len());
+            if calls.len() == self.fail_on_call {
+                return Err(NativeError::unavailable("chunk down"));
+            }
+            Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
+        }
+
+        fn safe_batch(&self) -> usize {
+            self.batch_cap
+        }
+    }
+
+    /// A chunk failure aborts the whole `embed`: the call returns `Err`, NO
+    /// partial vector leaks to the caller, and the chunks before the failing one
+    /// were attempted (fail-fast at the failing chunk, not after). The kernel
+    /// awaits this on the single-flight ingest drain and must see all-or-nothing
+    /// — a partial result would advance the watermark over un-embedded notes.
+    #[test]
+    fn blocking_chunk_error_aborts_whole_call_with_no_partial() {
+        let t = Arc::new(FailingToy {
+            batch_cap: 2,
+            fail_on_call: 2, // first chunk ok, second errors
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let adapted = Blocking::new(Arc::clone(&t));
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        let result = rt.block_on(adapted.embed(strings(5)));
+        let err = result.expect_err("a chunk error fails the whole call");
+        assert_eq!(err.kind(), ErrorKind::Unavailable);
+        // Exactly two chunks were attempted: the ok first, then the failing
+        // second — the loop stopped at the failure (no third chunk).
+        assert_eq!(
+            *t.calls.lock().unwrap(),
+            vec![2, 2],
+            "stopped at the failing chunk; the trailing chunk was never attempted"
+        );
+    }
+
+    /// A failure on the very first chunk errors with nothing attempted after it.
+    #[test]
+    fn blocking_first_chunk_error_errors_immediately() {
+        let t = Arc::new(FailingToy {
+            batch_cap: 2,
+            fail_on_call: 1,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let adapted = Blocking::new(Arc::clone(&t));
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        assert!(rt.block_on(adapted.embed(strings(5))).is_err());
+        assert_eq!(
+            *t.calls.lock().unwrap(),
+            vec![2],
+            "the first chunk failed; no further chunk ran"
+        );
+    }
+
+    /// A dispatcher that DROPS the job instead of running it — the "vanished
+    /// pool" (host shutdown) case. The result oneshot's sender drops unsent, so
+    /// the awaiting future must surface an `internal` error, never hang.
+    struct DroppingDispatch;
+    impl BlockingDispatch for DroppingDispatch {
+        fn submit(&self, _job: Box<dyn FnOnce() + Send + 'static>) {
+            // Drop the job on the floor: the pool vanished.
+        }
+    }
+
+    #[test]
+    fn blocking_dropped_job_surfaces_internal_error() {
+        let adapted = Blocking::with_dispatch(toy(4), Arc::new(DroppingDispatch));
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        let err = rt
+            .block_on(adapted.embed(strings(2)))
+            .expect_err("a dropped job must error, not hang");
+        assert_eq!(err.kind(), ErrorKind::Internal);
+    }
+
+    // ── NormalizingEmbedder / NormalizingImageEmbedder ─────────────────────
+
+    /// An embedder emitting arbitrary-magnitude vectors (seeded random), to pin
+    /// that the normalizing decorator makes EVERY output unit regardless of the
+    /// inner magnitude — and preserves count and dimension.
+    struct RandomEmbedder(std::sync::Mutex<Rng>);
+    impl Embedder for RandomEmbedder {
+        fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            let mut rng = self.0.lock().unwrap();
+            let out: Vec<Vec<f32>> = texts
+                .iter()
+                .map(|_| (0..8).map(|_| rng.next_f32()).collect())
+                .collect();
+            Box::pin(async move { Ok(out) })
+        }
+    }
+
+    /// Generative: across many random non-zero inner outputs, every vector the
+    /// `NormalizingEmbedder` hands back is unit, with count and dim preserved —
+    /// the boundary guarantee the index's inner-product metric depends on.
+    #[test]
+    fn normalizing_embedder_unit_normalizes_any_magnitude() {
+        let inner =
+            Arc::new(RandomEmbedder(std::sync::Mutex::new(Rng(0xABCD)))) as Arc<dyn Embedder>;
+        let wrapped = NormalizingEmbedder(inner);
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        for batch in 1..=20usize {
+            let texts: Vec<String> = (0..batch).map(|i| format!("t{i}")).collect();
+            let out = rt.block_on(wrapped.embed(texts)).unwrap();
+            assert_eq!(out.len(), batch, "count preserved");
+            for v in &out {
+                assert_eq!(v.len(), 8, "dim preserved");
+                assert!(
+                    (norm(v) - 1.0).abs() < 1e-4,
+                    "every output unit, got {}",
+                    norm(v)
+                );
+            }
+        }
+    }
+
+    /// Empty input through the normalizing decorator → empty output, no panic.
+    #[test]
+    fn normalizing_embedder_empty_input_is_empty() {
+        let inner = Arc::new(RandomEmbedder(std::sync::Mutex::new(Rng(1)))) as Arc<dyn Embedder>;
+        let wrapped = NormalizingEmbedder(inner);
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        assert!(rt.block_on(wrapped.embed(vec![])).unwrap().is_empty());
+    }
+
+    /// The IMAGE normalizing decorator is entirely untested by the existing
+    /// suite: pin that it unit-normalizes every image vector regardless of inner
+    /// magnitude and preserves count — the CLIP image-half boundary guarantee.
+    struct NonUnitImageEmbedder;
+    impl ImageEmbedder for NonUnitImageEmbedder {
+        fn embed_images(
+            &self,
+            images: Vec<MediaItem>,
+        ) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+            // [5, 12] has norm 13 — non-unit, deterministic.
+            Box::pin(async move { Ok(images.iter().map(|_| vec![5.0f32, 12.0]).collect()) })
+        }
+    }
+
+    #[test]
+    fn normalizing_image_embedder_unit_normalizes_and_preserves_count() {
+        let wrapped =
+            NormalizingImageEmbedder(Box::new(NonUnitImageEmbedder) as Box<dyn ImageEmbedder>);
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        let images: Vec<MediaItem> = (0..3)
+            .map(|n| MediaItem::untyped(vec![0u8; n + 1]))
+            .collect();
+        let out = rt.block_on(wrapped.embed_images(images)).unwrap();
+        assert_eq!(out.len(), 3, "count preserved");
+        for v in &out {
+            assert!(
+                (norm(v) - 1.0).abs() < 1e-6,
+                "image vector unit, got {}",
+                norm(v)
+            );
+        }
+        // 5/13, 12/13 — the specific unit direction of [5, 12].
+        assert!((out[0][0] - 5.0 / 13.0).abs() < 1e-6 && (out[0][1] - 12.0 / 13.0).abs() < 1e-6);
+        // Empty input is empty.
+        assert!(rt
+            .block_on(wrapped.embed_images(vec![]))
+            .unwrap()
+            .is_empty());
+    }
+
+    // ── mime_for_name edge cases ───────────────────────────────────────────
+
+    /// Edge cases the existing single-case test misses: empty name, a dotfile
+    /// whose only dot is the leading one (no real extension), a trailing dot
+    /// (empty extension), a multi-dot name (the LAST extension wins), a known
+    /// extension with mixed/upper case, and an unknown extension → None.
+    #[test]
+    fn mime_for_name_adversarial_extensions() {
+        assert_eq!(mime_for_name(""), None, "empty name has no extension");
+        // A dotfile: ".png" splits to ext "png" — rsplit on '.' yields "png".
+        // Pin the actual behaviour (it IS treated as a png extension).
+        assert_eq!(mime_for_name(".png").as_deref(), Some("image/png"));
+        assert_eq!(mime_for_name("trailing."), None, "empty extension → None");
+        assert_eq!(
+            mime_for_name("archive.tar.webp").as_deref(),
+            Some("image/webp"),
+            "the last extension wins on a multi-dot name"
+        );
+        assert_eq!(
+            mime_for_name("photo.JpEg").as_deref(),
+            Some("image/jpeg"),
+            "extension match is case-insensitive"
+        );
+        assert_eq!(mime_for_name("data.xyz"), None, "unknown extension → None");
+        assert_eq!(mime_for_name("noextension"), None);
+    }
+
+    /// Every audio/video kind the routing table claims maps as documented — a
+    /// regression guard for the engine routing hint (image/png/jpeg are already
+    /// covered above and in the existing test).
+    #[test]
+    fn mime_for_name_audio_and_video_kinds() {
+        for (name, expect) in [
+            ("a.mp3", "audio/mpeg"),
+            ("a.wav", "audio/wav"),
+            ("a.ogg", "audio/ogg"),
+            ("a.oga", "audio/ogg"),
+            ("a.flac", "audio/flac"),
+            ("a.opus", "audio/opus"),
+            ("a.aiff", "audio/aiff"),
+            ("a.aif", "audio/aiff"),
+            ("a.mp4", "video/mp4"),
+            ("a.webm", "video/webm"),
+            ("a.mkv", "video/x-matroska"),
+            ("a.mov", "video/quicktime"),
+            ("a.heic", "image/heic"),
+            ("a.avif", "image/avif"),
+            ("a.svg", "image/svg+xml"),
+            ("a.tiff", "image/tiff"),
+            ("a.tif", "image/tiff"),
+        ] {
+            assert_eq!(
+                mime_for_name(name).as_deref(),
+                Some(expect),
+                "{name} should route as {expect}"
+            );
+        }
+    }
+
+    // ── Locator / Segment serde adversarial ────────────────────────────────
+
+    /// A `Segment` carrying BOTH a bbox and a span is rejected: the flattened
+    /// untagged-pair representation must not parse two locators at once — the
+    /// "one enum, not two optionals; a segment can't carry both" invariant.
+    /// (serde flatten on an `Option<enum>` accepts the first matching variant;
+    /// pin whatever the type actually does so a future change is caught.)
+    #[test]
+    fn segment_with_both_locators_parses_one_deterministically() {
+        let both = r#"{"text":"t","confidence":1.0,"bbox":[0.0,0.1,0.2,0.3],"span":[1.0,2.0]}"#;
+        let seg: Segment = serde_json::from_str(both).unwrap();
+        // serde resolves the flattened enum to its first declared variant (Bbox).
+        assert_eq!(seg.locator, Some(Locator::Bbox([0.0, 0.1, 0.2, 0.3])));
+    }
+
+    /// A bbox with the wrong arity (3 instead of 4) is REJECTED — the fixed
+    /// `[f64; 4]` array shape is load-bearing, not a loose vec.
+    /// A locator with the WRONG ARITY (3 elements where the variant needs 4 or
+    /// 2) does NOT error — `#[serde(flatten)]` over an `Option<Locator>` is
+    /// lenient: a payload that matches no variant resolves the Option to `None`,
+    /// silently DROPPING the malformed locator while text/confidence survive.
+    ///
+    /// Pinned as actual behaviour, not aspiration: the derived-store reader
+    /// gets a located-less segment from a corrupt-bbox row rather than a parse
+    /// failure that would discard the whole recognition. Worth knowing — a
+    /// malformed locator is data-loss-but-not-crash, by serde-flatten design.
+    #[test]
+    fn segment_wrong_arity_locator_drops_to_none_not_error() {
+        let bad_bbox = r#"{"text":"t","confidence":1.0,"bbox":[0.0,0.1,0.2]}"#;
+        let seg: Segment = serde_json::from_str(bad_bbox).unwrap();
+        assert_eq!(
+            seg.locator, None,
+            "a 3-element bbox matches no variant → locator dropped to None"
+        );
+        assert_eq!(seg.text, "t", "the rest of the segment still parses");
+
+        let bad_span = r#"{"text":"t","confidence":1.0,"span":[1.0,2.0,3.0]}"#;
+        let seg: Segment = serde_json::from_str(bad_span).unwrap();
+        assert_eq!(seg.locator, None, "a 3-element span likewise drops to None");
+    }
+
+    /// A `Locator` round-trips on its own (both variants) and an unknown tag is
+    /// rejected — the wire enum the derived store reads must stay closed.
+    #[test]
+    fn locator_round_trips_and_rejects_unknown_variant() {
+        for loc in [
+            Locator::Bbox([0.1, 0.2, 0.3, 0.4]),
+            Locator::Span([1.0, 2.0]),
+        ] {
+            let json = serde_json::to_string(&loc).unwrap();
+            assert_eq!(serde_json::from_str::<Locator>(&json).unwrap(), loc);
+        }
+        assert!(
+            serde_json::from_str::<Locator>(r#"{"polygon":[0.0,0.1]}"#).is_err(),
+            "an unknown locator variant must be rejected"
+        );
+    }
+
+    /// A `Recognition` with a missing `segments` field defaults to empty (the
+    /// `#[serde(default)]`), but a missing REQUIRED field (`confidence`) is
+    /// rejected — older rows parse, malformed ones don't.
+    #[test]
+    fn recognition_serde_defaults_segments_but_requires_core_fields() {
+        let no_segs: Recognition =
+            serde_json::from_str(r#"{"text":"t","confidence":0.5}"#).unwrap();
+        assert!(no_segs.segments.is_empty(), "absent segments default to []");
+        assert!(
+            serde_json::from_str::<Recognition>(r#"{"text":"t"}"#).is_err(),
+            "a missing required confidence is rejected"
+        );
+    }
+
+    // ── Arc blanket-impl forwarding ────────────────────────────────────────
+
+    /// `Arc<dyn Embedder>` is itself an `Embedder`: the blanket impl forwards
+    /// `embed`/`fingerprint`/`dim` to the inner engine unchanged, so hosts pass
+    /// type-erased handles anywhere a concrete engine fits.
+    #[test]
+    fn arc_dyn_embedder_forwards_to_inner() {
+        let toy = Arc::new(Toy {
+            batch_cap: 8,
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let erased: Arc<dyn Embedder> = Blocking::new(toy).pipe_arc();
+        let rt = test_runtime();
+        let _guard = rt.enter();
+        let out = rt.block_on(erased.embed(vec!["ab".into()])).unwrap();
+        assert_eq!(out, vec![vec![2.0]]);
+        assert_eq!(erased.fingerprint().as_deref(), Some("toy:v1"));
+    }
+
+    // A tiny helper to box-and-arc a concrete engine into the type-erased handle
+    // the kernel slot holds, exercising the `Arc<T>` blanket `Embedder` impl.
+    trait PipeArc: Embedder + Sized + 'static {
+        fn pipe_arc(self) -> Arc<dyn Embedder> {
+            Arc::new(self)
+        }
+    }
+    impl<T: Embedder + 'static> PipeArc for T {}
 }

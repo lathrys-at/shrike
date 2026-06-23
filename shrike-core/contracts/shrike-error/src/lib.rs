@@ -362,4 +362,323 @@ mod tests {
         assert_eq!(e.kind(), ErrorKind::Unavailable);
         assert!(e.source().is_some());
     }
+
+    // --- Adversarial additions ---------------------------------------------
+    //
+    // Inline SplitMix64 (copied from shrike-store) for generative cases. No deps.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+    }
+
+    /// Every variant; the count is pinned so adding/removing a kind forces this
+    /// test (and the FFI `to_py_err` mapping it stands in for) to be revisited.
+    const ALL_KINDS: [ErrorKind; 4] = [
+        ErrorKind::InvalidInput,
+        ErrorKind::Unavailable,
+        ErrorKind::Busy,
+        ErrorKind::Internal,
+    ];
+
+    /// The wire strings are a CONTRACT the Python side (`shrike-pyo3`'s kind →
+    /// exception map) string-matches on. Pin each exact byte: a rename here that
+    /// isn't mirrored there silently mis-maps every error of that kind to the
+    /// fail-soft branch. Order-independent set check so a future reorder of the
+    /// enum can't mask a changed string.
+    #[test]
+    fn as_str_pins_exact_wire_strings() {
+        for kind in ALL_KINDS {
+            let expected = match kind {
+                ErrorKind::InvalidInput => "invalid_input",
+                ErrorKind::Unavailable => "unavailable",
+                ErrorKind::Busy => "busy",
+                ErrorKind::Internal => "internal",
+            };
+            assert_eq!(kind.as_str(), expected);
+            // Display must agree with as_str (the binding layer may use either).
+            assert_eq!(kind.to_string(), expected);
+            // as_str is 'static and stable across calls (same pointer-backed str).
+            assert_eq!(kind.as_str(), kind.as_str());
+        }
+    }
+
+    /// as_str must be INJECTIVE — two kinds sharing a wire string would collapse
+    /// two distinct Python exception classes into one on the FFI seam.
+    #[test]
+    fn as_str_is_unique_per_variant() {
+        let strs: Vec<&'static str> = ALL_KINDS.iter().map(|k| k.as_str()).collect();
+        let mut deduped = strs.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(
+            strs.len(),
+            deduped.len(),
+            "as_str collision across variants"
+        );
+        // Pin the variant count: a 5th kind needs a 5th wire string + Py mapping.
+        assert_eq!(ALL_KINDS.len(), 4);
+    }
+
+    /// Each constructor must land on its matching kind — the kind drives the
+    /// Python exception class, so a swapped constructor mis-classes the failure.
+    #[test]
+    fn every_constructor_maps_to_its_kind() {
+        type Ctor = fn(&str) -> NativeError;
+        let cases: [(Ctor, ErrorKind); 4] = [
+            (
+                |m| NativeError::invalid_input(m.to_owned()),
+                ErrorKind::InvalidInput,
+            ),
+            (
+                |m| NativeError::unavailable(m.to_owned()),
+                ErrorKind::Unavailable,
+            ),
+            (|m| NativeError::busy(m.to_owned()), ErrorKind::Busy),
+            (|m| NativeError::internal(m.to_owned()), ErrorKind::Internal),
+        ];
+        for (ctor, expected) in cases {
+            let e = ctor("x");
+            assert_eq!(e.kind(), expected);
+            assert!(
+                e.source().is_none(),
+                "plain constructor must have no source"
+            );
+        }
+    }
+
+    /// The message rides the FFI seam verbatim — no trimming, escaping, or
+    /// truncation. Hostile payloads (empty, unicode, embedded NUL/newline, very
+    /// long) must round-trip byte-for-byte into `message`, and `Display` must be
+    /// exactly `"{kind}: {message}"` with that same payload.
+    #[test]
+    fn message_is_preserved_verbatim_for_hostile_payloads() {
+        let payloads = [
+            "",
+            "ascii simple",
+            "unicode: café 日本語 🐦‍⬛ Ωμέγα",
+            "embedded\nnewline\tand\ttabs",
+            "embedded\0null\0bytes",
+            "right-to-left \u{202E}reversed",
+            &"x".repeat(100_000),
+        ];
+        for p in payloads {
+            let e = NativeError::invalid_input(p);
+            assert_eq!(e.message, p, "message mutated for payload {p:?}");
+            assert_eq!(e.to_string(), format!("invalid_input: {p}"));
+        }
+    }
+
+    /// Generative: a constructed error's `message` equals the input and `kind`
+    /// is whatever was requested, across random kind/message combinations. Pins
+    /// "constructor never reinterprets its inputs" beyond the curated cases.
+    #[test]
+    fn constructor_inputs_round_trip_generative() {
+        let mut rng = Rng::new(0xDEAD_BEEF);
+        for _ in 0..256 {
+            let kind = ALL_KINDS[(rng.next_u64() % 4) as usize];
+            // Build a pseudo-random message including some control/unicode bytes.
+            let len = (rng.next_u64() % 40) as usize;
+            // Includes control chars, NULs, and high-plane unicode — message must
+            // survive all of it unchanged.
+            let msg: String = (0..len)
+                .map(|_| char::from_u32((rng.next_u64() % 0x110000) as u32).unwrap_or('\u{fffd}'))
+                .collect();
+            let e = match kind {
+                ErrorKind::InvalidInput => NativeError::invalid_input(msg.clone()),
+                ErrorKind::Unavailable => NativeError::unavailable(msg.clone()),
+                ErrorKind::Busy => NativeError::busy(msg.clone()),
+                ErrorKind::Internal => NativeError::internal(msg.clone()),
+            };
+            assert_eq!(e.kind(), kind);
+            assert_eq!(e.message, msg);
+            assert_eq!(e.to_string(), format!("{}: {}", kind.as_str(), msg));
+        }
+    }
+
+    /// A multi-level chain (NativeError → mid leaf → root leaf) must walk fully
+    /// via `Error::source()` iteration, and `.source()` on each level must yield
+    /// the next — the Rust-side diagnostic chain the docs promise.
+    #[test]
+    fn source_chain_walks_multiple_levels() {
+        // Build a 3-deep leaf chain using a custom error carrying a source.
+        #[derive(Debug)]
+        struct Layer {
+            msg: &'static str,
+            cause: Option<BoxError>,
+        }
+        impl std::fmt::Display for Layer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.msg)
+            }
+        }
+        impl Error for Layer {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                self.cause.as_deref().map(|c| c as &(dyn Error + 'static))
+            }
+        }
+        let root = Layer {
+            msg: "root cause",
+            cause: None,
+        };
+        let mid = Layer {
+            msg: "mid layer",
+            cause: Some(Box::new(root)),
+        };
+        let top = NativeError::with_source(ErrorKind::Internal, "top context", mid);
+
+        // Walk: top.source() == mid, mid.source() == root, root.source() == None.
+        let mut chain: Vec<String> = Vec::new();
+        let mut cur: Option<&(dyn Error + 'static)> = top.source();
+        while let Some(e) = cur {
+            chain.push(e.to_string());
+            cur = e.source();
+        }
+        assert_eq!(
+            chain,
+            vec!["mid layer".to_string(), "root cause".to_string()]
+        );
+    }
+
+    /// `Display` must NOT splice the source in — the top message is the context
+    /// label only, so the boundary string isn't duplicated/leaked with the leaf.
+    /// (The leaf is recoverable via `.source()`, never via the message string.)
+    #[test]
+    fn display_does_not_leak_or_duplicate_the_source() {
+        let leaf: BoxError = "SECRET-LEAF-TEXT".into();
+        let e = NativeError::with_source(ErrorKind::Unavailable, "public label", leaf);
+        let shown = e.to_string();
+        assert_eq!(shown, "unavailable: public label");
+        assert!(
+            !shown.contains("SECRET-LEAF-TEXT"),
+            "source text leaked into Display"
+        );
+        // Debug, by contrast, may show internals, but must still carry the label
+        // and must not panic.
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("public label"));
+    }
+
+    /// `Display` must be human-readable message text, not the derived Debug form
+    /// (no struct-name / field noise).
+    #[test]
+    fn display_is_not_the_debug_form() {
+        let e = NativeError::internal("boom");
+        assert_eq!(e.to_string(), "internal: boom");
+        assert!(!e.to_string().contains("NativeError"));
+        assert!(!e.to_string().contains("span_trace"));
+    }
+
+    /// The serde_json `From` must attach the ORIGINAL error as the source and
+    /// downcast back to `serde_json::Error` (not a re-stringified copy) — the
+    /// kind must be InvalidInput as documented.
+    #[test]
+    fn from_serde_json_attaches_downcastable_source_with_kind() {
+        let serde_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        let native: NativeError = serde_err.into();
+        assert_eq!(native.kind(), ErrorKind::InvalidInput);
+        let src = native.source().expect("source must be attached");
+        assert!(
+            src.downcast_ref::<serde_json::Error>().is_some(),
+            "source did not downcast to serde_json::Error"
+        );
+    }
+
+    /// The io `From` must attach the ORIGINAL io error as the source, downcast
+    /// back (preserving `io::ErrorKind`), and map to Unavailable as documented.
+    #[test]
+    fn from_io_attaches_downcastable_source_with_kind() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let native: NativeError = io_err.into();
+        assert_eq!(native.kind(), ErrorKind::Unavailable);
+        let src = native.source().expect("source must be attached");
+        let downcast = src
+            .downcast_ref::<std::io::Error>()
+            .expect("source did not downcast to io::Error");
+        assert_eq!(downcast.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    /// A custom (non-leaf) error must box through `Into<BoxError>` via
+    /// `with_source` and downcast back — the path the docs require for heavy
+    /// leaves (ort/rusqlite/ureq) that get NO dedicated `From` in this crate.
+    #[test]
+    fn custom_error_boxes_and_downcasts_through_with_source() {
+        #[derive(Debug)]
+        struct EngineErr {
+            code: u32,
+        }
+        impl std::fmt::Display for EngineErr {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "engine failed: {}", self.code)
+            }
+        }
+        impl Error for EngineErr {}
+
+        let e = NativeError::with_source(ErrorKind::Unavailable, "embed", EngineErr { code: 7 });
+        let src = e.source().expect("source attached");
+        let downcast = src
+            .downcast_ref::<EngineErr>()
+            .expect("custom error did not downcast back");
+        assert_eq!(downcast.code, 7);
+        // And via ResultExt::context the same custom error round-trips.
+        let r: Result<(), EngineErr> = Err(EngineErr { code: 42 });
+        let e2 = r.context(ErrorKind::Internal, "via context").unwrap_err();
+        assert_eq!(
+            e2.source()
+                .unwrap()
+                .downcast_ref::<EngineErr>()
+                .unwrap()
+                .code,
+            42
+        );
+    }
+
+    /// With NO tracing subscriber installed (the production default for these
+    /// pure-Rust tests), `trace()` must be predictable and never panic. Pin the
+    /// observed behavior so a regression in capture is caught.
+    #[test]
+    fn trace_is_none_without_a_subscriber_and_never_panics() {
+        let e = NativeError::internal("no span here");
+        // Must not panic when rendering an empty/absent trace.
+        let t = e.trace();
+        assert_eq!(t, None, "no subscriber installed should yield no trace");
+        // Idempotent: calling twice yields the same result, no interior mutation.
+        assert_eq!(e.trace(), e.trace());
+    }
+
+    /// `with_context` builds its label lazily AND, on the error path, the lazily
+    /// built label becomes the message with the source still attached — the Ok
+    /// path skips the closure (covered elsewhere); here we pin the error path.
+    #[test]
+    fn with_context_error_path_uses_built_label_and_keeps_source() {
+        let mut called = false;
+        let r: Result<(), std::io::Error> = Err(std::io::Error::other("raw"));
+        let e = r
+            .with_context(ErrorKind::Busy, || {
+                called = true;
+                format!("dynamic label {}", 1 + 1)
+            })
+            .unwrap_err();
+        assert!(called, "closure must run on the error path");
+        assert_eq!(e.kind(), ErrorKind::Busy);
+        assert_eq!(e.message, "dynamic label 2");
+        assert_eq!(e.source().unwrap().to_string(), "raw");
+    }
+
+    /// `ResultExt::context` on an `Ok` must pass the value through untouched and
+    /// must NOT fabricate an error — the trait wraps only the Err arm.
+    #[test]
+    fn context_passes_ok_through_unchanged() {
+        let ok: Result<u32, std::io::Error> = Ok(99);
+        let v = ok.context(ErrorKind::Internal, "unused label").unwrap();
+        assert_eq!(v, 99);
+    }
 }
