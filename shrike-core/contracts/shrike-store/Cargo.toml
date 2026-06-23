@@ -13,3 +13,6 @@ license = "AGPL-3.0-or-later"
 
 [dependencies]
 shrike-error = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

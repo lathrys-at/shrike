@@ -24,6 +24,7 @@ base64 = "0.22"
 url = "2"
 
 [dev-dependencies]
+proptest = { workspace = true }
 # Drives the async `fetch_media_url` validation test (the gates that need no
 # socket — scheme/host/is_global — assert before any connection).
 tokio = { version = "1", features = ["rt", "macros"] }

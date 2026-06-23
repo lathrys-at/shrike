@@ -485,30 +485,9 @@ pub trait DerivedStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
     use std::sync::Mutex;
-
-    /// A tiny deterministic, seed-reproducible generator (SplitMix64). The
-    /// inline-test property/generative lane uses this in place of an external
-    /// `proptest`/`rand` dependency, so a property test rides the existing
-    /// `rust_test` target with no crate-graph (`MODULE.bazel.lock`) churn. A
-    /// failure is reproducible from its seed; widen `ITERS` to search harder.
-    struct Rng(u64);
-    impl Rng {
-        fn new(seed: u64) -> Self {
-            Self(seed)
-        }
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-        fn next_i64(&mut self) -> i64 {
-            self.next_u64() as i64
-        }
-    }
 
     fn hash_one_i64(key: i64) -> u64 {
         let mut h = FxI64Hasher::default();
@@ -540,34 +519,28 @@ mod tests {
         for k in [i64::MIN, i64::MAX, i64::MIN + 1, i64::MAX - 1] {
             assert!(seen.insert(hash_one_i64(k)), "boundary key {k} collided");
         }
-        // The bijection, stated directly: equal hashes imply equal keys, over a
-        // random sweep of the full i64 range (this subsumes a weaker "set only
-        // grows" check — it is the actual injectivity property).
-        let mut rng = Rng::new(7);
-        for _ in 0..50_000 {
-            let a = rng.next_i64();
-            let b = rng.next_i64();
-            assert_eq!(
-                hash_one_i64(a) == hash_one_i64(b),
-                a == b,
-                "hash equality must mirror key equality (a={a}, b={b})"
-            );
-        }
     }
 
-    #[test]
-    fn fxhasher_write_i64_and_u64_agree_on_bit_pattern() {
-        // The impl casts `i as u64` in `write_i64`; the two entry points must
-        // therefore agree for the same 64-bit pattern, or a map keyed via one
-        // path and probed via the other would miss.
-        let mut rng = Rng::new(1234);
-        for _ in 0..10_000 {
-            let bits = rng.next_u64();
+    proptest! {
+        /// The bijection, stated directly: equal hashes imply equal keys, over
+        /// the full i64 range. This is the actual injectivity property the
+        /// sequential sweep above only samples — proptest shrinks any collision
+        /// to a minimal `(a, b)` witness.
+        #[test]
+        fn fxhasher_hash_equality_mirrors_key_equality(a: i64, b: i64) {
+            prop_assert_eq!(hash_one_i64(a) == hash_one_i64(b), a == b);
+        }
+
+        /// The impl casts `i as u64` in `write_i64`; the two entry points must
+        /// agree for the same 64-bit pattern, or a map keyed via one path and
+        /// probed via the other would miss.
+        #[test]
+        fn fxhasher_write_i64_and_u64_agree_on_bit_pattern(bits: u64) {
             let mut hi = FxI64Hasher::default();
             hi.write_i64(bits as i64);
             let mut hu = FxI64Hasher::default();
             hu.write_u64(bits);
-            assert_eq!(hi.finish(), hu.finish(), "i64/u64 disagree on {bits:#x}");
+            prop_assert_eq!(hi.finish(), hu.finish());
         }
     }
 
@@ -596,45 +569,72 @@ mod tests {
         assert_ne!(h(b"ab"), h(b"ba"));
     }
 
-    #[test]
-    fn fxi64map_matches_std_hashmap_semantics() {
-        // The Fx-hashed map must behave exactly like the std map it replaces —
-        // cross-check a randomized insert/overwrite/remove trace against
-        // `BTreeMap` as the oracle.
-        let mut fx: FxI64Map<i64> = FxI64Map::default();
-        let mut oracle: BTreeMap<i64, i64> = BTreeMap::new();
-        let mut rng = Rng::new(99);
-        for _ in 0..20_000 {
-            let key = rng.next_i64() % 512; // force collisions/overwrites
-            if rng.next_u64() % 3 == 2 {
-                assert_eq!(fx.remove(&key), oracle.remove(&key));
-            } else {
-                let v = rng.next_i64();
-                assert_eq!(fx.insert(key, v), oracle.insert(key, v));
-            }
-            assert_eq!(fx.len(), oracle.len());
-            assert_eq!(fx.get(&key).copied(), oracle.get(&key).copied());
-        }
-        let mut fx_pairs: Vec<_> = fx.into_iter().collect();
-        fx_pairs.sort_unstable();
-        let oracle_pairs: Vec<_> = oracle.into_iter().collect();
-        assert_eq!(fx_pairs, oracle_pairs);
+    /// One step in a randomized map/set trace. Keys are drawn from a small band
+    /// (`KEY_BAND`) so a generated trace collides and overwrites instead of only
+    /// ever inserting fresh keys.
+    #[derive(Debug, Clone)]
+    enum MapOp {
+        Insert(i64, i64),
+        Remove(i64),
     }
 
-    #[test]
-    fn fxi64set_matches_std_set_semantics() {
-        let mut fx: FxI64Set = FxI64Set::default();
-        let mut oracle: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
-        let mut rng = Rng::new(0x5151);
-        for _ in 0..20_000 {
-            let key = rng.next_i64() % 512;
-            if rng.next_u64().is_multiple_of(4) {
-                assert_eq!(fx.remove(&key), oracle.remove(&key));
-            } else {
-                assert_eq!(fx.insert(key), oracle.insert(key));
+    const KEY_BAND: std::ops::Range<i64> = -512..512;
+
+    fn map_ops() -> impl Strategy<Value = Vec<MapOp>> {
+        let op = prop_oneof![
+            (KEY_BAND, any::<i64>()).prop_map(|(k, v)| MapOp::Insert(k, v)),
+            KEY_BAND.prop_map(MapOp::Remove),
+        ];
+        prop::collection::vec(op, 0..2_000)
+    }
+
+    proptest! {
+        /// The Fx-hashed map must behave exactly like the std map it replaces:
+        /// replay a generated insert/overwrite/remove trace against `BTreeMap`
+        /// as the oracle, asserting the return value AND length after every
+        /// step, then the full contents at the end. proptest shrinks a
+        /// divergence to the shortest failing trace.
+        #[test]
+        fn fxi64map_matches_std_hashmap_semantics(ops in map_ops()) {
+            let mut fx: FxI64Map<i64> = FxI64Map::default();
+            let mut oracle: BTreeMap<i64, i64> = BTreeMap::new();
+            for op in ops {
+                match op {
+                    MapOp::Insert(k, v) => {
+                        prop_assert_eq!(fx.insert(k, v), oracle.insert(k, v));
+                    }
+                    MapOp::Remove(k) => {
+                        prop_assert_eq!(fx.remove(&k), oracle.remove(&k));
+                        prop_assert_eq!(fx.get(&k).copied(), oracle.get(&k).copied());
+                    }
+                }
+                prop_assert_eq!(fx.len(), oracle.len());
             }
-            assert_eq!(fx.contains(&key), oracle.contains(&key));
-            assert_eq!(fx.len(), oracle.len());
+            let mut fx_pairs: Vec<_> = fx.into_iter().collect();
+            fx_pairs.sort_unstable();
+            let oracle_pairs: Vec<_> = oracle.into_iter().collect();
+            prop_assert_eq!(fx_pairs, oracle_pairs);
+        }
+
+        /// The Fx-hashed set against `BTreeSet`, same model-based shape.
+        #[test]
+        fn fxi64set_matches_std_set_semantics(ops in map_ops()) {
+            let mut fx: FxI64Set = FxI64Set::default();
+            let mut oracle: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+            for op in ops {
+                let key = match op {
+                    MapOp::Insert(k, _) => {
+                        prop_assert_eq!(fx.insert(k), oracle.insert(k));
+                        k
+                    }
+                    MapOp::Remove(k) => {
+                        prop_assert_eq!(fx.remove(&k), oracle.remove(&k));
+                        k
+                    }
+                };
+                prop_assert_eq!(fx.contains(&key), oracle.contains(&key));
+                prop_assert_eq!(fx.len(), oracle.len());
+            }
         }
     }
 

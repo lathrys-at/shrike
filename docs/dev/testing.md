@@ -222,28 +222,29 @@ and where each belongs:
 | Category | What it is | Where it lives |
 |----------|-----------|----------------|
 | **Unit** | One function/type against its contract; table-driven edge cases. | `#[cfg(test)] mod tests` inline in `src/`. |
-| **Property / generative** | An invariant over many generated inputs (round-trip, idempotence, an oracle cross-check against a simpler reference). | Inline, using the seed-reproducible generator (below). |
+| **Property / generative** | An invariant over many generated inputs (round-trip, idempotence, an oracle cross-check against a simpler reference). | Inline, using `proptest` (below). |
 | **Oracle / differential** | Output checked against an independent reference — a golden fixture, a brute-force re-implementation, or the frozen Python spec (fusion vs `search_fusion.py`). | Inline or `tests/`. |
-| **Robustness / fuzz-style** | "Never panics, only `Err`s" over mutated/garbage bytes at a trust boundary (schemas deserialize, image decode, SSRF URL parsing, MIME sniff). | Inline, driven by the generator. |
+| **Robustness / fuzz-style** | "Never panics, only `Err`s" over mutated/garbage bytes at a trust boundary (schemas deserialize, image decode, SSRF URL parsing, MIME sniff). | Inline, driven by `proptest`. |
 | **Integration (in-crate)** | Cross-module behaviour reachable purely in Rust — concurrency, persistence, FFI lifecycle. | `tests/*.rs` (its own binary). |
 
-**The generator.** The inline property/generative/fuzz lane uses a ~15-line
-[SplitMix64](https://en.wikipedia.org/wiki/Xorshift) PRNG inlined in the test
-module (see `shrike-core/contracts/shrike-store/src/lib.rs` for the canonical
-copy: `struct Rng(u64)` with `next_u64`/`next_i64`). It is deliberately **not**
-`proptest`/`quickcheck`/`rand`: an external test crate adds a node to the Bazel
-crate graph, which needs a `MODULE.bazel.lock` re-splice (`./bazel` run) to
-adopt — a real cost that must ride its own dedicated, bazel-gated change, not
-sneak in under a test PR. The inlined generator gives the load-bearing 90%
-(seed-reproducible inputs, an oracle to diff against) with zero crate-graph
-churn; a failure is reproducible from its seed. Escalating a specific
-high-value boundary to `proptest` (for shrinking) or `cargo-fuzz`/`miri` (a
-separate scheduled, non-`//...` lane — see the foundations ADR in
-[`decisions.md`](decisions.md)) is a deliberate follow-up, not the default.
+**The generator: `proptest`.** Property/generative/fuzz tests use
+[`proptest`](https://docs.rs/proptest): `Strategy`-generated inputs, the
+`proptest!` macro, `prop_assert*!`, and model-based oracle traces (a generated
+`Vec` of ops replayed against a `BTreeMap`/`BTreeSet` reference). The canonical
+exemplar is `shrike-core/contracts/shrike-store/src/lib.rs` — the FxHasher
+injectivity property and the `FxI64Map`/`FxI64Set`-vs-std oracle traces. The win
+over a hand-rolled PRNG is **shrinking**: a failure is reduced to a minimal
+witness, not a raw seed. The two trust-boundary properties to preserve when
+extending: the reference must be **independently structured** (not a clone of the
+impl), and every sweep must be **hermetic** — pure code only, never live I/O
+(no `getaddrinfo`, no sockets). `cargo-fuzz`/`miri` remain a separate scheduled,
+non-`//...` lane (see the testing ADRs in [`decisions.md`](decisions.md)).
 
-**Wiring.** Inline tests need no BUILD change — each crate already carries a
-`rust_test(crate = ":<lib>")` target, and `srcs` globs `src/**/*.rs`. A new
-`tests/*.rs` binary needs its own `rust_test` target with explicit `deps`.
+**Wiring.** Inline tests run under each crate's `rust_test(crate = ":<lib>")`
+target (`srcs` globs `src/**/*.rs`). To use `proptest` in a crate: add `proptest =
+{ workspace = true }` to its `[dev-dependencies]` and `@crates//:proptest` to its
+`rust_test` `deps`. A new `tests/*.rs` binary needs its own `rust_test` target with
+explicit `deps`.
 
 ## Linting and type checking
 

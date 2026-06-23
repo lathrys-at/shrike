@@ -24,3 +24,6 @@ name = "shrike_cache"
 blake2 = "0.10"
 serde_json = "1"
 tracing = "0.1"
+
+[dev-dependencies]
+proptest = { workspace = true }

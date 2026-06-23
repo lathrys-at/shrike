@@ -99,6 +99,7 @@ base64 = { version = "0.22", optional = true }
 shrike-platform = { path = "../../engines/shrike-platform", optional = true }
 
 [dev-dependencies]
+proptest = { workspace = true }
 # The remote engines are async now (#721 S2 — route 2); their tests are
 # `#[tokio::test]` driving the canned blocking test server, so the test tier
 # needs the macros + a multi-thread runtime (the server thread blocks on accept

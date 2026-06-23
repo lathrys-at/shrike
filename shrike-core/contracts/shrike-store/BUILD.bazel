@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 package(default_visibility = ["//shrike-core:__subpackages__"])
 
@@ -12,5 +12,14 @@ rust_library(
     edition = "2021",
     deps = [
         "//shrike-core/contracts/shrike-error:shrike_error",
+    ],
+)
+
+rust_test(
+    name = "shrike_store_test",
+    size = "small",
+    crate = ":shrike_store",
+    deps = [
+        "@crates//:proptest",
     ],
 )

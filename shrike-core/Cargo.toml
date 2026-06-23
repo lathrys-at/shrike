@@ -58,3 +58,6 @@ shrike-media = { path = "utility/shrike-media" }
 shrike-network = { path = "utility/shrike-network" }
 shrike-process = { path = "managed/shrike-process" }
 shrike-store = { path = "contracts/shrike-store" }
+# Property/generative + fuzz-style tests. Referenced from each crate's
+# [dev-dependencies] as `proptest = { workspace = true }`.
+proptest = "1"

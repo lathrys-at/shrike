@@ -686,32 +686,44 @@ coverage. The per-category taxonomy (unit / property / oracle-differential /
 fuzz-style / in-crate integration) and where each lives are in
 [`testing.md`](testing.md).
 
-### Property/generative tests use an inlined PRNG, not `proptest` — the crate graph is the reason
+### Property/generative tests use `proptest`
 
-Property-based and fuzz-style inline tests use a ~15-line SplitMix64 generator
-inlined in the test module, not `proptest`/`quickcheck`/`rand`. The constraint is
-the build: the authoritative lane is Bazel, whose `crate_universe` resolves every
-dependency — including dev/test crates — from one `Cargo.lock` into
-`MODULE.bazel.lock`. Adding an external test framework is therefore not a
-`Cargo.toml` edit; it is a crate-graph change that needs a `./bazel` re-splice to
-adopt, and shipping the `Cargo.lock` delta without the matching lock re-splice
-would break CI's Bazel lane. The inlined generator delivers the load-bearing
-properties (seed-reproducible inputs, an oracle to diff against, panic-freedom
-sweeps) at **zero crate-graph churn**, riding the `rust_test(crate=…)` target each
-crate already has. What it lacks vs `proptest` is automatic shrinking — accepted,
-because a seed reproduces any failure and the generators are small enough to
-minimize by hand.
+Property-based and fuzz-style inline tests use `proptest`: generated inputs via
+`Strategy`, the `proptest!` macro, model-based oracle traces (a generated `Vec`
+of ops replayed against a `BTreeMap`/`BTreeSet` reference), and `prop_assert_eq!`.
+The win over a hand-rolled generator is **automatic shrinking** — a failure is
+reduced to a minimal witness (the shortest op trace, the smallest `(a, b)` pair)
+instead of a raw seed a human must minimize by hand.
+
+This reverses an earlier interim decision to inline a SplitMix64 PRNG. That choice
+existed for one reason: a build constraint. The authoritative lane is Bazel, whose
+`crate_universe` resolves every dependency — dev/test crates included — from one
+`Cargo.lock` into `MODULE.bazel.lock`, so adding a test framework is a crate-graph
+change that needs a `./bazel` re-splice, not a bare `Cargo.toml` edit. The interim
+session could not run Bazel, so it could not adopt the dep; the inlined generator
+was the zero-churn stand-in. With Bazel in reach the constraint is gone, the dep is
+adopted properly, and the cost is small: `proptest` pulls in six leaf crates
+(`proptest`, `rusty-fork`, `quick-error`, `rand_xorshift`, `unarray`,
+`wait-timeout`), reusing the `rand`/`regex` already in the graph.
+
+Adoption mechanics, for the record (and for adding it to a new crate):
+`proptest = "1"` in the workspace `[workspace.dependencies]`; `proptest =
+{ workspace = true }` in the crate's `[dev-dependencies]`; `@crates//:proptest` in
+the crate's `rust_test` `deps`; then a `./bazel` run re-splices `MODULE.bazel.lock`.
+The first adoption regenerates the lock; later crates ride the already-resolved
+graph (no further lock change).
 
 - **`cargo-fuzz`/`libFuzzer` and `miri`** (the SSRF/decode trust boundaries; FFI
-  soundness in `shrike-cabi`/`shrike-pyo3`) are **cargo-only** tools that do not
-  belong on the per-PR `bazel test //...` critical path — they are slow and need
-  their own toolchain. The posture: a scheduled/manual cargo lane, off `//...`,
-  added when a boundary's value justifies it; the inline panic-freedom sweeps
-  cover the common case until then.
-- **Escalation to `proptest` for a specific high-value boundary** (where shrinking
-  earns its keep) is a deliberate, bazel-gated follow-up: add the dep, run
-  `./bazel` to re-splice `MODULE.bazel.lock`, commit both — never piggy-backed on
-  a test-only change.
+  soundness in `shrike-cabi`/`shrike-pyo3`) remain **cargo-only** tools, off the
+  per-PR `bazel test //...` critical path — they are slow and need their own
+  toolchain. The posture: a scheduled/manual cargo lane, off `//...`, added when a
+  boundary's value justifies it; the `proptest` panic-freedom sweeps cover the
+  common case until then.
+- **Hermeticity is non-negotiable in the unit lane.** A property/fuzz test sweeps
+  inputs through *pure* code only — it must not perform live I/O (no `getaddrinfo`,
+  no sockets, no disk beyond a tempdir). The SSRF classifier is fuzzed as the pure
+  `ip_is_allowed`; the resolve-then-vet path that calls the system resolver is an
+  end-to-end concern, not a unit-lane sweep.
 
 ## Performance engineering
 

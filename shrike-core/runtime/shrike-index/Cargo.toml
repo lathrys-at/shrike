@@ -22,3 +22,6 @@ shrike-store = { path = "../../contracts/shrike-store" }
 # re-enable via a crate annotation if it ever matters).
 usearch = { version = "=2.25.3", default-features = false }
 tracing = "0.1"
+
+[dev-dependencies]
+proptest = { workspace = true }
