@@ -240,11 +240,13 @@ mod tests {
 
 use std::collections::{BTreeMap, HashSet};
 
+use memchr::memmem;
 use shrike_derived::{FxI64Map, MIN_TRIGRAM};
 use shrike_schemas::{
-    FuzzyMatch, Note, SearchMatch, SearchResultGroup, SignalContribution, SubstringInfo,
+    FuzzyMatch, LexicalMatch, Note, SearchMatch, SearchResultGroup, SignalContribution,
+    SubstringInfo,
 };
-use shrike_store::{DerivedStore, LexicalRow, VectorIndex};
+use shrike_store::{DerivedStore, LexicalRow, LexicalSpan, VectorIndex};
 
 /// A note's field map (`Note.content`): the "full" projection's fields, absent
 /// in "meta" mode. The literal-substring authority reads it.
@@ -375,10 +377,13 @@ fn escape_anki_text(text: &str) -> String {
     out
 }
 
-/// Locate a case-insensitive literal substring in a note's fields — the
-/// authority for exact-match evidence (mirrors `collection.substring_info`,
-/// code-point index math included: find runs over the lowered text, the
-/// snippet slices the original by those indices).
+/// Locate a case-insensitive literal substring in a note's fields — the `exact`
+/// evidence for the FIELD-text fallback (a sub-trigram query, or no derived
+/// store, where the fuzzy-recovered exact tier can't run). The match emits the
+/// matching FIELD's value as its text plus the literal's byte span within it, so
+/// the text and span stay self-consistent (the span indexes the emitted field
+/// value, not the derived text — the two diverge). The first matching field
+/// wins; its name is the evidence `ref`.
 ///
 /// `None` content (a meta-mode note dict carries no fields) yields `None`, the
 /// "no literal match" answer.
@@ -386,51 +391,35 @@ pub fn substring_info(content: Option<&NoteContent>, text: &str) -> Option<Subst
     // NFC-normalize BOTH the needle and the field content, so confirmation is
     // canonical-form-agnostic regardless of Anki's `NormalizeNoteText` config (when
     // it's off, fields stay NFD; normalizing only the needle would then reject a
-    // match). The snippet slices the normalized field, so its indices stay aligned.
+    // match). The span indexes the normalized field, so its offsets stay aligned.
     let needle: Vec<char> = shrike_derived::nfc(text).to_lowercase().chars().collect();
-    let mut matched: Vec<String> = Vec::new();
-    let mut snippet: Option<String> = None;
     let fields = content?;
     for (name, value) in fields {
         let value = shrike_derived::nfc(value);
         let lowered: Vec<char> = value.to_lowercase().chars().collect();
-        let idx = match find_subsequence(&lowered, &needle) {
-            Some(i) => i,
-            None => continue,
+        let Some(idx) = find_subsequence(&lowered, &needle) else {
+            continue;
         };
-        matched.push(name.clone());
-        if snippet.is_none() {
-            // Original-case chars, built lazily: only a MATCHING field needs them
-            // (to slice the snippet), so a non-matching field — the common case in
-            // the exact loop, where most candidates are semantic/fuzzy — skips this
-            // allocation. Derived from the SAME normalized `value` as `lowered`, so a
-            // length-changing lowercasing drifts both identically and `idx` aligns.
-            let chars: Vec<char> = value.chars().collect();
-            let start = idx.saturating_sub(30);
-            let end = (idx + needle.len() + 30).min(chars.len());
-            let end = end.min(chars.len());
-            let mut frag: String = chars[start.min(chars.len())..end].iter().collect();
-            if start > 0 {
-                frag = format!("…{frag}");
-            }
-            if idx + needle.len() + 30 < chars.len() {
-                frag.push('…');
-            }
-            snippet = Some(frag);
-        }
-    }
-    if matched.is_empty() {
-        None
-    } else {
-        Some(SubstringInfo {
-            matched_fields: matched,
-            snippet,
-            // A field hit's source/ref are the schema defaults (`source:
-            // "field"`, `ref: None`).
+        // Byte span of the literal in the original-case (NFC) field value. The
+        // char index `idx` runs over the LOWERED chars; map it to a byte offset on
+        // the original via its char_indices (length-preserving lowercasing keeps
+        // them aligned — the same assumption the lowered-vs-original pairing made).
+        // `.get` clamps the rare length-changing case rather than panicking.
+        let orig: Vec<(usize, char)> = value.char_indices().collect();
+        let start = orig.get(idx).map_or(0, |(b, _)| *b);
+        let end = orig
+            .get(idx + needle.len())
+            .map_or(value.len(), |(b, _)| *b);
+        return Some(SubstringInfo {
             source: crate::FIELD_SOURCE.to_owned(),
-            r#ref: None,
-        })
+            r#ref: Some(name.clone()),
+            matched: Some(LexicalMatch {
+                text: value.into_owned(),
+                span: (start, end),
+            }),
+        });
     }
+    None
 }
 
 fn find_subsequence(haystack: &[char], needle: &[char]) -> Option<usize> {
@@ -816,12 +805,114 @@ fn rank_modality(
     ranking
 }
 
-fn collect_substring_candidates(
+/// Map a byte offset in `text.to_lowercase()` back onto `text`'s ORIGINAL bytes,
+/// always landing on a char boundary. Lowercasing is byte-identity for ASCII (the
+/// overwhelming common case — an `O(1)` short-circuit); otherwise the two forms
+/// are walked in lockstep by char (a char can lowercase to a different byte
+/// length, e.g. `İ`→`i̇`), so the offset stays correct on the emitted text.
+fn lower_off_to_orig(text: &str, lower_off: usize) -> usize {
+    if text.is_ascii() {
+        return lower_off;
+    }
+    let mut lo = 0usize;
+    for (orig_idx, ch) in text.char_indices() {
+        if lo >= lower_off {
+            return orig_idx;
+        }
+        lo += ch.to_lowercase().map(char::len_utf8).sum::<usize>();
+    }
+    text.len()
+}
+
+/// Case-insensitive literal match of `needle` (already NFC + lowercased) in the
+/// NFC derived `text`, via a precomputed [`memmem::Finder`] (built ONCE per query
+/// and reused across every hit). Returns the `[start, end)` UTF-8 byte span of
+/// the FIRST occurrence on `text`'s original bytes, plus the length-normalized
+/// literal-TF (occurrence count / text char length) the exact tier ranks by.
+/// `None` when the literal is absent. The search runs on a lowercased copy of
+/// `text`; offsets are mapped back to the original via [`lower_off_to_orig`].
+fn literal_match(
+    finder: &memmem::Finder<'_>,
+    needle: &str,
+    text: &str,
+) -> Option<((usize, usize), f64)> {
+    let hay = text.to_lowercase();
+    let first = finder.find(hay.as_bytes())?;
+    let count = finder.find_iter(hay.as_bytes()).count();
+    let start = lower_off_to_orig(text, first);
+    let end = lower_off_to_orig(text, first + needle.len());
+    let len = text.chars().count().max(1) as f64;
+    Some(((start, end), count as f64 / len))
+}
+
+/// Recover the `exact` (priority) tier from this source's fuzzy hits: a literal
+/// match contains EVERY query trigram, so it sits in fuzzy's top bucket with its
+/// derived segment text already in hand — verifying the literal needs only a
+/// `contains` check on that text (no extra read). Each confirmed hit is annotated
+/// with [`SubstringInfo`] carrying the literal's byte span over the SAME emitted
+/// segment text, and the returned ids are ranked by length-normalized literal-TF
+/// (note id ascending tie-break). A hit crowded out of fuzzy's `top_k` by
+/// max-overlap non-contiguous notes still rides the fuzzy tier — graceful, no
+/// recall loss, just no priority boost.
+///
+/// Operates on the rows [`collect_fuzzy`] already admitted (in `note_data`,
+/// passing scope/exclude), so it never re-filters; a fuzzy row whose note was
+/// scope-dropped is simply absent from `note_data` and skipped.
+fn recover_exact(
     ctx: SearchCtx,
-    lex: Option<Vec<LexicalRow>>,
+    rows: &[LexicalRow],
     text: &str,
     note_data: &mut NoteData,
-) -> NativeResult<()> {
+) -> Vec<i64> {
+    // The literal needle: NFC + lowercased, matching the derived segment fold.
+    // The Finder is built ONCE here and reused across every hit.
+    let needle = shrike_derived::nfc(text).trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let finder = memmem::Finder::new(needle.as_bytes());
+    let mut scored: Vec<(i64, f64)> = Vec::new();
+    for (nid, source, reference, span) in rows {
+        if ctx.exclude.contains(nid) || !note_data.contains(*nid) {
+            continue; // excluded, or scope-dropped by collect_fuzzy
+        }
+        let Some(LexicalSpan { text: seg, .. }) = span else {
+            continue; // a survivor with no readable text can't be verified
+        };
+        let Some((lit_span, tf)) = literal_match(&finder, &needle, seg) else {
+            continue; // shares trigrams but not contiguous — stays fuzzy
+        };
+        if let Some(candidate) = note_data.map.get_mut(nid) {
+            candidate.substring = Some(SubstringInfo {
+                source: source.clone(),
+                r#ref: Some(reference.clone()),
+                matched: Some(LexicalMatch {
+                    text: seg.clone(),
+                    span: lit_span,
+                }),
+            });
+            scored.push((*nid, tf));
+        }
+    }
+    // Length-normalized literal-TF descending, note id ascending — the within-tier
+    // order (the exact tier floats above the rest in RRF regardless).
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    scored.into_iter().map(|(nid, _)| nid).collect()
+}
+
+/// The FIELD-text fallback for the `exact` tier when the derived store can't
+/// serve the query — a sub-trigram query (the FTS5 trigram tokenizer can't match
+/// `< MIN_TRIGRAM` chars), or no store at all. Anki's `"*text*"` wildcard is a
+/// fast pre-filter (scope pushed into the query); [`substring_info`] confirms +
+/// annotates each candidate against its FIELD content (emitting the field value +
+/// the literal's span within it). Candidates already in `note_data` (semantic
+/// hits) are annotated in place; the rest hydrate from the batch. Returns the
+/// exact ids in discovery order.
+fn field_fallback_exact(
+    ctx: SearchCtx,
+    text: &str,
+    note_data: &mut NoteData,
+) -> NativeResult<Vec<i64>> {
     let SearchCtx {
         core,
         prefetch,
@@ -829,96 +920,49 @@ fn collect_substring_candidates(
         args,
         scope,
     } = ctx;
-    // `lex` is this source's pre-fetched store result, read in one batched FTS5
-    // pass shared with every other query source (the store pushes the deck/tag
-    // scope id set into the MATCH query, so a scoped literal search reads no note
-    // text outside the store). `None` = the store couldn't serve this query (a
-    // sub-trigram query, or no store at all) → the wildcard `*text*` field-text
-    // fallback below is correct. A REAL derived-read failure (e.g. a SQLITE_BUSY
-    // that outlived the retry) already surfaced as an `Err` from the batched read
-    // — it is never silently turned into a fallback, because OCR/ASR text lives
-    // ONLY in the derived store and the field scan structurally cannot serve it.
-    let Some(rows) = lex else {
-        // Fallback: Anki's "*text*" wildcard as a fast pre-filter, scope in
-        // the query; substring_info confirms + annotates each candidate.
-        if text.trim().is_empty() {
-            return Ok(());
-        }
-        let mut parts = vec![format!("\"*{}*\"", escape_anki_text(text))];
-        if let Some(d) = &args.deck {
-            parts.push(format!("\"deck:{d}\""));
-        }
-        for tag in &args.tags {
-            parts.push(format!("\"tag:{tag}\""));
-        }
-        let candidates: Vec<i64> = core
-            .find_notes(&parts.join(" "))?
-            .into_iter()
-            .filter(|nid| !exclude.contains(nid))
-            .collect();
-        let mut hydrated = read_notes_batch(core, prefetch, note_data, &candidates);
-        let mut added = 0usize;
-        for nid in candidates.iter().copied() {
-            if note_data.contains(nid) {
-                continue;
-            }
-            let mut candidate = match hydrated.remove(&nid) {
-                Some(c) => c,
-                None => continue,
-            };
-            let Some(info) = substring_info(candidate.note.content.as_ref(), text) else {
-                continue; // Anki matched across markup/normalization; not literal
-            };
-            candidate.substring = Some(info);
-            note_data.insert(nid, candidate);
-            added += 1;
-            if added >= args.top_k {
-                break;
-            }
-        }
-        return Ok(());
-    };
-
-    let row_ids: Vec<i64> = rows
-        .iter()
-        .map(|(nid, ..)| *nid)
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut parts = vec![format!("\"*{}*\"", escape_anki_text(text))];
+    if let Some(d) = &args.deck {
+        parts.push(format!("\"deck:{d}\""));
+    }
+    for tag in &args.tags {
+        parts.push(format!("\"tag:{tag}\""));
+    }
+    let candidates: Vec<i64> = core
+        .find_notes(&parts.join(" "))?
+        .into_iter()
         .filter(|nid| !exclude.contains(nid))
         .collect();
-    let mut hydrated = read_notes_batch(core, prefetch, note_data, &row_ids);
-    let mut added = 0usize;
-    for (nid, source, reference, snippet) in rows {
-        if exclude.contains(&nid) || note_data.contains(nid) {
-            continue; // store may return a row per field
-        }
-        let mut candidate = match hydrated.remove(&nid) {
-            Some(c) => c,
-            None => continue,
-        };
-        if !id_in_scope(scope, nid) {
+    let mut hydrated = read_notes_batch(core, prefetch, note_data, &candidates);
+    let mut exact_ids: Vec<i64> = Vec::new();
+    for nid in candidates {
+        if exclude.contains(&nid) || !id_in_scope(scope, nid) {
             continue;
         }
-        // A derived-source row is its own authority: FTS5
-        // matched the stored text's literal trigrams, and the field-content
-        // re-check below would wrongly reject a literal living only in an
-        // OCR/ASR row. Provenance carries the source + ref so the result can
-        // say where it hit; field rows stay with the substring_info
-        // authority over rendered content (their `substring` is computed in
-        // the exact loop, so it stays `None` here).
-        if source != crate::FIELD_SOURCE {
-            candidate.substring = Some(SubstringInfo {
-                matched_fields: Vec::new(),
-                snippet,
-                source,
-                r#ref: Some(reference),
-            });
+        // Ensure the candidate is in note_data (a semantic hit already is); a
+        // missing hydration (unreadable id) drops it, exactly like the lexical path.
+        if !note_data.contains(nid) {
+            match hydrated.remove(&nid) {
+                Some(c) => note_data.insert(nid, c),
+                None => continue,
+            }
         }
-        note_data.insert(nid, candidate);
-        added += 1;
-        if added >= args.top_k {
+        let candidate = note_data
+            .map
+            .get_mut(&nid)
+            .expect("present or just inserted");
+        let Some(info) = substring_info(candidate.note.content.as_ref(), text) else {
+            continue; // Anki matched across markup/normalization; not a literal hit
+        };
+        candidate.substring = Some(info);
+        exact_ids.push(nid);
+        if exact_ids.len() >= args.top_k {
             break;
         }
     }
-    Ok(())
+    Ok(exact_ids)
 }
 
 /// A fuzzy ranking plus its per-note evidence (the `fuzzy` annotation each
@@ -940,7 +984,7 @@ impl FuzzyRanking {
 
 fn collect_fuzzy(
     ctx: SearchCtx,
-    hits: Vec<LexicalRow>,
+    hits: &[LexicalRow],
     note_data: &mut NoteData,
 ) -> NativeResult<FuzzyRanking> {
     let SearchCtx {
@@ -961,7 +1005,8 @@ fn collect_fuzzy(
         .collect();
     let mut hydrated = read_notes_batch(core, prefetch, note_data, &hit_ids);
     let mut out = FuzzyRanking::empty();
-    for (nid, source, r#ref, snippet) in hits {
+    for (nid, source, r#ref, span) in hits {
+        let nid = *nid;
         if exclude.contains(&nid) || out.evidence.contains_key(&nid) {
             continue;
         }
@@ -979,9 +1024,14 @@ fn collect_fuzzy(
         out.evidence.insert(
             nid,
             FuzzyMatch {
-                source,
-                r#ref,
-                snippet,
+                source: source.clone(),
+                r#ref: r#ref.clone(),
+                // The (segment text, byte span) of the overlap — absent only when
+                // the survivor's text could not be read.
+                matched: span.as_ref().map(|s| LexicalMatch {
+                    text: s.text.clone(),
+                    span: s.span,
+                }),
             },
         );
         if out.ranking.len() >= args.top_k {
@@ -1243,7 +1293,9 @@ fn fuse_cross_spaces(
 
 /// The substring + fuzzy FTS5 batch results [`search_lexical`] returns: one
 /// substring entry (`None` = unservable) and one fuzzy entry per QUERY source.
-type LexicalBatches = (Vec<Option<Vec<LexicalRow>>>, Vec<Vec<LexicalRow>>);
+/// One fuzzy row-list per query source, in source order — the sole lexical
+/// discovery output (the `exact` tier is recovered from it in assembly).
+type LexicalBatches = Vec<Vec<LexicalRow>>;
 
 /// The thread-domain DISCOVERY outputs — the index + derived reads, computed
 /// WITHOUT touching `core`, so they can run off the collection actor (on the
@@ -1251,8 +1303,11 @@ type LexicalBatches = (Vec<Option<Vec<LexicalRow>>>, Vec<Vec<LexicalRow>>);
 /// these to build the fused result from the prefetched notes.
 pub(crate) struct Discovery {
     pub(crate) sem_by_source: Vec<ModalityHits>,
-    pub(crate) substr_batch: Vec<Option<Vec<LexicalRow>>>,
     pub(crate) fuzzy_batch: Vec<Vec<LexicalRow>>,
+    /// Whether a derived store backed this discovery. `false` (no store) forces
+    /// the assembly's FIELD-text exact fallback for every query source, exactly
+    /// as a sub-trigram query does — the fuzzy read could not have run.
+    pub(crate) lexical_available: bool,
 }
 
 /// The deck/tag lexical scope id set: one INDEXED anki query (deck:/tag: — never
@@ -1319,46 +1374,26 @@ fn lexical_query_inputs<'a>(
     (query_texts, hidden)
 }
 
-/// The substring lexical read over a slice of query texts (already extracted from
-/// the query sources). One entry per query text, in order; a `None` means "the
-/// store couldn't serve this query" → the per-source fallback in the assembly.
-/// Empty input yields an empty result.
+/// The fuzzy lexical read over a slice of query texts (already extracted from the
+/// query sources) — the SOLE lexical discovery read, overlap-ranked. One entry per
+/// query text, in order; empty input yields an empty result. The `exact` tier is
+/// recovered from these rows in assembly (each hit's derived segment text is
+/// literal-verified), so there is no separate substring read.
+///
+/// The over-fetch is `top_k + |distinct exclude|`, so the assembly still has
+/// `top_k` survivors after the excluded ids drop out — and the exact tier, which
+/// recovers from these same rows, sees the excluded literals' neighbours too. A
+/// REAL derived-read failure surfaces as `Err` and must never become a silent
+/// field-text fallback — OCR/ASR text lives only in the derived store and the
+/// field scan can't serve it.
 ///
 /// [`crate::Kernel::search_fused`] dispatches one of these per query-batch CHUNK
-/// so the per-query substring reads spread across the compute pool (each chunk
-/// checks out its own derived read connection); the sync [`search_lexical`] path
-/// calls it once over the whole batch. The over-fetch is `top_k + |distinct
-/// exclude|`, so the post-filter still has `top_k` survivors after the excluded
-/// ids drop out. A REAL derived-read failure surfaces as `Err` and must never
-/// become a silent field-text fallback — OCR/ASR text lives only in the derived
-/// store and the field scan can't serve it.
-pub(crate) fn search_substring_chunk(
-    derived: &dyn DerivedStore,
-    query_texts: &[&str],
-    hidden: &[&str],
-    lex_scope: Option<&[i64]>,
-    args: &SearchArgs,
-) -> NativeResult<Vec<Option<Vec<LexicalRow>>>> {
-    if query_texts.is_empty() {
-        return Ok(Vec::new());
-    }
-    let exclude: HashSet<i64> = args.exclude.iter().copied().collect();
-    derived.search_substring_batch(
-        query_texts,
-        (args.top_k + exclude.len()) as i64,
-        lex_scope,
-        hidden,
-    )
-}
-
-/// The fuzzy lexical read over a slice of query texts — the overlap-ranked
-/// counterpart to [`search_substring_chunk`] (see it for the chunking rationale).
-/// One entry per query text, in order; empty input yields an empty result.
-///
-/// Chunking trades a little of `search_fuzzy_batch`'s cross-query trigram-posting
-/// sharing (a trigram shared across chunks is read once per chunk) for the
-/// per-query parallelism — for a bank of distinct queries the pruned trigrams are
-/// mostly query-specific, so the lost sharing is small.
+/// so the per-query reads spread across the compute pool (each chunk checks out
+/// its own derived read connection); the sync [`search_lexical`] path calls it
+/// once over the whole batch. Chunking trades a little of `search_fuzzy_batch`'s
+/// cross-query trigram-posting sharing for per-query parallelism — for a bank of
+/// distinct queries the pruned trigrams are mostly query-specific, so the lost
+/// sharing is small.
 pub(crate) fn search_fuzzy_chunk(
     derived: &dyn DerivedStore,
     query_texts: &[&str],
@@ -1369,13 +1404,19 @@ pub(crate) fn search_fuzzy_chunk(
     if query_texts.is_empty() {
         return Ok(Vec::new());
     }
-    derived.search_fuzzy_batch(query_texts, args.top_k as i64, lex_scope, hidden)
+    let exclude: HashSet<i64> = args.exclude.iter().copied().collect();
+    derived.search_fuzzy_batch(
+        query_texts,
+        (args.top_k + exclude.len()) as i64,
+        lex_scope,
+        hidden,
+    )
 }
 
-/// The lexical DISCOVERY reads (substring + fuzzy), sequentially over the whole
-/// query batch on the caller's thread — the sync composition the binding
-/// `search_notes` path uses. [`crate::Kernel::search_fused`] instead chunks each
-/// read across the compute pool (see [`search_substring_chunk`]).
+/// The lexical DISCOVERY read (fuzzy), sequentially over the whole query batch on
+/// the caller's thread — the sync composition the binding `search_notes` path
+/// uses. [`crate::Kernel::search_fused`] instead chunks the read across the
+/// compute pool (see [`search_fuzzy_chunk`]).
 pub(crate) fn search_lexical(
     derived: &dyn DerivedStore,
     sources: &[SearchSource],
@@ -1383,9 +1424,7 @@ pub(crate) fn search_lexical(
     args: &SearchArgs,
 ) -> NativeResult<LexicalBatches> {
     let (query_texts, hidden) = lexical_query_inputs(sources, args);
-    let sub = search_substring_chunk(derived, &query_texts, &hidden, lex_scope, args)?;
-    let fz = search_fuzzy_chunk(derived, &query_texts, &hidden, lex_scope, args)?;
-    Ok((sub, fz))
+    search_fuzzy_chunk(derived, &query_texts, &hidden, lex_scope, args)
 }
 
 /// Sequential fused search: discover (index + derived reads) then assemble, all
@@ -1424,9 +1463,9 @@ pub fn search_notes(
         Some(idx) => search_semantic(idx, vectors, args, lex_scope.as_deref())?,
         None => Vec::new(),
     };
-    let (substr_batch, fuzzy_batch) = match derived {
+    let fuzzy_batch = match derived {
         Some(d) => search_lexical(d, sources, lex_scope.as_deref(), args)?,
-        None => (Vec::new(), Vec::new()),
+        None => Vec::new(),
     };
     search_assemble(
         core,
@@ -1438,8 +1477,8 @@ pub fn search_notes(
         lex_scope.as_deref(),
         Discovery {
             sem_by_source,
-            substr_batch,
             fuzzy_batch,
+            lexical_available: derived.is_some(),
         },
     )
 }
@@ -1477,27 +1516,25 @@ pub(crate) fn search_assemble(
     let scope_set: Option<shrike_store::FxI64Set> = scope.map(|ids| ids.iter().copied().collect());
     let Discovery {
         sem_by_source,
-        substr_batch,
         fuzzy_batch,
+        lexical_available,
     } = discovery;
 
     // Collapse hydration: gather every candidate note id across ALL sources — the
-    // semantic keys (per modality) plus the lexical (substring + fuzzy) row ids —
-    // and hydrate them in ONE batched `note_dicts`, shared across the per-source
-    // assembly via `read_notes_batch`. This replaces a `note_dicts` per ranking per
-    // source (the house rule: discover the id set, then ONE batched read). Excluded
-    // ids are never looked up, so drop them; ids not known until the loop
-    // (tag members, secondary cross-space image hits) hydrate via
-    // `read_notes_batch`'s per-source fallback.
+    // semantic keys (per modality) plus the fuzzy row ids (the sole lexical read;
+    // the exact tier recovers from these too) — and hydrate them in ONE batched
+    // `note_dicts`, shared across the per-source assembly via `read_notes_batch`.
+    // This replaces a `note_dicts` per ranking per source (the house rule: discover
+    // the id set, then ONE batched read). Excluded ids are never looked up, so drop
+    // them; ids not known until the loop (tag members, secondary cross-space image
+    // hits, FIELD-fallback literals) hydrate via `read_notes_batch`'s per-source
+    // fallback.
     let prefetch: FxI64Map<Note> = {
         let mut cand_ids: HashSet<i64> = HashSet::new();
         for hits in &sem_by_source {
             for (keys, _) in hits.values() {
                 cand_ids.extend(keys.iter().copied());
             }
-        }
-        for rows in substr_batch.iter().flatten() {
-            cand_ids.extend(rows.iter().map(|(nid, ..)| *nid));
         }
         for rows in &fuzzy_batch {
             cand_ids.extend(rows.iter().map(|(nid, ..)| *nid));
@@ -1520,9 +1557,8 @@ pub(crate) fn search_assemble(
         }
     };
 
-    // Per-source consumers: advanced once per QUERY source, in source order, so
-    // each query source draws its own pre-fetched rows.
-    let mut substr_batch = substr_batch.into_iter();
+    // Per-source consumer: advanced once per QUERY source, in source order, so
+    // each query source draws its own pre-fetched fuzzy rows.
     let mut fuzzy_batch = fuzzy_batch.into_iter();
 
     let mut results: Vec<SearchResultGroup> = Vec::new();
@@ -1537,16 +1573,6 @@ pub(crate) fn search_assemble(
             args,
             scope: scope_set.as_ref(),
         };
-
-        // Literal-substring candidates (query sources only): a fast pre-filter;
-        // substring_info below is the authority that confirms + annotates. The
-        // FTS5 rows were read in the batched pass above; `flatten` maps an
-        // exhausted iterator (no store) or an unservable query to `None` → the
-        // per-source field-text fallback.
-        if source.is_query {
-            let lex = substr_batch.next().flatten();
-            collect_substring_candidates(ctx, lex, &source.text, &mut note_data)?;
-        }
 
         // Per-modality semantic rankings. Text is thresholded; image is not
         // (the gap makes the text-calibrated cosine threshold meaningless —
@@ -1613,29 +1639,25 @@ pub(crate) fn search_assemble(
             }
         }
 
-        // Fuzzy ranking + evidence (query sources only), before the exact loop
-        // so a fuzzy candidate that also literally matches joins the exact tier.
-        // The fuzzy rows came from the batched pass; an exhausted iterator (no
-        // store) yields no fuzzy signal.
-        let mut fuzzy = if source.is_query {
-            collect_fuzzy(ctx, fuzzy_batch.next().unwrap_or_default(), &mut note_data)?
-        } else {
-            FuzzyRanking::empty()
-        };
-
-        // Exact ranking = every candidate whose content literally contains the
-        // query (annotation ⟺ floated), in note_data insertion order.
+        // Lexical (query sources only): fuzzy is the sole derived read, and the
+        // exact tier is recovered FROM it — a literal match shares every query
+        // trigram, so it sits in fuzzy's top bucket with its segment text already
+        // read, and a `contains` check on that text confirms + annotates it. When
+        // the derived store can't serve the query — a sub-trigram query (the FTS5
+        // trigram tokenizer can't match `< MIN_TRIGRAM` chars), or no store at all
+        // — the FIELD-text fallback recovers field literals instead. The fuzzy
+        // iterator is advanced once per query source regardless (it carries an
+        // empty entry for an unservable query), keeping it in source-order sync.
+        let mut fuzzy = FuzzyRanking::empty();
         let mut exact_ids: Vec<i64> = Vec::new();
         if source.is_query {
-            for nid in &note_data.order {
-                let candidate = note_data.map.get_mut(nid).expect("ordered key present");
-                if candidate.substring.is_none() {
-                    candidate.substring =
-                        substring_info(candidate.note.content.as_ref(), &source.text);
-                }
-                if candidate.substring.is_some() {
-                    exact_ids.push(*nid);
-                }
+            let fuzzy_rows = fuzzy_batch.next().unwrap_or_default();
+            let servable = lexical_available && source.text.chars().count() >= MIN_TRIGRAM;
+            if servable {
+                fuzzy = collect_fuzzy(ctx, &fuzzy_rows, &mut note_data)?;
+                exact_ids = recover_exact(ctx, &fuzzy_rows, &source.text, &mut note_data);
+            } else {
+                exact_ids = field_fallback_exact(ctx, &source.text, &mut note_data)?;
             }
         }
 
@@ -1836,27 +1858,20 @@ mod search_tests {
         let sources: Vec<SearchSource> = bank.iter().map(|t| query(t)).collect();
         let a = args(5);
         let scope: Option<&[i64]> = None;
-        let (whole_sub, whole_fz) = search_lexical(&e, &sources, scope, &a).unwrap();
+        let whole_fz = search_lexical(&e, &sources, scope, &a).unwrap();
 
         for width in [1usize, 2, 3, 4, 8, 16] {
             // Mirror search_fused's chunking exactly: chunk_size = div_ceil(width),
             // contiguous ranges, in-order concat.
             let (qt, hidden) = lexical_query_inputs(&sources, &a);
             let chunk_size = qt.len().div_ceil(width.max(1)).max(1);
-            let (mut sub, mut fz) = (Vec::new(), Vec::new());
+            let mut fz = Vec::new();
             let mut start = 0;
             while start < qt.len() {
                 let end = (start + chunk_size).min(qt.len());
-                sub.extend(
-                    search_substring_chunk(&e, &qt[start..end], &hidden, scope, &a).unwrap(),
-                );
                 fz.extend(search_fuzzy_chunk(&e, &qt[start..end], &hidden, scope, &a).unwrap());
                 start = end;
             }
-            assert_eq!(
-                sub, whole_sub,
-                "substring chunked@width={width} != whole batch"
-            );
             assert_eq!(fz, whole_fz, "fuzzy chunked@width={width} != whole batch");
         }
     }
@@ -1991,10 +2006,20 @@ mod search_tests {
         assert_eq!(groups.len(), 2);
         let exact = &groups[0].matches;
         assert_eq!(exact[0].note.id, mito);
-        assert!(
-            exact[0].substring.is_some(),
-            "literal hit carries the annotation"
-        );
+        let sub = exact[0]
+            .substring
+            .as_ref()
+            .expect("literal hit carries the annotation");
+        // The exact tier is recovered from the fuzzy hit's derived segment, so it
+        // carries the derived source/ref + the literal's byte span over the SAME
+        // emitted segment text.
+        assert_eq!(sub.source, crate::FIELD_SOURCE);
+        let lm = sub
+            .matched
+            .as_ref()
+            .expect("exact carries a (text, span) match");
+        assert!(lm.text.contains("mitochondria"));
+        assert_eq!(&lm.text[lm.span.0..lm.span.1], "mitochondria");
         assert!(exact[0].score.is_none(), "no semantic ranking ran");
         assert!(exact[0].provenance.iter().any(|p| p.signal == "exact"));
 
@@ -2003,13 +2028,20 @@ mod search_tests {
             fuzzy[0].note.id, mito,
             "typo recovered via the fuzzy signal"
         );
-        assert!(fuzzy[0].fuzzy.is_some(), "fuzzy evidence carried");
+        let fz = fuzzy[0].fuzzy.as_ref().expect("fuzzy evidence carried");
+        let flm = fz
+            .matched
+            .as_ref()
+            .expect("fuzzy carries a (text, span) match");
+        // The fuzzy span covers the matched trigrams within the derived segment.
+        assert!(flm.text.contains("mitochondria"));
+        assert!(flm.span.0 < flm.span.1 && flm.span.1 <= flm.text.len());
         assert!(fuzzy[0].provenance.iter().any(|p| p.signal == "fuzzy"));
         core.close().unwrap();
     }
 
     /// A `DerivedStore` that delegates to a real engine but forces the two
-    /// lexical reads (`search_substring`/`search_fuzzy`) to return `Err` — the
+    /// lexical read (`search_fuzzy`) to return `Err` — the
     /// shape of a derived-read failure that survives the busy-retry. All
     /// other methods delegate so build/ingest still work.
     struct FlakyDerived {
@@ -2094,18 +2126,6 @@ mod search_tests {
         ) -> NativeResult<Vec<shrike_store::MatchRow>> {
             self.inner
                 .match_rows(expr, limit, with_text, scope, exclude)
-        }
-        fn search_substring(
-            &self,
-            q: &str,
-            limit: i64,
-            scope: Option<&[i64]>,
-            exclude: &[&str],
-        ) -> NativeResult<Option<Vec<shrike_store::LexicalRow>>> {
-            if self.fail_lexical {
-                return Err(NativeError::unavailable("derived busy (simulated)"));
-            }
-            self.inner.search_substring(q, limit, scope, exclude)
         }
         fn search_fuzzy(
             &self,
@@ -2337,19 +2357,19 @@ mod search_tests {
     }
 
     #[test]
-    fn substring_info_authority_and_snippet_window() {
-        let content: NoteContent = BTreeMap::from([(
-            "Front".to_owned(),
-            "x".repeat(50) + "NEEDLE" + &"y".repeat(50),
-        )]);
+    fn substring_info_authority_and_byte_span() {
+        let value = "x".repeat(50) + "NEEDLE" + &"y".repeat(50);
+        let content: NoteContent = BTreeMap::from([("Front".to_owned(), value.clone())]);
         let info = substring_info(Some(&content), "needle").expect("literal hit");
-        assert_eq!(info.matched_fields, vec!["Front".to_owned()]);
-        // A field hit carries the schema defaults (source "field", no ref).
+        // A field hit names its field as the ref (source "field").
         assert_eq!(info.source, crate::FIELD_SOURCE);
-        assert!(info.r#ref.is_none());
-        let snippet = info.snippet.as_deref().unwrap();
-        assert!(snippet.starts_with('…') && snippet.ends_with('…'));
-        assert!(snippet.contains("NEEDLE"));
+        assert_eq!(info.r#ref.as_deref(), Some("Front"));
+        // The match emits the whole field value + the literal's byte span within it
+        // (case-insensitive: the original-case "NEEDLE" is the matched bytes).
+        let m = info.matched.expect("a field literal carries a match");
+        assert_eq!(m.text, value);
+        assert_eq!(&m.text[m.span.0..m.span.1], "NEEDLE");
+        assert_eq!(m.span, (50, 56));
         assert!(substring_info(Some(&content), "absent").is_none());
         // Absent content (a meta-mode note dict carries no fields) is no match.
         assert!(substring_info(None, "x").is_none());
@@ -2367,8 +2387,9 @@ mod search_tests {
         assert_eq!(
             substring_info(Some(&nfc_field), nfd_needle)
                 .expect("NFD needle confirms NFC field")
-                .matched_fields,
-            vec!["Front".to_owned()]
+                .r#ref
+                .as_deref(),
+            Some("Front")
         );
         // (b) NFD field (NormalizeNoteText off), NFC query — the field is
         // normalized too, so it still confirms (would regress if only the needle were).
@@ -2377,8 +2398,9 @@ mod search_tests {
         assert_eq!(
             substring_info(Some(&nfd_field), nfc_needle)
                 .expect("NFC needle confirms NFD field")
-                .matched_fields,
-            vec!["Front".to_owned()]
+                .r#ref
+                .as_deref(),
+            Some("Front")
         );
     }
 

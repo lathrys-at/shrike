@@ -180,21 +180,34 @@ class Note(BaseModel):
     content: dict[str, str] | None = None
 
 
+class LexicalMatch(BaseModel):
+    """The matched text segment of a lexical hit plus the byte span within it.
+
+    ``text`` is the segment the lexical signal matched — the NFC-normalized *derived* text for a
+    fuzzy/exact hit, or the field value for the field-text fallback. ``span`` is the ``(first,
+    last)`` half-open UTF-8 byte range of the match within ``text`` (the literal phrase for an
+    exact hit, the first..last matching trigram for fuzzy). The client annotates within ``text``:
+    the span's byte offsets are meaningful only against it, never the raw note fields (whose byte
+    layout differs).
+    """
+
+    text: str
+    span: tuple[int, int]
+
+
 class SubstringInfo(BaseModel):
     """Evidence that the query text occurs literally in a note.
 
-    ``matched_fields``/``snippet`` are the field-text hit (the only case today). ``source`` names
-    which *derived* text the literal match was found in — ``field`` today (``ocr``/``asr`` are a
-    future seam; never VLM image-describe, which is embedding-only). For a non-field source ``ref``
-    pins the single artifact that matched (a media filename); for the ``field`` source it stays
-    ``None`` and ``matched_fields`` enumerates the fields instead. The ``source``/``ref`` seam lets
-    a result say *where* an image/audio card's text matched.
+    ``source`` names which *derived* text the literal match was found in — ``field`` today
+    (``ocr``/``asr`` are a future seam; never VLM image-describe, which is embedding-only). ``ref``
+    pins the field name (for ``field``) or the single artifact a non-field source matched (a media
+    filename). ``match`` carries the matched segment text + the literal's byte span within it (see
+    :class:`LexicalMatch`) — so a result can say *where* an image/audio card's text matched.
     """
 
-    matched_fields: list[str] = []
-    snippet: str | None = None
     source: str = "field"
     ref: str | None = None
+    match: LexicalMatch | None = None
 
 
 class FuzzyMatch(BaseModel):
@@ -203,13 +216,14 @@ class FuzzyMatch(BaseModel):
     A trigram/typo-tolerant hit from the derived-text store (the ``fuzzy`` retrieval signal), for
     near-misses an exact substring search would miss (``protien`` → ``protein``). ``source`` is
     which derived text matched (``field`` today; ``ocr``/``asr`` are a future seam), ``ref`` the
-    field name or media filename it hit, and ``snippet`` a window around the match — so an LLM/MCP
-    client can see what an image/audio card actually is from the text that matched it.
+    field name or media filename it hit, and ``match`` the matched segment text + the overlap's
+    byte span (see :class:`LexicalMatch`) — so an LLM/MCP client can see what an image/audio card
+    actually is from the text that matched it.
     """
 
     source: str
     ref: str
-    snippet: str | None = None
+    match: LexicalMatch | None = None
 
 
 class SignalContribution(BaseModel):

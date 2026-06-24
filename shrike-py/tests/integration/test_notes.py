@@ -337,7 +337,7 @@ class TestListNotesAdvanced:
         matches = result["results"][0]["matches"]
         assert len(matches) == 1
         assert matches[0]["score"] is None
-        assert matches[0]["substring"]["matched_fields"] == ["Front"]
+        assert matches[0]["substring"]["ref"] == "Front"
         assert "exact text matches" in (result.get("message") or "")
 
     def test_limit_over_max_rejected(self, mcp):

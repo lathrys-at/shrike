@@ -130,8 +130,9 @@ reader that `search_notes` queries, in-core, as part of `kernel.search_fused`. T
 harness-side facade (`harness/derived.py`, `DerivedTextStore`) is no longer on the
 search path — it coordinates the drift watermark (claim/settle around the kernel's
 rebuild) and backs the `/status` read surface. The store's first artifact is an
-**FTS5 trigram index** over note text, which backs the substring (`exact`)
-candidates and the `fuzzy` signal of `search_notes`.
+**FTS5 trigram index** over note text, which backs the `fuzzy` lexical signal of
+`search_notes` — the sole lexical read, from which the kernel recovers the `exact`
+tier by literal-verifying the fuzzy hits.
 
 It lives in a sidecar rather than in `collection.anki2` because Anki's sync,
 "Check Database", media check, and version migrations own that schema — a foreign
@@ -213,18 +214,27 @@ Two signals deserve note:
   self-matches excluded; stored in `index.meta.json` under `activation`). So an
   off-topic query no longer injects weak image cards, and text-only collections
   are unaffected (no image sub-index → nothing to calibrate).
-- **The `fuzzy` signal** is the kernel derived engine's trigram/typo ranking
-  (`DerivedEngine::search_fuzzy`, reached in-core via `kernel.search_fused`),
-  weighted below the rest (`SEARCH_WEIGHTS["fuzzy"]=0.5` — a near-miss is weaker
-  evidence), surfacing near-misses an exact search misses (`protien` →
-  `protein`).
+- **The `fuzzy` signal is the SOLE lexical read** — the kernel derived engine's
+  trigram-overlap ranking (`DerivedEngine::search_fuzzy_batch`, reached in-core via
+  `kernel.search_fused`), weighted below the rest (`SEARCH_WEIGHTS["fuzzy"]=0.5` — a
+  near-miss is weaker evidence), surfacing near-misses an exact search misses
+  (`protien` → `protein`). Each hit carries the matched derived segment text plus the
+  `[first, last)` UTF-8 byte span of the overlap (`LexicalSpan`), read once for the
+  survivors by a plain rowid lookup, never a re-`MATCH`.
 
 Both lexical hits carry source-aware provenance (`SubstringInfo`/`FuzzyMatch`
-`.source`/`.ref`), today always `source="field"` but seamed for `ocr`/`asr`. The
-substring (`exact`) candidates come from the same engine
-(`DerivedEngine::search_substring`, a fast FTS5 pre-filter), falling back to
-`find_notes` when the store is unavailable or the query is sub-trigram; either way
-`substring_info` stays the authority that confirms and annotates each candidate.
+`.source`/`.ref`), today always `source="field"` but seamed for `ocr`/`asr`, plus a
+`.match` (the segment text + byte span). **The `exact` tier is RECOVERED from the
+fuzzy hits, not read separately:** a literal match contains every query trigram, so
+it sits in fuzzy's top overlap bucket with its segment text already in hand — the
+kernel's `recover_exact` literal-verifies each hit's `LexicalSpan.text` with a
+`memchr::memmem` finder (built once per query, reused), ranks the confirmed hits by
+length-normalized literal-TF, and floats them into the `exact` priority tier. The
+old separate substring read (`DerivedEngine::search_substring`, an FTS5 bm25
+pre-filter) is gone. When the derived store can't serve the query — a sub-trigram
+query (`< MIN_TRIGRAM` chars) or no store — `field_fallback_exact` recovers field
+literals via Anki's `find_notes("*text*")` wildcard, with `substring_info` confirming
+and annotating each candidate against its rendered field content.
 
 ## Which ops touch the index
 

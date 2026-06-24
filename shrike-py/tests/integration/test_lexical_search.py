@@ -58,7 +58,7 @@ class TestDerivedLexicalSearch:
         assert "fuzzy" in [p["signal"] for p in hit["provenance"]]
         assert hit["fuzzy"]["source"] == "field"
         assert hit["fuzzy"]["ref"] == "Front"
-        assert "Mitochondria" in hit["fuzzy"]["snippet"]
+        assert "Mitochondria" in hit["fuzzy"]["match"]["text"]
 
     def test_substring_via_store(self, mcp, server):
         self._derived(server)
@@ -79,7 +79,7 @@ class TestDerivedLexicalSearch:
         matches = search_until(mcp, ["transport"], lambda ms: any(m["id"] == nid for m in ms))
         hit = next((m for m in matches if m["id"] == nid), None)
         assert hit is not None
-        assert hit["substring"]["matched_fields"] == ["Front"]
+        assert hit["substring"]["ref"] == "Front"
         assert hit["substring"]["source"] == "field"
         assert "exact" in [p["signal"] for p in hit["provenance"]]
 

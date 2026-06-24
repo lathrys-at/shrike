@@ -5280,6 +5280,7 @@ dependencies = [
  "blake2",
  "crossbeam-deque",
  "futures",
+ "memchr",
  "proptest",
  "serde",
  "serde_json",

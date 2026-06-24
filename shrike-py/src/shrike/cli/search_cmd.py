@@ -16,7 +16,7 @@ from shrike.cli import output
 from shrike.cli.config import resolve_collection
 from shrike.cli.groups import SearchGroup
 from shrike.cli.output import NOTE_ID, output_options, parse_comma_separated
-from shrike.schemas import CoverageCell, CoverageMatrix, CoverageRow, SearchMatch
+from shrike.schemas import CoverageCell, CoverageMatrix, CoverageRow, LexicalMatch, SearchMatch
 
 # The cross-modal coverage cells, styled for the matrix: native is the
 # strong (green) form, via-derived-text the weaker (yellow) reachability,
@@ -45,11 +45,29 @@ def search() -> None:
     """
 
 
+def _lexical_snippet(match: LexicalMatch, ctx: int = 30) -> str:
+    """A ``…``-windowed snippet around the matched span, for the brief search line.
+
+    The server emits the matched segment text + a ``(first, last)`` UTF-8 BYTE span; window the
+    raw bytes around it (``ctx`` bytes either side) and decode back, dropping any partial char a
+    byte cut leaves at the edges. Replaces the server-built snippet the unified lexical path no
+    longer emits.
+    """
+    raw = match.text.encode("utf-8")
+    first, last = match.span
+    start = max(0, first - ctx)
+    end = min(len(raw), last + ctx)
+    frag = raw[start:end].decode("utf-8", "ignore")
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(raw) else ""
+    return f"{prefix}{frag}{suffix}"
+
+
 def _search_match_badges(m: SearchMatch) -> str:
     """The ` · `-joined evidence badges for one search match (pretty output).
 
     Provenance surfaces only the signals the other badges don't already imply — `text` is
-    covered by the score, `exact` by the `match:` field list — so the new, otherwise-invisible facet
+    covered by the score, `exact` by the `match:` badge — so the new, otherwise-invisible facet
     (a non-text modality like `image`, or a future lexical signal `fuzzy`/`tag`) shows on its own.
     """
     bits = []
@@ -59,7 +77,10 @@ def _search_match_badges(m: SearchMatch) -> str:
     if m.score is not None:
         bits.append(f"{m.score:.2f}")
     if m.substring is not None:
-        bits.append("match: " + ", ".join(m.substring.matched_fields))
+        # The exact tier names where it hit: the field name / media filename (ref),
+        # falling back to the source bucket.
+        where = m.substring.ref or m.substring.source
+        bits.append(f"match: {where}")
     return " · ".join(bits)
 
 
@@ -148,10 +169,11 @@ def search_run(
                     f"  {tag}[green]#{m.id}[/green] ([cyan]{output.esc(m.deck)}[/cyan])"
                 )
                 # The window a literal (substring) or near-miss (fuzzy) hit matched, so a
-                # text/audio card's match is legible at a glance.
-                snippet = (m.substring and m.substring.snippet) or (m.fuzzy and m.fuzzy.snippet)
-                if snippet:
-                    output.console.print(f"      [dim]{output.esc(snippet)}[/dim]")
+                # text/audio card's match is legible at a glance. The server emits the matched
+                # segment + a byte span; the brief view windows it client-side.
+                match = (m.substring and m.substring.match) or (m.fuzzy and m.fuzzy.match)
+                if match:
+                    output.console.print(f"      [dim]{output.esc(_lexical_snippet(match))}[/dim]")
             else:
                 output.note_detail(m, subtitle=f"[{badges}]" if badges else None)
 

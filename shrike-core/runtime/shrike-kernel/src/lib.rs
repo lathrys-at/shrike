@@ -3033,27 +3033,6 @@ impl Kernel {
                         .step_by(chunk_size)
                         .map(|start| (start, (start + chunk_size).min(query_texts.len())))
                         .collect();
-                    let substr_futs: Vec<_> = chunk_ranges
-                        .iter()
-                        .map(|&(s, e)| {
-                            let chunk = query_texts[s..e].to_vec();
-                            let derived = Arc::clone(&derived);
-                            let hidden = Arc::clone(&hidden);
-                            let lex_scope = Arc::clone(&lex_scope);
-                            let args = Arc::clone(&lex_args);
-                            crate::runtime::dispatch_compute(move || {
-                                let qt: Vec<&str> = chunk.iter().map(String::as_str).collect();
-                                let hid: Vec<&str> = hidden.iter().map(String::as_str).collect();
-                                actions::search_substring_chunk(
-                                    &*derived,
-                                    &qt,
-                                    &hid,
-                                    lex_scope.as_deref(),
-                                    &args,
-                                )
-                            })
-                        })
-                        .collect();
                     let fuzzy_futs: Vec<_> = chunk_ranges
                         .iter()
                         .map(|&(s, e)| {
@@ -3079,18 +3058,15 @@ impl Kernel {
                     for fut in sem_futs {
                         sem_by_source.extend(fut.await?);
                     }
-                    let mut substr_batch = Vec::with_capacity(query_texts.len());
-                    for fut in substr_futs {
-                        substr_batch.extend(fut.await?);
-                    }
                     let mut fuzzy_batch = Vec::with_capacity(query_texts.len());
                     for fut in fuzzy_futs {
                         fuzzy_batch.extend(fut.await?);
                     }
                     Ok::<_, NativeError>(actions::Discovery {
                         sem_by_source,
-                        substr_batch,
                         fuzzy_batch,
+                        // The kernel always backs search_fused with a derived store.
+                        lexical_available: true,
                     })
                 }
             };
@@ -3164,7 +3140,7 @@ impl Kernel {
                 let d_sources = sources.clone();
                 move |lex_scope: Arc<Option<Vec<i64>>>| {
                     crate::runtime::dispatch_compute(move || -> NativeResult<actions::Discovery> {
-                        let (substr_batch, fuzzy_batch) = actions::search_lexical(
+                        let fuzzy_batch = actions::search_lexical(
                             &*derived,
                             &d_sources,
                             lex_scope.as_deref(),
@@ -3172,8 +3148,9 @@ impl Kernel {
                         )?;
                         Ok(actions::Discovery {
                             sem_by_source: Vec::new(),
-                            substr_batch,
                             fuzzy_batch,
+                            // The kernel always backs the lexical path with a derived store.
+                            lexical_available: true,
                         })
                     })
                 }
@@ -4396,8 +4373,7 @@ mod no_cpython_smoke {
             // Lexical row exists too (derived store ingested on upsert).
             assert!(!kernel
                 .derived
-                .search_substring("mitochondria", 5, None, &[])
-                .unwrap()
+                .search_fuzzy("mitochondria", 5, None, &[])
                 .unwrap()
                 .is_empty());
 
@@ -4418,8 +4394,7 @@ mod no_cpython_smoke {
             assert!(
                 kernel
                     .derived
-                    .search_substring("mitochondria", 5, None, &[])
-                    .unwrap()
+                    .search_fuzzy("mitochondria", 5, None, &[])
                     .unwrap()
                     .is_empty(),
                 "derived row dropped in the maintained op"
@@ -6764,8 +6739,7 @@ mod no_cpython_smoke {
             assert!(
                 !kernel
                     .derived
-                    .search_substring("oxaloacetate", 5, None, &[])
-                    .unwrap()
+                    .search_fuzzy("oxaloacetate", 5, None, &[])
                     .unwrap()
                     .is_empty(),
                 "B's ingest landed"
@@ -6782,8 +6756,7 @@ mod no_cpython_smoke {
             assert!(
                 kernel
                     .derived
-                    .search_substring("oxaloacetate", 5, None, &[])
-                    .unwrap()
+                    .search_fuzzy("oxaloacetate", 5, None, &[])
                     .unwrap()
                     .is_empty(),
                 "a stale-snapshot commit erases newer rows — the #471 hazard"
@@ -6796,8 +6769,7 @@ mod no_cpython_smoke {
             assert!(
                 !kernel
                     .derived
-                    .search_substring("oxaloacetate", 5, None, &[])
-                    .unwrap()
+                    .search_fuzzy("oxaloacetate", 5, None, &[])
                     .unwrap()
                     .is_empty(),
                 "the rebuild restored B's rows"
@@ -6867,8 +6839,7 @@ mod no_cpython_smoke {
             assert!(
                 !kernel
                     .derived
-                    .search_substring("oxaloacetate", 5, None, &[])
-                    .unwrap()
+                    .search_fuzzy("oxaloacetate", 5, None, &[])
                     .unwrap()
                     .is_empty(),
                 "a note upserted concurrently with rebuild_derived survives — serialized on \
@@ -7109,8 +7080,7 @@ mod no_cpython_smoke {
             assert!(
                 kernel
                     .derived
-                    .search_substring("bravo", 5, None, &[])
-                    .unwrap()
+                    .search_fuzzy("bravo", 5, None, &[])
                     .unwrap()
                     .is_empty(),
                 "PRECONDITION: bravo not yet ingested into FTS5 (op B parked)"
@@ -7131,8 +7101,7 @@ mod no_cpython_smoke {
             assert!(
                 !kernel
                     .derived
-                    .search_substring("bravo", 5, None, &[])
-                    .unwrap()
+                    .search_fuzzy("bravo", 5, None, &[])
                     .unwrap()
                     .is_empty(),
                 "bravo is searchable after op B's ingest + the rebuild heal"
@@ -7210,7 +7179,7 @@ mod no_cpython_smoke {
     /// The streaming rebuild pulls field-row chunks through the collection actor
     /// (the single drive_collection thread); a concurrent `search` runs `search_notes`
     /// through that SAME actor and takes the derived connection lock
-    /// (search_substring/search_fuzzy). If the rebuild held that lock across its
+    /// (search_fuzzy). If the rebuild held that lock across its
     /// chunk pulls, the search would wedge the actor on the lock while the
     /// rebuild waited on the actor for its next chunk — a circular wait that
     /// hangs the whole kernel. The rebuild drops the lock around every pull, so

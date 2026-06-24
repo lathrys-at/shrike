@@ -113,7 +113,7 @@ class TestDerivedNamespaceParity:
                 # plane — ready on return, no status poll + sleep.
                 assert harness.is_ready
                 assert harness.derived.status()["state"] == "ready"
-                hits = harness.derived.search_substring("krebs", 10)
+                hits = harness.derived.search_fuzzy("krebs", 10)
                 assert hits, "host store must see the rows on the shared shrike.db"
             finally:
                 await harness.close()

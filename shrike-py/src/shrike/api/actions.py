@@ -855,9 +855,9 @@ def build_actions(ctx: ActionContext) -> list[ActionDef]:
         together: by semantic similarity (the vector index) and by exact,
         case-insensitive substring over note fields. Every match carries a
         `score` when it was semantically ranked and a `substring` annotation
-        (matched fields + a snippet) when the query text occurs literally — both
-        when both apply. Note IDs in `ids` are semantic anchors only (no literal
-        text to match).
+        (the matched text segment + the literal's byte span within it) when the
+        query text occurs literally — both when both apply. Note IDs in `ids` are
+        semantic anchors only (no literal text to match).
 
         Exact substring matches are returned even when the embedding index is
         unavailable (the response carries a `message` noting semantic ranking was

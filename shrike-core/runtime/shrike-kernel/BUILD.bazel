@@ -27,6 +27,7 @@ rust_library(
         "@crates//:blake2",
         "@crates//:crossbeam-deque",
         "@crates//:futures",
+        "@crates//:memchr",
         "@crates//:serde",
         "@crates//:serde_json",
         "@crates//:tokio",

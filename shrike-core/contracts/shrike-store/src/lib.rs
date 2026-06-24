@@ -93,8 +93,26 @@ pub type FxI64Map<V> =
 /// set type (the deck/tag scope membership set).
 pub type FxI64Set = std::collections::HashSet<i64, std::hash::BuildHasherDefault<FxI64Hasher>>;
 
-/// One lexical (substring/fuzzy) hit: `(note_id, source, ref, snippet?)`.
-pub type LexicalRow = (i64, String, String, Option<String>);
+/// The matched derived-text segment of a lexical hit plus the UTF-8 byte span
+/// within it. `span` is the half-open `[first, last)` byte range over `text`,
+/// which is the NFC-normalized DERIVED segment the signal matched — its byte
+/// layout differs from the rendered note fields, so the span is meaningful ONLY
+/// against this `text`, never `note.content`. For a fuzzy hit the span covers
+/// the first..last matching trigram; the kernel recomputes it as the literal
+/// phrase range when it recovers the exact tier from the same `text`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LexicalSpan {
+    /// The NFC derived segment text the span indexes (emitted to the client so
+    /// it can annotate within it).
+    pub text: String,
+    /// Half-open `[first, last)` UTF-8 byte range of the match within `text`.
+    pub span: (usize, usize),
+}
+
+/// One lexical (fuzzy) hit: `(note_id, source, ref, match?)`. The match carries
+/// the segment text + overlap byte span ([`LexicalSpan`]); it is absent only
+/// when the survivor's text could not be read.
+pub type LexicalRow = (i64, String, String, Option<LexicalSpan>);
 
 /// The per-modality vector store the kernel's index orchestration maintains
 /// and the search paths rank against (the per-modality sub-index layout is the
@@ -410,21 +428,9 @@ pub trait DerivedStore: Send + Sync {
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
     ) -> NativeResult<Vec<MatchRow>>;
-    /// Fast substring candidates; `None` = the query can't be served (too
-    /// short for the tokenizer) and the caller falls back. `exclude_sources`
-    /// hides VectorOnly sources — see [`Self::match_rows`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the search query fails.
-    fn search_substring(
-        &self,
-        query: &str,
-        limit: i64,
-        scope: Option<&[i64]>,
-        exclude_sources: &[&str],
-    ) -> NativeResult<Option<Vec<LexicalRow>>>;
-    /// Trigram/typo ranking — the `fuzzy` RRF signal. `exclude_sources`
+    /// Trigram/typo overlap ranking — the SOLE lexical read (the `fuzzy` RRF
+    /// signal, and the basis the kernel recovers the `exact` tier from by
+    /// literal-verifying each hit's [`LexicalSpan::text`]). `exclude_sources`
     /// hides VectorOnly sources — see [`Self::match_rows`].
     ///
     /// # Errors
@@ -437,32 +443,12 @@ pub trait DerivedStore: Send + Sync {
         scope: Option<&[i64]>,
         exclude_sources: &[&str],
     ) -> NativeResult<Vec<LexicalRow>>;
-    /// [`Self::search_substring`] over a batch of queries, one result per query
-    /// in `queries` order. A fused search runs the lexical signals once per query
+    /// [`Self::search_fuzzy`] over a batch of queries, one result per query in
+    /// `queries` order. A fused search runs the lexical signal once per query
     /// string; batching lets an impl pay the fixed per-call cost (connection
     /// lock, scope staging, statement compile) ONCE for the whole set instead of
     /// once per query. The default loops the singular method (correct, unbatched);
     /// the local engine overrides it with a single-lock, single-prepare pass.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any query's search fails (the batch is abandoned at
-    /// the first failure, exactly as the singular reads surface one).
-    fn search_substring_batch(
-        &self,
-        queries: &[&str],
-        limit: i64,
-        scope: Option<&[i64]>,
-        exclude_sources: &[&str],
-    ) -> NativeResult<Vec<Option<Vec<LexicalRow>>>> {
-        queries
-            .iter()
-            .map(|q| self.search_substring(q, limit, scope, exclude_sources))
-            .collect()
-    }
-    /// [`Self::search_fuzzy`] over a batch of queries, one result per query in
-    /// `queries` order — the fuzzy counterpart to
-    /// [`Self::search_substring_batch`].
     ///
     /// # Errors
     ///
@@ -665,10 +651,9 @@ mod tests {
     #[derive(Default)]
     struct MockStore {
         built: Mutex<Vec<BuildCall>>,
-        // queries the singular search methods saw, in call order
-        substr_seen: Mutex<Vec<String>>,
+        // queries the singular search method saw, in call order
         fuzzy_seen: Mutex<Vec<String>>,
-        // a query string that makes the singular methods return Err
+        // a query string that makes the singular method return Err
         fail_query: Option<String>,
     }
 
@@ -683,25 +668,6 @@ mod tests {
                 .unwrap()
                 .push((rows.to_vec(), live_notes.to_vec(), col_mod));
             Ok(())
-        }
-        fn search_substring(
-            &self,
-            query: &str,
-            _limit: i64,
-            _scope: Option<&[i64]>,
-            _exclude: &[&str],
-        ) -> NativeResult<Option<Vec<LexicalRow>>> {
-            self.substr_seen.lock().unwrap().push(query.to_owned());
-            if self.fail_query.as_deref() == Some(query) {
-                return Err(shrike_error::NativeError::internal("boom"));
-            }
-            // Encode the query into the row so order is verifiable.
-            Ok(Some(vec![(
-                query.len() as i64,
-                query.to_owned(),
-                String::new(),
-                None,
-            )]))
         }
         fn search_fuzzy(
             &self,
@@ -809,23 +775,6 @@ mod tests {
     }
 
     #[test]
-    fn search_substring_batch_default_is_one_result_per_query_in_order() {
-        let store = MockStore::default();
-        let queries = ["alpha", "be", "gamma"];
-        let out = store
-            .search_substring_batch(&queries, 10, None, &[])
-            .unwrap();
-        assert_eq!(out.len(), 3);
-        // Each result carries its query back (encoded by the mock), in order.
-        let echoed: Vec<&str> = out
-            .iter()
-            .map(|r| r.as_ref().unwrap()[0].1.as_str())
-            .collect();
-        assert_eq!(echoed, queries);
-        assert_eq!(*store.substr_seen.lock().unwrap(), queries);
-    }
-
-    #[test]
     fn search_fuzzy_batch_default_is_one_result_per_query_in_order() {
         let store = MockStore::default();
         let queries = ["x", "yy", "zzz", "x"];
@@ -840,28 +789,17 @@ mod tests {
     #[test]
     fn search_batches_abandon_at_first_failure() {
         // The doc contract: "the batch is abandoned at the first failure". The
-        // default's `.collect()` into `NativeResult<Vec<_>>` must short-circuit.
+        // default's `.collect()` into `NativeResult<Vec<_>>` must short-circuit,
+        // so the query AFTER the failure is never issued.
         let store = MockStore {
             fail_query: Some("bad".into()),
             ..Default::default()
         };
         assert!(store
-            .search_substring_batch(&["ok", "bad", "after"], 1, None, &[])
-            .is_err());
-        // The query AFTER the failure is never issued (short-circuit).
-        let seen = store.substr_seen.lock().unwrap();
-        assert_eq!(*seen, vec!["ok".to_string(), "bad".to_string()]);
-        drop(seen);
-
-        let store2 = MockStore {
-            fail_query: Some("bad".into()),
-            ..Default::default()
-        };
-        assert!(store2
             .search_fuzzy_batch(&["ok", "bad", "after"], 1, None, &[])
             .is_err());
         assert_eq!(
-            *store2.fuzzy_seen.lock().unwrap(),
+            *store.fuzzy_seen.lock().unwrap(),
             vec!["ok".to_string(), "bad".to_string()]
         );
     }

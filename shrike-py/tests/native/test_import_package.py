@@ -96,7 +96,7 @@ def _lexical_hits(tmp_path, query: str) -> list:
     )
     engine = shrike_native.DerivedTextEngine(db_path, SCHEMA_VERSION)
     try:
-        return engine.search_substring(query, 10)
+        return engine.search_fuzzy(query, 10)
     finally:
         engine.close()
 

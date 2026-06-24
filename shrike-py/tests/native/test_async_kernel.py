@@ -58,7 +58,7 @@ class TestRebuildDerived:
             engine = shrike_native.DerivedTextEngine(db_path, SCHEMA_VERSION)
             try:
                 assert engine.get_col_mod() == dmod
-                hits = engine.search_substring("krebs", 10)
+                hits = engine.search_fuzzy("krebs", 10)
                 assert hits, "the rebuilt FTS5 store must match the seeded text"
             finally:
                 engine.close()

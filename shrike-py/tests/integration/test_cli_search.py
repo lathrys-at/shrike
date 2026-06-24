@@ -24,7 +24,7 @@ class TestNoteSearch:
         assert len(matches) == 1
         # CLI --json drops null fields, so an exact-only hit has no `score` key.
         assert matches[0].get("score") is None
-        assert matches[0]["substring"]["matched_fields"] == ["Front"]
+        assert matches[0]["substring"]["ref"] == "Front"
 
     def test_substring_pretty_shows_snippet(self, runner):
         self._make(runner, "electron transport chain")

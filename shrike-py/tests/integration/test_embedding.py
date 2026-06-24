@@ -386,7 +386,7 @@ class TestEmbeddingLifecycle:
         matches = degraded["results"][0]["matches"]
         assert matches
         assert all(m["score"] is None for m in matches)
-        assert matches[0]["substring"]["matched_fields"]
+        assert matches[0]["substring"]["ref"]
         assert "not running" in degraded["message"].lower()
         # Stopping again is a no-op.
         assert ctl("POST", "/embedding/stop", timeout=10.0).json()["status"] == "not_running"

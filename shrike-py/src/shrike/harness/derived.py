@@ -1,7 +1,8 @@
 """Local derived-text store — a sidecar SQLite (``shrike.db``) for data derived from notes.
 
-Its first artifact is an **FTS5 trigram** index over note text, backing fast substring and fuzzy
-(typo/partial) lexical search. The store is *source-seamed*: every indexed row is keyed
+Its first artifact is an **FTS5 trigram** index over note text, backing fast fuzzy (typo/partial)
+lexical search — the sole lexical read, from which the kernel recovers the exact (literal) tier.
+The store is *source-seamed*: every indexed row is keyed
 ``(note_id, source, ref)``: ``source`` is the text's origin (``field`` today; ``ocr``/``asr``
 later; never VLM image-describe, which stays embedding-only) and ``ref`` is the field name
 or media filename. So a match's provenance can say *where* it hit, and new derived sources slot in
@@ -17,7 +18,7 @@ and durable.
 
 Engine split: the SQL layer lives behind a small engine — the native
 ``shrike-derived`` crate (rusqlite). The facade keeps the state machine, drift
-policy, MATCH-expression building, and result filtering. With the default
+policy, and fuzzy-read marshaling. With the default
 *bundled*-SQLite build, FTS5+trigram is deterministically available, so the
 availability probe below is a formality; a platform-linked build probes the host
 library instead, and a host SQLite without FTS5/trigram makes the store report
@@ -48,13 +49,14 @@ DEFAULT_FUZZY_TOP_K = 20
 
 
 @dataclass(frozen=True)
-class LexicalMatch:
-    """One lexical hit, with the provenance of *where* in the derived text it matched."""
+class LexicalHit:
+    """One fuzzy lexical hit, with the provenance of *where* in the derived text it matched."""
 
     note_id: int
     source: str  # "field" | "ocr" | "asr" | …
     ref: str  # field name, or a media filename for a derived source
-    snippet: str | None
+    # The matched derived segment text + the overlap's (first, last) UTF-8 byte span, or None.
+    match: tuple[str, tuple[int, int]] | None
 
 
 class NativeDerivedEngine:
@@ -122,21 +124,14 @@ class NativeDerivedEngine:
         except self._native_errors as e:
             raise sqlite3.DatabaseError(str(e)) from e
 
-    def search_substring(
-        self, query: str, limit: int
-    ) -> list[tuple[int, str, str, str | None]] | None:
-        try:
-            rows = self._rust.search_substring(query, int(limit))
-        except self._native_errors as e:
-            raise sqlite3.OperationalError(str(e)) from e
-        return None if rows is None else [(int(n), s, r, sn) for n, s, r, sn in rows]
-
-    def search_fuzzy(self, query: str, top_k: int) -> list[tuple[int, str, str, str | None]]:
+    def search_fuzzy(
+        self, query: str, top_k: int
+    ) -> list[tuple[int, str, str, tuple[str, tuple[int, int]] | None]]:
         try:
             rows = self._rust.search_fuzzy(query, int(top_k))
         except self._native_errors as e:
             raise sqlite3.OperationalError(str(e)) from e
-        return [(int(n), s, r, sn) for n, s, r, sn in rows]
+        return [(int(n), s, r, m) for n, s, r, m in rows]
 
 
 class DerivedTextStore:
@@ -363,34 +358,16 @@ class DerivedTextStore:
 
     # ── reads ────────────────────────────────────────────────────────────────────────────────────
 
-    def search_substring(self, query: str, limit: int = 50) -> list[LexicalMatch] | None:
-        """Notes whose derived text literally contains ``query`` (case-insensitive).
-
-        Returns matches with their ``(source, ref, snippet)`` provenance, or ``None`` to tell the
-        caller to use the ``find_notes`` fallback — when the store is unavailable/not-ready or the
-        query is shorter than a trigram (FTS5 trigram can't match < 3 chars).
-        """
-        if not self._can_serve_reads() or self._engine is None:
-            return None
-        try:
-            # The MATCH policy is the Rust engine's (single implementation);
-            # None = sub-trigram query → find_notes fallback.
-            rows = self._engine.search_substring(query, limit)
-        except sqlite3.Error:
-            logger.debug("FTS5 substring query failed for %r; falling back", query, exc_info=True)
-            return None
-        if rows is None:
-            return None
-        return [LexicalMatch(nid, source, ref, snippet) for nid, source, ref, snippet in rows]
-
     def search_fuzzy(
         self, query: str, top_k: int = DEFAULT_FUZZY_TOP_K
-    ) -> list[tuple[int, LexicalMatch]]:
+    ) -> list[tuple[int, LexicalHit]]:
         """Notes sharing trigrams with ``query`` (typo/partial tolerant), best-first.
 
-        Returns ``(note_id, LexicalMatch)`` ranked by FTS5 bm25 over the query's trigrams; a
-        candidate must share at least ``FUZZY_MIN_SHARED`` of them (drops one-trigram noise). Empty
-        when the store can't serve it (the fuzzy signal is simply absent — graceful).
+        The SOLE lexical read: a literal match is just a maximal-overlap fuzzy hit, so the kernel
+        recovers the exact tier from these rows (no separate substring read). Returns ``(note_id,
+        LexicalHit)`` ranked by trigram overlap; a candidate must share at least
+        ``FUZZY_MIN_SHARED`` of the query's kept trigrams (a single-trigram query floors to 1).
+        Empty when the store can't serve it (the fuzzy signal is simply absent — graceful).
         """
         if not self._can_serve_reads() or self._engine is None:
             return []
@@ -402,8 +379,7 @@ class DerivedTextStore:
             logger.debug("FTS5 fuzzy query failed for %r", query, exc_info=True)
             return []
         return [
-            (int(nid), LexicalMatch(int(nid), source, ref, snippet))
-            for nid, source, ref, snippet in rows
+            (int(nid), LexicalHit(int(nid), source, ref, match)) for nid, source, ref, match in rows
         ]
 
     def status(self) -> dict[str, Any]:

@@ -1,10 +1,10 @@
 """Unit tests for the derived-text store — the FTS5 trigram sidecar.
 
 These run against real SQLite (FTS5 + the trigram tokenizer ship with CPython's sqlite3 on every
-platform we target). They exercise the store directly: build, substring + fuzzy lookups with their
-source/ref/snippet provenance, the multi-source seam (the future ``ocr``/``asr`` slot), the
-incremental ingest/remove path, drift detection + the col_mod watermark, and graceful degradation
-when FTS5 is unavailable.
+platform we target). They exercise the store directly: build, the fuzzy lexical read (the sole one)
+with its source/ref/(text, byte-span) provenance, the multi-source seam (the future ``ocr``/``asr``
+slot), the incremental ingest/remove path, drift detection + the col_mod watermark, and graceful
+degradation when FTS5 is unavailable.
 """
 
 from __future__ import annotations
@@ -47,38 +47,38 @@ class TestBuild:
         s.close()
 
 
-class TestSubstring:
-    def test_match_carries_source_ref_snippet(self, store):
-        hits = store.search_substring("powerhouse")
-        assert hits is not None
-        assert len(hits) == 1
-        m = hits[0]
-        assert m.note_id == 1
+class TestLexicalEvidence:
+    """Fuzzy is the sole lexical read; a literal query is a maximal-overlap hit
+    (the kernel recovers the exact tier from these rows). These pin the row's
+    provenance + the (text, byte-span) match the unified path emits."""
+
+    def test_hit_carries_source_ref_and_span(self, store):
+        hits = store.search_fuzzy("powerhouse")
+        assert [nid for nid, _ in hits] == [1]
+        m = hits[0][1]
         assert m.source == "field"
         assert m.ref == "Front"
-        assert "powerhouse" in (m.snippet or "")
+        # The match is (segment text, (first, last) UTF-8 byte span). The text is
+        # the indexed field; the span covers the matched trigrams within it.
+        assert m.match is not None
+        text, (lo, hi) = m.match
+        assert "powerhouse" in text
+        raw = text.encode("utf-8")
+        assert 0 <= lo < hi <= len(raw)
+        assert raw[lo:hi].decode("utf-8") in text
 
     def test_case_insensitive(self, store):
-        assert [m.note_id for m in store.search_substring("MITOCHONDRIA")] == [1]
+        assert [nid for nid, _ in store.search_fuzzy("MITOCHONDRIA")] == [1]
 
-    def test_contiguous_only(self, store):
-        # A phrase match is a contiguous substring: "powerhouse cell" is not literally present.
-        assert store.search_substring("powerhouse cell") == []
-
-    def test_subtrigram_query_returns_none(self, store):
-        # < 3 chars: FTS5 trigram can't match it → None tells the caller to use the find_notes
-        # fallback (not [] — that would wrongly read as "no hits").
-        assert store.search_substring("xy") is None
-
-    def test_unavailable_store_returns_none(self, tmp_path):
-        s = DerivedTextStore(path=tmp_path / "shrike.db")  # never built
-        assert s.search_substring("anything") is None
-        s.close()
+    def test_subtrigram_query_returns_empty(self, store):
+        # < 3 chars: no trigram window → fuzzy can't serve it (the kernel does the
+        # FIELD-text fallback for such short queries).
+        assert store.search_fuzzy("xy") == []
 
     def test_limit_caps_results(self, tmp_path):
         s = DerivedTextStore(path=tmp_path / "shrike.db")
         s._build([(i, "field", "F", f"shared token n{i}") for i in range(10)], col_mod=1)
-        assert len(s.search_substring("shared", limit=3)) == 3
+        assert len(s.search_fuzzy("shared", top_k=3)) == 3
         s.close()
 
 
@@ -114,43 +114,43 @@ class TestSourceSeam:
 
     def test_second_source_searchable_with_its_provenance(self, store):
         store._ingest(1, "ocr", {"diagram.png": "cristae folds visible in the image"})
-        hits = store.search_substring("cristae")
-        assert hits is not None and len(hits) == 1
-        assert hits[0].note_id == 1
-        assert hits[0].source == "ocr"
-        assert hits[0].ref == "diagram.png"
+        hits = store.search_fuzzy("cristae")
+        assert len(hits) == 1
+        assert hits[0][0] == 1
+        assert hits[0][1].source == "ocr"
+        assert hits[0][1].ref == "diagram.png"
 
     def test_remove_one_source_leaves_the_other(self, store):
         store._ingest(1, "ocr", {"diagram.png": "cristae folds"})
         store._remove([1], source="ocr")
-        assert store.search_substring("cristae") == []  # ocr source gone
-        assert [m.note_id for m in store.search_substring("powerhouse")] == [1]  # field stays
+        assert store.search_fuzzy("cristae") == []  # ocr source gone
+        assert [nid for nid, _ in store.search_fuzzy("powerhouse")] == [1]  # field stays
 
     def test_ingest_replaces_only_its_own_source(self, store):
         # Re-ingesting "field" for note 1 replaces its field rows but never touches an ocr source.
         store._ingest(1, "ocr", {"diagram.png": "cristae"})
         store._ingest(1, "field", {"Front": "Updated mitochondria text"})
-        assert [m.note_id for m in store.search_substring("cristae")] == [1]
-        assert store.search_substring("powerhouse") == []  # old field text replaced
-        assert [m.note_id for m in store.search_substring("Updated")] == [1]
+        assert [nid for nid, _ in store.search_fuzzy("cristae")] == [1]
+        assert store.search_fuzzy("powerhouse") == []  # old field text replaced
+        assert [nid for nid, _ in store.search_fuzzy("Updated")] == [1]
 
 
 class TestIncremental:
     def test_ingest_adds_a_note(self, store):
         store._ingest(4, "field", {"Front": "Newly authored card"})
-        assert [m.note_id for m in store.search_substring("authored")] == [4]
+        assert [nid for nid, _ in store.search_fuzzy("authored")] == [4]
 
     def test_ingest_is_idempotent_replace(self, store):
         store._ingest(1, "field", {"Front": "first revision"})
         store._ingest(1, "field", {"Front": "second revision"})
-        assert store.search_substring("first") == []
-        assert [m.note_id for m in store.search_substring("second")] == [1]
+        assert store.search_fuzzy("first") == []
+        assert [nid for nid, _ in store.search_fuzzy("second")] == [1]
 
     def test_remove_drops_all_sources(self, store):
         store._ingest(1, "ocr", {"x.png": "cristae"})
         store._remove([1])
-        assert store.search_substring("powerhouse") == []
-        assert store.search_substring("cristae") == []
+        assert store.search_fuzzy("powerhouse") == []
+        assert store.search_fuzzy("cristae") == []
 
 
 class TestDriftAndColMod:
@@ -183,7 +183,7 @@ class TestPersistence:
         s2 = DerivedTextStore(path=path)
         assert s2.available is True
         assert s2.col_mod == 100
-        assert [m.note_id for m in s2.search_substring("powerhouse")] == [1]
+        assert [nid for nid, _ in s2.search_fuzzy("powerhouse")] == [1]
         s2.close()
 
 
@@ -198,7 +198,7 @@ class TestCorruptRecovery:
         assert s.available is False  # fresh: no build has run yet
         s._build(ROWS, col_mod=1)
         assert s.available is True
-        assert [m.note_id for m in s.search_substring("powerhouse")] == [1]
+        assert [nid for nid, _ in s.search_fuzzy("powerhouse")] == [1]
         s.close()
 
 
@@ -217,13 +217,12 @@ class TestBuildFailure:
 
 class TestFts5Unavailable:
     def test_degrades_when_probe_fails(self, tmp_path, monkeypatch):
-        # Simulate a SQLite build without FTS5/trigram: the store is inert and every lookup signals
-        # the caller to fall back (substring → None, fuzzy → []), never raising.
+        # Simulate a SQLite build without FTS5/trigram: the store is inert and the
+        # fuzzy lookup returns empty (the sole lexical read), never raising.
         monkeypatch.setattr(DerivedTextStore, "_probe_fts5", staticmethod(lambda: False))
         s = DerivedTextStore(path=tmp_path / "shrike.db")
         assert s.available is False
         assert s.status()["fts5"] is False
-        assert s.search_substring("mitochondria") is None
         assert s.search_fuzzy("mitochondria") == []
         s._build(ROWS, col_mod=1)  # a no-op, not a crash
         assert s.size == 0

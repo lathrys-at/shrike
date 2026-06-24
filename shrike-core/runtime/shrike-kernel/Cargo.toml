@@ -36,6 +36,10 @@ shrike-index = { path = "../../runtime/shrike-index" }
 shrike-schemas = { path = "../../contracts/shrike-schemas" }
 serde = "1"
 serde_json = "1"
+# SIMD substring search: the `exact` tier literal-verifies each fuzzy hit's
+# derived text with a memmem Finder built once per query and reused across hits.
+# Already in the tree (transitive via regex/fst/anki), so no new weight.
+memchr = "2"
 # Per-note change fingerprints — must hash byte-identically to Python's
 # hashlib.blake2b(digest_size=8) so the on-disk sidecar survives the swap.
 blake2 = "0.10"

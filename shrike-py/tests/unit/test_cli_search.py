@@ -24,6 +24,7 @@ from shrike.schemas import (
     EmbeddingRunning,
     FuzzyMatch,
     IndexReady,
+    LexicalMatch,
     ListNotesResponse,
     Note,
     SearchMatch,
@@ -150,7 +151,10 @@ class TestDefaultSearchPrettyRender:
         match = _match(
             score=0.9,
             deck="Bio",
-            substring=SubstringInfo(matched_fields=["Front"], snippet="…electron…"),
+            substring=SubstringInfo(
+                ref="Front",
+                match=LexicalMatch(text="the electron transport chain", span=(4, 12)),
+            ),
         )
         fake.search_notes.return_value = SearchResponse(results=[_group("electron", [match])])
         res, _ = run("search", "electron", "--brief", client=fake)
@@ -312,7 +316,7 @@ class TestSearchMatchBadges:
     def test_exact_only_has_no_signal_prefix(self):
         # `exact` is already implied by the `match:` field badge → not repeated.
         m = _match(
-            substring=SubstringInfo(matched_fields=["Front"]),
+            substring=SubstringInfo(ref="Front"),
             provenance=[SignalContribution(signal="exact", rank=1)],
         )
         assert _search_match_badges(m) == "match: Front"
@@ -320,7 +324,7 @@ class TestSearchMatchBadges:
     def test_text_and_exact_not_doubled(self):
         m = _match(
             score=0.85,
-            substring=SubstringInfo(matched_fields=["Front"]),
+            substring=SubstringInfo(ref="Front"),
             provenance=[
                 SignalContribution(signal="exact", rank=1),
                 SignalContribution(signal="text", rank=2),
@@ -332,7 +336,7 @@ class TestSearchMatchBadges:
         # The facet shows; the redundant `exact` does not.
         m = _match(
             score=0.30,
-            substring=SubstringInfo(matched_fields=["Front"]),
+            substring=SubstringInfo(ref="Front"),
             provenance=[
                 SignalContribution(signal="image", rank=1),
                 SignalContribution(signal="exact", rank=1),
@@ -344,7 +348,11 @@ class TestSearchMatchBadges:
         # A fuzzy-only near-miss is otherwise invisible (no score, no `match:`), so the
         # `fuzzy` facet surfaces on its own — like `image`, it's a non-{text,exact} signal.
         m = _match(
-            fuzzy=FuzzyMatch(source="field", ref="Front", snippet="…protein…"),
+            fuzzy=FuzzyMatch(
+                source="field",
+                ref="Front",
+                match=LexicalMatch(text="protein synthesis", span=(0, 7)),
+            ),
             provenance=[SignalContribution(signal="fuzzy", rank=1)],
         )
         assert _search_match_badges(m) == "fuzzy"

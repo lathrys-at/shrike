@@ -8,7 +8,6 @@ import pytest
 
 shrike_native = pytest.importorskip("shrike_native")
 
-from shrike.harness.derived import DerivedTextStore, NativeDerivedEngine  # noqa: E402
 from shrike.harness.engines.embedding.runtime import EmbeddingRuntime  # noqa: E402
 from shrike.harness.harness import Harness  # noqa: E402
 
@@ -23,7 +22,7 @@ class TestFacadeReadinessBootWindow:
     awaited), so the facade sits at ``state=BUILDING`` until that un-awaited
     task's ``await kernel.rebuild_derived()`` continuation runs
     ``settle_external_build`` -> ``READY``. While ``BUILDING``,
-    ``DerivedTextStore.search_substring`` must not short-circuit to ``None``
+    ``DerivedTextStore.search_fuzzy`` must not short-circuit to empty
     (gated on ``available == _state==READY``) when the recognition rows it would
     return are already present in shrike.db, written kernel-side by
     ``recognition_sweep`` — otherwise a read descheduled past the un-awaited
@@ -39,7 +38,7 @@ class TestFacadeReadinessBootWindow:
     instead of racing for it under load.
     """
 
-    def test_search_substring_serves_present_rows_during_building(self, tmp_path) -> None:
+    def test_search_serves_present_rows_during_building(self, tmp_path) -> None:
         import hashlib
 
         class _TokenHash:
@@ -63,14 +62,10 @@ class TestFacadeReadinessBootWindow:
         async def flow():
             media = {"lecture.mp3": b"mitochondria are the powerhouse of the cell"}
             runtime = EmbeddingRuntime(model=None)
-            derived = DerivedTextStore(
-                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
-            )
             harness = await Harness.assemble(
                 collection_path=str(tmp_path / "collection.anki2"),
                 cache_dir=str(tmp_path / "cache"),
                 runtime=runtime,
-                derived=derived,
                 cooperative=False,
                 hold_seconds=5.0,
                 media_read=media.get,
@@ -98,7 +93,7 @@ class TestFacadeReadinessBootWindow:
             # ASR row is genuinely present and findable through the facade.
             await harness.settle_background()
             assert harness.derived.available, "precondition: facade READY after settle"
-            assert harness.derived.search_substring("powerhouse of the cell", limit=5), (
+            assert harness.derived.search_fuzzy("powerhouse of the cell", top_k=5), (
                 "precondition: the ASR row is present and findable when the facade is READY"
             )
 
@@ -106,7 +101,7 @@ class TestFacadeReadinessBootWindow:
             # load: facade BUILDING, with the row already in shrike.db.
             assert harness.derived.claim_external_build(), "entered the BUILDING window"
             try:
-                rows = harness.derived.search_substring("powerhouse of the cell", limit=5)
+                rows = harness.derived.search_fuzzy("powerhouse of the cell", top_k=5)
                 # THE DEFECT: present rows are silently dropped while BUILDING.
                 assert rows, (
                     "facade must serve already-present recognition rows during the boot "

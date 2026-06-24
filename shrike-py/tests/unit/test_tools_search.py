@@ -318,7 +318,7 @@ class TestUnifiedSearch:
         m = result["results"][0]["matches"]
         assert len(m) == 1
         assert m[0]["score"] is None
-        assert m[0]["substring"]["matched_fields"] == ["Front"]
+        assert m[0]["substring"]["ref"] == "Front"
 
     def test_both_score_and_substring(self, kharness, mcp_sem):
         nid = kharness.seed_note("Electron transport chain")
@@ -638,7 +638,7 @@ class TestDerivedSearch:
         res = kharness.call_tool(mcp_sem, "search_notes", {"queries": ["transport"]})
         m = res["results"][0]["matches"]
         assert [x["id"] for x in m] == [nid]
-        assert m[0]["substring"]["matched_fields"] == ["Front"]
+        assert m[0]["substring"]["ref"] == "Front"
         assert m[0]["substring"]["source"] == "field"
         # A literal hit shares every trigram so it's *trivially* also a fuzzy match, but `fuzzy` is
         # suppressed on exact hits — `exact` is the distinguishing lexical signal.
@@ -658,7 +658,7 @@ class TestDerivedSearch:
         assert [p["signal"] for p in hit["provenance"]] == ["fuzzy"]
         assert hit["fuzzy"]["source"] == "field"
         assert hit["fuzzy"]["ref"] == "Front"
-        assert "Mitochondria" in hit["fuzzy"]["snippet"]
+        assert "Mitochondria" in hit["fuzzy"]["match"]["text"]
 
     def test_literal_tiers_above_fuzzy(self, kharness, mcp_sem):
         # The exact-match override still wins: a literal hit floats above a fuzzy-only near-miss.

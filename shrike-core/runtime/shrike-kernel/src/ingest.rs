@@ -1567,15 +1567,6 @@ mod tests {
             self.inner
                 .match_rows(expr, limit, with_text, scope, exclude)
         }
-        fn search_substring(
-            &self,
-            q: &str,
-            limit: i64,
-            scope: Option<&[i64]>,
-            exclude: &[&str],
-        ) -> NativeResult<Option<Vec<shrike_store::LexicalRow>>> {
-            self.inner.search_substring(q, limit, scope, exclude)
-        }
         fn search_fuzzy(
             &self,
             q: &str,

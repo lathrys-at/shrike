@@ -325,10 +325,9 @@ ROUNDTRIP_CASES: list[tuple[str, dict]] = [
             "content": {"Front": "Q"},
             "score": 0.75,
             "substring": {
-                "matched_fields": ["Front"],
-                "snippet": "…Q…",
                 "source": "field",
-                "ref": None,
+                "ref": "Front",
+                "match": {"text": "Q", "span": [0, 1]},
             },
             "fuzzy": None,
             "provenance": [{"signal": "text", "rank": 1}],

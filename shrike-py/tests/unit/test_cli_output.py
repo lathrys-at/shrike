@@ -169,7 +169,7 @@ def test_search_match_detail_does_not_crash() -> None:
         tags=[SPOOF],
         modified="2026-01-01T00:00:00",
         content={"Front": "Q", "Back": MALFORMED},
-        substring=SubstringInfo(matched_fields=["Back"], snippet=MALFORMED),
+        substring=SubstringInfo(ref="Back"),
     )
     out = _capture(lambda: output.note_detail(match, subtitle="[exact]"))
     assert "[blink]" in out and "[/cyan]" in out

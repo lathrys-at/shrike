@@ -313,6 +313,19 @@ fn runtime_probe(py: Python<'_>) {
 
 /// One derived-store MATCH row: (note_id, source, ref, txt, snippet).
 type MatchRow = (i64, String, String, Option<String>, Option<String>);
+/// One fuzzy lexical row marshalled for Python: `(note_id, source, ref, match)`
+/// where `match` is `(segment text, (first byte, last byte))` or `None`. The
+/// internal [`shrike_derived::LexicalSpan`] is flattened to a plain tuple here
+/// (shrike-store carries no pyo3 dependency, so it has no `IntoPyObject` of its
+/// own).
+type PyLexicalRow = (i64, String, String, Option<(String, (usize, usize))>);
+
+/// Flatten an internal [`shrike_derived::LexicalRow`] to its [`PyLexicalRow`]
+/// Python tuple.
+fn lexical_row_to_py(row: shrike_derived::LexicalRow) -> PyLexicalRow {
+    let (note_id, source, r#ref, span) = row;
+    (note_id, source, r#ref, span.map(|s| (s.text, s.span)))
+}
 /// Per-query, per-modality parallel rankings: {modality: (note_ids, distances)}.
 type ModalityRankings = Vec<std::collections::BTreeMap<String, (Vec<i64>, Vec<f32>)>>;
 /// One fused hit: (note_id, score, [(signal, 1-based rank)...]).
@@ -942,23 +955,11 @@ impl DerivedTextEngine {
         .map_err(to_py_err)
     }
 
-    /// Literal-substring rows — `None` = use the find_notes fallback.
-    #[pyo3(signature = (query, limit, scope=None))]
-    fn search_substring(
-        &self,
-        py: Python<'_>,
-        query: String,
-        limit: i64,
-        scope: Option<Vec<i64>>,
-    ) -> PyResult<Option<Vec<shrike_derived::LexicalRow>>> {
-        py.detach(|| {
-            self.inner
-                .search_substring(&query, limit, scope.as_deref(), &[])
-        })
-        .map_err(to_py_err)
-    }
-
-    /// Fuzzy (trigram/typo) rows, best-first, deduped per note.
+    /// Fuzzy (trigram/typo) rows, best-first, deduped per note — the sole lexical
+    /// read (the kernel layers the `exact` tier on top). Each row is
+    /// `(note_id, source, ref, match)` where `match` is `(text, (first, last))`
+    /// (the matched derived segment text + the overlap's UTF-8 byte span) or
+    /// `None`.
     #[pyo3(signature = (query, top_k, scope=None))]
     fn search_fuzzy(
         &self,
@@ -966,12 +967,14 @@ impl DerivedTextEngine {
         query: String,
         top_k: i64,
         scope: Option<Vec<i64>>,
-    ) -> PyResult<Vec<shrike_derived::LexicalRow>> {
-        py.detach(|| {
-            self.inner
-                .search_fuzzy(&query, top_k, scope.as_deref(), &[])
-        })
-        .map_err(to_py_err)
+    ) -> PyResult<Vec<PyLexicalRow>> {
+        let rows = py
+            .detach(|| {
+                self.inner
+                    .search_fuzzy(&query, top_k, scope.as_deref(), &[])
+            })
+            .map_err(to_py_err)?;
+        Ok(rows.into_iter().map(lexical_row_to_py).collect())
     }
 
     /// Fuzzy rows for a BATCH of queries — one result list per query in order,
@@ -984,13 +987,18 @@ impl DerivedTextEngine {
         queries: Vec<String>,
         top_k: i64,
         scope: Option<Vec<i64>>,
-    ) -> PyResult<Vec<Vec<shrike_derived::LexicalRow>>> {
-        py.detach(|| {
-            let refs: Vec<&str> = queries.iter().map(String::as_str).collect();
-            self.inner
-                .search_fuzzy_batch(&refs, top_k, scope.as_deref(), &[])
-        })
-        .map_err(to_py_err)
+    ) -> PyResult<Vec<Vec<PyLexicalRow>>> {
+        let batched = py
+            .detach(|| {
+                let refs: Vec<&str> = queries.iter().map(String::as_str).collect();
+                self.inner
+                    .search_fuzzy_batch(&refs, top_k, scope.as_deref(), &[])
+            })
+            .map_err(to_py_err)?;
+        Ok(batched
+            .into_iter()
+            .map(|rows| rows.into_iter().map(lexical_row_to_py).collect())
+            .collect())
     }
 
     /// Set the cost-budget pruner policy: `typo_floor` (`F`, min rarest trigrams kept),

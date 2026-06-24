@@ -68,14 +68,10 @@ class TestHarnessRecognition:
         async def flow():
             media = {"krebs.png": b"oxaloacetate condenses with acetyl coa"}
             runtime = EmbeddingRuntime(model=None)
-            derived = DerivedTextStore(
-                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
-            )
             harness = await Harness.assemble(
                 collection_path=str(tmp_path / "collection.anki2"),
                 cache_dir=str(tmp_path / "cache"),
                 runtime=runtime,
-                derived=derived,
                 cooperative=False,
                 hold_seconds=5.0,
                 media_read=media.get,
@@ -100,7 +96,7 @@ class TestHarnessRecognition:
             assert report["total_stored"] == 1
 
             # The lexical consumer sees it through the SAME store file.
-            rows = harness.derived.search_substring("oxaloacetate", limit=5)
+            rows = harness.derived.search_fuzzy("oxaloacetate", top_k=5)
             assert rows, "OCR text reached the lexical store"
 
             harness.detach_recognizer()
@@ -137,14 +133,10 @@ class TestHarnessRecognition:
         async def flow():
             media = {"lecture.mp3": b"mitochondria are the powerhouse of the cell"}
             runtime = EmbeddingRuntime(model=None)
-            derived = DerivedTextStore(
-                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
-            )
             harness = await Harness.assemble(
                 collection_path=str(tmp_path / "collection.anki2"),
                 cache_dir=str(tmp_path / "cache"),
                 runtime=runtime,
-                derived=derived,
                 cooperative=False,
                 hold_seconds=5.0,
                 media_read=media.get,
@@ -172,7 +164,7 @@ class TestHarnessRecognition:
             assert report["total_stored"] == 1, report
 
             # LexicalAndVector: the transcript reaches the lexical store ...
-            assert harness.derived.search_substring("powerhouse of the cell", limit=5), (
+            assert harness.derived.search_fuzzy("powerhouse of the cell", top_k=5), (
                 "asr transcript reached the lexical store"
             )
             # ... and mints a vector reachable through the text-modality search.
@@ -201,14 +193,10 @@ class TestHarnessRecognition:
                 "ok.png": b"readable tail oxaloacetate",
             }
             runtime = EmbeddingRuntime(model=None)
-            derived = DerivedTextStore(
-                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
-            )
             harness = await Harness.assemble(
                 collection_path=str(tmp_path / "collection.anki2"),
                 cache_dir=str(tmp_path / "cache"),
                 runtime=runtime,
-                derived=derived,
                 cooperative=False,
                 hold_seconds=5.0,
                 media_read=lambda name: None if name in unreadable else media.get(name),
@@ -253,7 +241,7 @@ class TestHarnessRecognition:
             report = await harness.recognition_sweep(batch_size=2)
             assert report["total_stored"] == 3
             assert report["remaining"] == 0
-            rows = harness.derived.search_substring("oxaloacetate", limit=5)
+            rows = harness.derived.search_fuzzy("oxaloacetate", top_k=5)
             assert rows, "the tail item landed once the prefix healed"
 
             harness.detach_recognizer()
@@ -288,14 +276,10 @@ class TestHarnessRecognition:
         async def flow():
             media = {"krebs.png": buf.getvalue()}
             runtime = EmbeddingRuntime(model=None)
-            derived = DerivedTextStore(
-                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
-            )
             harness = await Harness.assemble(
                 collection_path=str(tmp_path / "collection.anki2"),
                 cache_dir=str(tmp_path / "cache"),
                 runtime=runtime,
-                derived=derived,
                 cooperative=False,
                 hold_seconds=5.0,
                 media_read=media.get,
@@ -318,7 +302,7 @@ class TestHarnessRecognition:
             report = await harness.recognition_sweep(batch_size=4)
             assert report["total_stored"] == 1
 
-            rows = harness.derived.search_substring("oxaloacetate", limit=5)
+            rows = harness.derived.search_fuzzy("oxaloacetate", top_k=5)
             assert rows, "native OCR text reached the lexical store"
 
             harness.detach_recognizer()
@@ -578,14 +562,10 @@ class TestDescribeAttach:
             # nothing with either, so each signal's provenance is unambiguous.
             media = {"photo.png": b"figure 7 chlorophyll absorption spectrum"}
             runtime = EmbeddingRuntime(model=None)
-            derived = DerivedTextStore(
-                path=tmp_path / "cache" / "shrike.db", engine_factory=NativeDerivedEngine
-            )
             harness = await Harness.assemble(
                 collection_path=str(tmp_path / "collection.anki2"),
                 cache_dir=str(tmp_path / "cache"),
                 runtime=runtime,
-                derived=derived,
                 cooperative=False,
                 hold_seconds=5.0,
                 media_read=media.get,
@@ -653,8 +633,8 @@ class TestDescribeAttach:
             # the low-level store facade (unfiltered by design — it is not a
             # search entry point) sees both rows. The exclusion lives at the
             # search path (asserted above via kernel.search), not at storage.
-            assert harness.derived.search_substring("chlorophyll absorption", limit=5)
-            assert harness.derived.search_substring("sunlit mountain valley", limit=5), (
+            assert harness.derived.search_fuzzy("chlorophyll absorption", top_k=5)
+            assert harness.derived.search_fuzzy("sunlit mountain valley", top_k=5), (
                 "the describe row is stored (provenance + reconcile) even though search hides it"
             )
 

@@ -30,8 +30,8 @@ ROWS = [
 def _assert_store_serves(store: DerivedTextStore) -> None:
     assert store.available is True
     assert store.size == 3
-    hits = store.search_substring("mitochondria")
-    assert hits is not None and hits[0].note_id == 1
+    hits = store.search_fuzzy("mitochondria")
+    assert hits and hits[0][0] == 1
     fuzzy = store.search_fuzzy("mitochondira")  # transposition typo
     assert any(nid == 1 for nid, _ in fuzzy)
 

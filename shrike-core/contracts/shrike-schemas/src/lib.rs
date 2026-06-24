@@ -134,33 +134,44 @@ pub struct Note {
     pub content: Option<BTreeMap<String, String>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+/// The matched text segment of a lexical hit plus the UTF-8 byte span within it.
+pub struct LexicalMatch {
+    /// The matched segment text the span indexes — the NFC-normalized DERIVED
+    /// segment for a fuzzy/exact hit, or the field value for the field-text
+    /// fallback. The client annotates within THIS text: the span's byte offsets
+    /// are meaningful only against it, never the raw `note.content` (whose byte
+    /// layout differs).
+    pub text: String,
+    /// Half-open `[first, last)` UTF-8 byte range of the match within `text` — the
+    /// literal phrase for an exact hit, the first..last matching trigram for fuzzy.
+    pub span: (usize, usize),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 /// Exact-substring match evidence on a search result.
 pub struct SubstringInfo {
-    #[serde(default)]
-    /// Field names that contained the substring.
-    pub matched_fields: Vec<String>,
-    #[serde(default)]
-    /// A snippet around the match, if available.
-    pub snippet: Option<String>,
     #[serde(default = "default_source_field")]
-    /// Where the matched text came from (`field`, later `ocr`/`asr`).
+    /// Where the matched text came from (`field`, `ocr`, `asr`).
     pub source: String,
     #[serde(default)]
     /// The field name or media filename the text came from.
     pub r#ref: Option<String>,
+    #[serde(rename = "match", default)]
+    /// The matched segment text + the literal's byte span within it.
+    pub matched: Option<LexicalMatch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 /// Fuzzy (trigram/typo) match evidence on a search result.
 pub struct FuzzyMatch {
-    /// Where the matched text came from (`field`, later `ocr`/`asr`).
+    /// Where the matched text came from (`field`, `ocr`, `asr`).
     pub source: String,
     /// The field name or media filename the text came from.
     pub r#ref: String,
-    #[serde(default)]
-    /// A snippet around the match, if available.
-    pub snippet: Option<String>,
+    #[serde(rename = "match", default)]
+    /// The matched segment text + the overlap's byte span within it.
+    pub matched: Option<LexicalMatch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -1862,6 +1873,7 @@ catalog![
     ("NoteInput", NoteInput),
     ("NoteTypeInput", NoteTypeInput),
     ("Note", Note),
+    ("LexicalMatch", LexicalMatch),
     ("SubstringInfo", SubstringInfo),
     ("FuzzyMatch", FuzzyMatch),
     ("SignalContribution", SignalContribution),
@@ -2423,8 +2435,8 @@ mod tests {
         // SubstringInfo.source -> "field" (default_source_field).
         let s: SubstringInfo = serde_json::from_str(r#"{}"#).unwrap();
         assert_eq!(s.source, "field");
-        assert!(s.matched_fields.is_empty());
-        assert_eq!(s.snippet, None);
+        assert_eq!(s.r#ref, None);
+        assert_eq!(s.matched, None);
 
         // ListNotesResponse.limit -> 50 (default_limit).
         let l: ListNotesResponse = serde_json::from_str(r#"{}"#).unwrap();
@@ -2451,10 +2463,9 @@ mod tests {
         // None — the model_dump wire emits null, older payloads omit; the
         // binding must treat them the same.
         let absent: SubstringInfo = serde_json::from_str(r#"{}"#).unwrap();
-        let explicit: SubstringInfo =
-            serde_json::from_str(r#"{"snippet":null,"ref":null}"#).unwrap();
+        let explicit: SubstringInfo = serde_json::from_str(r#"{"match":null,"ref":null}"#).unwrap();
         assert_eq!(absent, explicit);
-        assert_eq!(explicit.snippet, None);
+        assert_eq!(explicit.matched, None);
         assert_eq!(explicit.r#ref, None);
 
         // A non-Option defaulted Vec: absent and explicit [] coincide.
@@ -2491,10 +2502,7 @@ mod tests {
         // (defaulted/optional fields per type, asserted absent from required.)
         let cases: &[(&str, &[&str])] = &[
             ("Note", &["tags", "content"]),
-            (
-                "SubstringInfo",
-                &["matched_fields", "snippet", "source", "ref"],
-            ),
+            ("SubstringInfo", &["source", "ref", "match"]),
             (
                 "SearchMatch",
                 &[

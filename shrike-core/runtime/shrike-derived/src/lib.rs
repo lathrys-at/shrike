@@ -1184,7 +1184,7 @@ impl DerivedEngine {
         // BUILD-AND-SWAP. The streaming producer reads each chunk through the
         // collection actor (the single drive_collection thread). The connection lock
         // MUST NOT be held across `next()`: a concurrent `search` runs
-        // `search_substring`/`search_fuzzy` THROUGH that same actor and takes
+        // `search_fuzzy` THROUGH that same actor and takes
         // THIS lock, so holding it across the actor-dependent pull would wedge
         // the actor on the lock while the build waits on the actor — a circular
         // deadlock.
@@ -1969,104 +1969,6 @@ impl DerivedEngine {
         with_busy_retry(run)?
     }
 
-    /// [`Self::match_rows`] over many MATCH expressions on `conn`, sharing ONE
-    /// compiled statement (through the connection's statement cache) across the
-    /// whole batch. The fused-search lexical reads call this once for all query
-    /// strings rather than re-resolving the scope and recompiling the statement per
-    /// query. Returns one row vector per expression, in `exprs` order.
-    ///
-    /// `conn` is a checked-out [`ReadPool`] connection — read-only by discipline
-    /// (SELECTs, plus a TEMP scope set only for a scope past the inline cap, never a
-    /// store write).
-    ///
-    /// The scope is constant across the batch, so its clause — inline literals at or
-    /// below the inline cap, a TEMP subquery above it (see [`Self::scope_clause`]) —
-    /// leaves the SQL text, hence the statement-cache key, identical for every query
-    /// in the batch, and the statement compiles once for the whole set.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if resolving the scope fails, or any expression's MATCH query
-    /// fails (the batch stops at the first failure, like the singular read).
-    fn match_rows_batch(
-        conn: &Connection,
-        exprs: &[String],
-        limit: i64,
-        with_text: bool,
-        scope: Option<&[i64]>,
-        exclude_sources: &[&str],
-    ) -> NativeResult<Vec<Vec<MatchRow>>> {
-        if exprs.is_empty() {
-            return Ok(Vec::new()); // nothing to match — skip the staging
-        }
-        let span = tracing::debug_span!("derived.match_batch", n = exprs.len(), limit, with_text);
-        let _enter = span.enter();
-        let txt_col = if with_text { "idx.txt" } else { "NULL" };
-        // The scope is constant across the batch, so inlining it as literals leaves
-        // the SQL — the prepare_cached key — stable across the batch's queries (it
-        // compiles once), while keeping the parallel chunks off the temp-table
-        // pcache mutex a staged set would re-introduce. See [`Self::scope_clause`].
-        let scope_clause = Self::scope_clause(conn, scope)?;
-        let exclude_clause = if exclude_sources.is_empty() {
-            String::new()
-        } else {
-            let placeholders = (0..exclude_sources.len())
-                .map(|i| format!("?{}", i + 4))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("AND m.source NOT IN ({placeholders}) ")
-        };
-        let sql = format!(
-            "SELECT m.note_id, m.source, m.ref, {txt_col}, \
-             snippet(idx, 0, '', '', '…', ?1) \
-             FROM idx JOIN rowmap m ON m.rowid = idx.rowid \
-             WHERE idx MATCH ?2 {scope_clause}{exclude_clause}ORDER BY rank LIMIT ?3"
-        );
-        let mut out: Vec<Vec<MatchRow>> = Vec::with_capacity(exprs.len());
-        for expr in exprs {
-            // prepare_cached: the statement compiles on the first expression and
-            // every later one in the batch (and later searches of the same shape)
-            // reuses it. The MATCH expression is the only thing that varies per
-            // query, bound as ?2. Busy-retry stays per query — a surviving busy
-            // surfaces as `unavailable`, exactly like the singular read.
-            let run = || -> rusqlite::Result<Result<Vec<MatchRow>, NativeError>> {
-                let mut params: Vec<&dyn rusqlite::ToSql> = vec![&SNIPPET_TOKENS, expr, &limit];
-                params.extend(exclude_sources.iter().map(|s| s as &dyn rusqlite::ToSql));
-                let mut stmt = conn.prepare_cached(&sql)?;
-                let mut q = stmt.query(rusqlite::params_from_iter(params))?;
-                let mut rows: Vec<MatchRow> = Vec::new();
-                loop {
-                    let row = match q.next() {
-                        Ok(Some(r)) => r,
-                        Ok(None) => break,
-                        Err(e) if is_retryable(&e) => return Err(e), // retried
-                        Err(e) => {
-                            return Ok(Err(NativeError::invalid_input(format!("fts5 match: {e}"))))
-                        }
-                    };
-                    match (|| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                        ))
-                    })() {
-                        Ok(tuple) => rows.push(tuple),
-                        Err(e) if is_retryable(&e) => return Err(e),
-                        Err(e) => {
-                            return Ok(Err(NativeError::invalid_input(format!("fts5 match: {e}"))))
-                        }
-                    }
-                }
-                Ok(Ok(rows))
-            };
-            out.push(with_busy_retry(run)??);
-        }
-        Ok(out)
-    }
-
     /// Document frequency for each of `terms`, from the materialized `trigram_df`
     /// snapshot — the fuzzy path reads it to prune common trigrams. A term absent
     /// from the result is absent from the SNAPSHOT (treated as DF 0, sorting last in
@@ -2211,15 +2113,6 @@ impl shrike_store::DerivedStore for DerivedEngine {
     ) -> NativeResult<Vec<MatchRow>> {
         Self::match_rows(self, expr, limit, with_text, scope, exclude_sources)
     }
-    fn search_substring(
-        &self,
-        query: &str,
-        limit: i64,
-        scope: Option<&[i64]>,
-        exclude_sources: &[&str],
-    ) -> NativeResult<Option<Vec<LexicalRow>>> {
-        Self::search_substring(self, query, limit, scope, exclude_sources)
-    }
     fn search_fuzzy(
         &self,
         query: &str,
@@ -2228,15 +2121,6 @@ impl shrike_store::DerivedStore for DerivedEngine {
         exclude_sources: &[&str],
     ) -> NativeResult<Vec<LexicalRow>> {
         Self::search_fuzzy(self, query, top_k, scope, exclude_sources)
-    }
-    fn search_substring_batch(
-        &self,
-        queries: &[&str],
-        limit: i64,
-        scope: Option<&[i64]>,
-        exclude_sources: &[&str],
-    ) -> NativeResult<Vec<Option<Vec<LexicalRow>>>> {
-        Self::search_substring_batch(self, queries, limit, scope, exclude_sources)
     }
     fn search_fuzzy_batch(
         &self,
@@ -2442,6 +2326,57 @@ mod tests {
         // Fuzzy honors the same scope.
         let fz = e.search_fuzzy("kreps cycle", 10, Some(&[1]), &[]).unwrap();
         assert_eq!(fz.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn single_trigram_query_ranks_via_fuzzy() {
+        // Fuzzy is the SOLE lexical read, so a 3-char query — exactly ONE trigram,
+        // where the trigram IS the whole query — must rank through it. `fuzzy_grams`
+        // admits the single trigram and the per-query overlap floor drops to
+        // `min(FUZZY_MIN_SHARED, |kept|) = 1`, so the containing note ranks at
+        // overlap 1 rather than being silently un-rankable (the floor-of-2 gap).
+        let (e, _dir) = store();
+        build_snapshot_live(
+            &e,
+            &[
+                (1, "field".into(), "Front".into(), "the cat sat".into()),
+                (2, "field".into(), "Front".into(), "a dog ran".into()),
+            ],
+            1,
+        )
+        .unwrap();
+        let hits = e.search_fuzzy("cat", 10, None, &[]).unwrap();
+        assert_eq!(hits.iter().map(|r| r.0).collect::<Vec<_>>(), vec![1]);
+        // The hit carries the (text, byte span) of the matched segment + trigram.
+        let m = hits[0].3.as_ref().expect("fuzzy hit carries a match span");
+        assert_eq!(m.text, "the cat sat");
+        assert_eq!(&m.text[m.span.0..m.span.1], "cat");
+    }
+
+    #[test]
+    fn lone_present_trigram_in_a_longer_query_stays_below_the_noise_floor() {
+        // The flip side of the single-trigram admit: a MULTI-trigram query whose
+        // only present trigram is shared must NOT explode to every note carrying it.
+        // The pruner keeps the present trigram PLUS its absent siblings, so
+        // |kept| > 1 → the floor stays at FUZZY_MIN_SHARED (2), and a single shared
+        // trigram can't reach it — fuzzy returns nothing rather than noise.
+        let (e, _dir) = store();
+        build_snapshot_live(
+            &e,
+            &[
+                (1, "field".into(), "Front".into(), "the cat sat".into()),
+                (2, "field".into(), "Front".into(), "a cat naps".into()),
+            ],
+            1,
+        )
+        .unwrap();
+        // "catzzz" → trigrams cat (present in both notes), atz/tzz/zzz (absent).
+        // Exactly ONE present trigram across a 4-trigram query → below the floor.
+        let hits = e.search_fuzzy("catzzz", 10, None, &[]).unwrap();
+        assert!(
+            hits.is_empty(),
+            "a lone present trigram must not surface every note: {hits:?}"
+        );
     }
 
     #[test]
@@ -3226,7 +3161,7 @@ pub const FUZZY_POSTING_CEILING: usize = 1 << 18;
 // keep resolving.
 pub use shrike_store::{FxI64Hasher, FxI64Map, FxI64Set};
 
-pub use shrike_store::LexicalRow;
+pub use shrike_store::{LexicalRow, LexicalSpan};
 
 /// A single trigram — exactly [`MIN_TRIGRAM`] (3) Unicode code points, so at most 12
 /// UTF-8 bytes — stored INLINE with no heap allocation. The fuzzy path materializes
@@ -3415,14 +3350,18 @@ impl DerivedEngine {
         *self.materialize_ceiling_lock()
     }
 
-    /// One query's trigram set, `None` when it has fewer than [`FUZZY_MIN_SHARED`]
-    /// trigram windows (too short to rank). NFC-normalized so the trigrams match
-    /// the NFC-normalized index. [`Self::prune_to_rare_terms`] derives the (smaller)
+    /// One query's trigram set, `None` only when it has NO trigram window (fewer
+    /// than [`MIN_TRIGRAM`] characters — too short for the tokenizer). A
+    /// single-trigram (3-char) query IS admitted: fuzzy is the sole lexical read,
+    /// so a 3-char query has no other path, and the per-query overlap floor
+    /// (`min(FUZZY_MIN_SHARED, |kept|)`, see [`Self::fuzzy_rank_query`]) drops to 1
+    /// for it so it stays rankable. NFC-normalized so the trigrams match the
+    /// NFC-normalized index. [`Self::prune_to_rare_terms`] derives the (smaller)
     /// rare-trigram set the overlap ranker actually queries and counts.
     fn fuzzy_grams(query: &str) -> Option<std::collections::BTreeSet<Trigram>> {
         let normalized = nfc(query);
         let grams = trigrams(normalized.trim());
-        if grams.len() < FUZZY_MIN_SHARED {
+        if grams.is_empty() {
             return None;
         }
         Some(grams.into_iter().collect())
@@ -3706,19 +3645,25 @@ impl DerivedEngine {
         if top_k == 0 {
             return Ok(Vec::new());
         }
+        // Per-query overlap floor: the shared minimum is `min(FUZZY_MIN_SHARED,
+        // |kept|)`, so a query that keeps only ONE trigram (a 3-char query, where
+        // the trigram IS the whole query) needs overlap 1 rather than being
+        // silently un-rankable. A multi-trigram query keeps the full
+        // FUZZY_MIN_SHARED noise floor.
+        let floor = FUZZY_MIN_SHARED.min(pruned_terms.len());
         let bitmaps: Vec<&roaring::RoaringBitmap> = pruned_terms
             .iter()
             .filter_map(|t| term_bitmaps.get(t))
             .collect();
         // Fewer present postings than the floor can never reach the overlap minimum.
-        if bitmaps.len() < FUZZY_MIN_SHARED {
+        if bitmaps.len() < floor {
             return Ok(Vec::new());
         }
         let acc = Self::bitsliced_overlap(&bitmaps);
         let max_count = bitmaps.len() as u32;
         // note_id -> (count, rowid, source, ref) for its best segment.
         let mut best: FxI64Map<(usize, i64, String, String)> = FxI64Map::default();
-        for c in (FUZZY_MIN_SHARED as u32..=max_count).rev() {
+        for c in (floor as u32..=max_count).rev() {
             let bucket = Self::count_eq(&acc, c);
             if !bucket.is_empty() {
                 let rids: Vec<i64> = bucket.iter().map(i64::from).collect();
@@ -3769,6 +3714,7 @@ impl DerivedEngine {
     fn rank_overlap(
         overlap: &FxI64Map<usize>,
         seg_meta: &FxI64Map<(i64, String, String)>,
+        floor: usize,
         top_k: usize,
     ) -> Vec<(i64, String, String, i64)> {
         // Best segment per note: highest overlap, lowest rowid as the deterministic
@@ -3777,7 +3723,7 @@ impl DerivedEngine {
         let mut best: FxI64Map<(usize, i64)> =
             std::collections::HashMap::with_capacity_and_hasher(overlap.len(), Default::default());
         for (&rid, &count) in overlap {
-            if count < FUZZY_MIN_SHARED {
+            if count < floor {
                 continue;
             }
             let nid = match seg_meta.get(&rid) {
@@ -3807,36 +3753,6 @@ impl DerivedEngine {
             .collect()
     }
 
-    /// Notes whose derived text literally contains `query` (case-insensitive),
-    /// with `(source, ref, snippet)` provenance. `None` tells the caller to use
-    /// the `find_notes` fallback (query shorter than a trigram); a MATCH error
-    /// is a real error (the caller decides whether to degrade).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the backing store rejects the operation.
-    pub fn search_substring(
-        &self,
-        query: &str,
-        limit: i64,
-        scope: Option<&[i64]>,
-        exclude_sources: &[&str],
-    ) -> NativeResult<Option<Vec<LexicalRow>>> {
-        // NFC-normalize so the phrase matches the NFC-normalized index.
-        let normalized = nfc(query);
-        let q = normalized.trim();
-        if q.chars().count() < MIN_TRIGRAM {
-            return Ok(None);
-        }
-        // A quoted phrase → contiguous (literal substring) match.
-        let rows = self.match_rows(&fts_quote(q), limit, false, scope, exclude_sources)?;
-        Ok(Some(
-            rows.into_iter()
-                .map(|(nid, source, r, _txt, snippet)| (nid, source, r, snippet))
-                .collect(),
-        ))
-    }
-
     /// Notes sharing trigrams with `query` (typo/partial tolerant), ranked by how
     /// many of the query's rarest trigrams they share, deduped to one (best) row
     /// per note, requiring at least [`FUZZY_MIN_SHARED`] shared rare trigrams
@@ -3861,68 +3777,10 @@ impl DerivedEngine {
             .unwrap_or_default())
     }
 
-    /// [`Self::search_substring`] over a batch of queries — one result per query
-    /// in `queries` order, sharing one connection lock, one scope staging, and
-    /// one compiled statement across the set. A sub-trigram query resolves to
-    /// `None` (the caller's `find_notes` fallback) without reaching FTS5, exactly
-    /// like the singular call.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the batched MATCH query fails.
-    pub fn search_substring_batch(
-        &self,
-        queries: &[&str],
-        limit: i64,
-        scope: Option<&[i64]>,
-        exclude_sources: &[&str],
-    ) -> NativeResult<Vec<Option<Vec<LexicalRow>>>> {
-        // Servable queries (>= a trigram) contribute an expr + an FTS5 slot;
-        // sub-trigram queries resolve to None without a query. `served[i]`
-        // records which, so the batched rows reattach to the right queries.
-        let mut exprs: Vec<String> = Vec::new();
-        let mut served: Vec<bool> = Vec::with_capacity(queries.len());
-        for q in queries {
-            // NFC-normalize so the phrase matches the NFC-normalized index.
-            let normalized = nfc(q);
-            let trimmed = normalized.trim();
-            if trimmed.chars().count() < MIN_TRIGRAM {
-                served.push(false);
-            } else {
-                served.push(true);
-                exprs.push(fts_quote(trimmed));
-            }
-        }
-        // One pool connection for the whole batch's single MATCH read.
-        let conn = self.read_pool.checkout()?;
-        let mut batched =
-            Self::match_rows_batch(&conn, &exprs, limit, false, scope, exclude_sources)?
-                .into_iter();
-        // `batched` yields one entry per served query, in order; reattach each to
-        // its query. A served query maps to `Some(rows)` (possibly empty — the
-        // store served it and found nothing); a sub-trigram query maps to `None`
-        // (the caller's find_notes fallback). `map` over `next()` keeps this
-        // panic-free even if the lengths ever disagree.
-        let out = served
-            .into_iter()
-            .map(|s| {
-                if s {
-                    batched.next().map(|rows| {
-                        rows.into_iter()
-                            .map(|(nid, source, r, _txt, snippet)| (nid, source, r, snippet))
-                            .collect()
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect();
-        Ok(out)
-    }
-
     /// [`Self::search_fuzzy`] over a batch of queries — one result per query in
-    /// `queries` order — the fuzzy counterpart to [`Self::search_substring_batch`].
-    /// A query too short to rank yields an empty result without reaching FTS5.
+    /// `queries` order — the SOLE lexical read (the `exact` tier is recovered by
+    /// the kernel from each hit's [`LexicalSpan::text`]). A query too short to
+    /// rank yields an empty result without reaching FTS5.
     ///
     /// Ranks by trigram OVERLAP without bm25: each query's rarest trigrams are read
     /// as individual posting lists (one MATCH per DISTINCT trigram — a trigram's
@@ -3934,9 +3792,9 @@ impl DerivedEngine {
     /// segments there, not as a `note_id IN (...)` MATCH predicate (which would make
     /// SQLite build an ephemeral index — a temp btree on the pcache mutex). bm25's
     /// `ORDER BY rank` over the pruned `OR` was the search hotspot; raw posting reads
-    /// skip it and the overlap cut is recall-safe (by overlap, never rowid). Snippets
-    /// are read once for the surviving top-k ([`Self::fuzzy_snippets_batch`]), not for
-    /// every match.
+    /// skip it and the overlap cut is recall-safe (by overlap, never rowid). The
+    /// (text, byte span) match is built once for the surviving top-k
+    /// ([`Self::fuzzy_spans_batch`]), not for every match.
     ///
     /// # Errors
     ///
@@ -4010,10 +3868,10 @@ impl DerivedEngine {
                 None => Ok(Vec::new()),
             })
             .collect::<NativeResult<_>>()?;
-        // Build snippets for the surviving rowids only, from text read by a plain
-        // rowid lookup (no MATCH re-scan) and windowed in Rust around the query's
-        // own rare trigrams.
-        let snippet_jobs: Vec<(&[Trigram], Vec<i64>)> = pruned
+        // Build the (text, byte span) match for the surviving rowids only, from
+        // text read by a plain rowid lookup (no MATCH re-scan) and located in Rust
+        // against the query's own rare trigrams.
+        let span_jobs: Vec<(&[Trigram], Vec<i64>)> = pruned
             .iter()
             .zip(&survivors)
             .map(|(p, surv)| {
@@ -4024,13 +3882,13 @@ impl DerivedEngine {
                 (terms, surv.iter().map(|(_, _, _, rid)| *rid).collect())
             })
             .collect();
-        let snippets = Self::fuzzy_snippets_batch(&conn, &snippet_jobs)?;
+        let spans = Self::fuzzy_spans_batch(&conn, &span_jobs)?;
         let out = survivors
             .into_iter()
-            .zip(snippets)
-            .map(|(surv, snip)| {
+            .zip(spans)
+            .map(|(surv, span)| {
                 surv.into_iter()
-                    .map(|(nid, source, r, rid)| (nid, source, r, snip.get(&rid).cloned()))
+                    .map(|(nid, source, r, rid)| (nid, source, r, span.get(&rid).cloned()))
                     .collect()
             })
             .collect();
@@ -4193,26 +4051,29 @@ impl DerivedEngine {
         Ok(seg_meta)
     }
 
-    /// One snippet per surviving rowid, per query. `jobs[i]` is `(pruned_terms,
-    /// rowids)` for query `i`: the rare trigrams it ranked on and its surviving idx
-    /// rowids. An empty job (unservable query, or no survivors) yields an empty map.
+    /// One [`LexicalSpan`] per surviving rowid, per query: the survivor's FULL
+    /// NFC derived segment text + the byte span of its first..last matching
+    /// trigram. `jobs[i]` is `(pruned_terms, rowids)` for query `i`: the rare
+    /// trigrams it ranked on and its surviving idx rowids. An empty job
+    /// (unservable query, or no survivors) yields an empty map.
     ///
     /// Reads each survivor's text by a plain rowid lookup — NOT a `MATCH` — and
-    /// windows it in Rust ([`Self::window_snippet`]). The `snippet()` builtin needs
-    /// a `MATCH`, and re-running the OR over the index to snippet a handful of rows
-    /// re-pays the posting scan the overlap path exists to avoid; a rowid lookup
-    /// reads only the survivor pages. Snippets are off the hot path: reading text
-    /// for every candidate is what made bm25 expensive. Reads on the passed
-    /// [`ReadPool`] connection.
+    /// locates the span in Rust ([`Self::match_span`]). The whole segment text is
+    /// emitted (not a `…`-window) so the client annotates within it AND the kernel
+    /// can literal-verify the `exact` tier against the SAME text. A rowid lookup
+    /// reads only the survivor pages — re-running the OR to `snippet()` a handful
+    /// of rows would re-pay the posting scan the overlap path exists to avoid.
+    /// Reads on the passed [`ReadPool`] connection.
     ///
     /// # Errors
     ///
     /// Returns an error if a text lookup fails.
-    fn fuzzy_snippets_batch(
+    fn fuzzy_spans_batch(
         conn: &Connection,
         jobs: &[(&[Trigram], Vec<i64>)],
-    ) -> NativeResult<Vec<std::collections::HashMap<i64, String>>> {
-        let mut out: Vec<std::collections::HashMap<i64, String>> = Vec::with_capacity(jobs.len());
+    ) -> NativeResult<Vec<std::collections::HashMap<i64, LexicalSpan>>> {
+        let mut out: Vec<std::collections::HashMap<i64, LexicalSpan>> =
+            Vec::with_capacity(jobs.len());
         if jobs.iter().all(|(_, rids)| rids.is_empty()) {
             return Ok(jobs
                 .iter()
@@ -4232,7 +4093,7 @@ impl DerivedEngine {
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!("SELECT idx.rowid, idx.txt FROM idx WHERE idx.rowid IN ({csv})");
-            let run = || -> rusqlite::Result<Result<std::collections::HashMap<i64, String>, NativeError>> {
+            let run = || -> rusqlite::Result<Result<std::collections::HashMap<i64, LexicalSpan>, NativeError>> {
                 let mut stmt = conn.prepare_cached(&sql)?;
                 let mut q = stmt.query([])?;
                 let mut m = std::collections::HashMap::new();
@@ -4247,8 +4108,8 @@ impl DerivedEngine {
                     };
                     match (|| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)))() {
                         Ok((rid, Some(txt))) => {
-                            if let Some(s) = Self::window_snippet(&txt, terms) {
-                                m.insert(rid, s);
+                            if let Some(span) = Self::match_span(&txt, terms) {
+                                m.insert(rid, LexicalSpan { text: txt, span });
                             }
                         }
                         Ok((_, None)) => {}
@@ -4265,36 +4126,78 @@ impl DerivedEngine {
         Ok(out)
     }
 
-    /// A `…`-delimited window of `txt` around its earliest match of any `terms`
-    /// trigram — the fuzzy snippet, built without FTS5's `snippet()` (which needs a
-    /// MATCH). Searches `txt`'s own char-trigrams (lowercased per window) so the
-    /// match position indexes the ORIGINAL text and the slice preserves its case;
-    /// `SNIPPET_TOKENS` chars of context flank the match. `None` if nothing matched
-    /// (no snippet rather than a misleading head-of-text slice).
-    fn window_snippet(txt: &str, terms: &[Trigram]) -> Option<String> {
-        let chars: Vec<char> = txt.chars().collect();
+    /// The UTF-8 byte span `[first, last)` in `txt` covering its FIRST..LAST
+    /// matching trigram (any of `terms`) — the fuzzy overlap span, emitted with
+    /// `txt` (the whole NFC derived segment) so the client highlights within the
+    /// matched text rather than a server-chosen `…`-window. `terms` are the
+    /// query's lowercased trigrams; each char-window of `txt` is lowercased to
+    /// compare, so the returned offsets index the ORIGINAL-case `txt` (the
+    /// emitted bytes). `None` if nothing matched.
+    fn match_span(txt: &str, terms: &[Trigram]) -> Option<(usize, usize)> {
+        let chars: Vec<(usize, char)> = txt.char_indices().collect();
         if chars.len() < MIN_TRIGRAM {
             return None;
         }
-        let ctx = SNIPPET_TOKENS as usize;
-        let hit = (0..=chars.len() - MIN_TRIGRAM).find(|&i| {
-            let tri: String = chars[i..i + MIN_TRIGRAM]
+        let mut first: Option<usize> = None;
+        let mut last: usize = 0;
+        for i in 0..=chars.len() - MIN_TRIGRAM {
+            let window: String = chars[i..i + MIN_TRIGRAM]
                 .iter()
+                .map(|(_, c)| *c)
                 .collect::<String>()
                 .to_lowercase();
-            terms.iter().any(|t| t.as_str() == tri)
-        })?;
-        let start = hit.saturating_sub(ctx);
-        let end = (hit + MIN_TRIGRAM + ctx).min(chars.len());
-        let mut s = String::new();
-        if start > 0 {
-            s.push('…');
+            if terms.iter().any(|t| t.as_str() == window) {
+                first.get_or_insert(chars[i].0);
+                let (last_off, last_ch) = chars[i + MIN_TRIGRAM - 1];
+                last = last_off + last_ch.len_utf8();
+            }
         }
-        s.extend(&chars[start..end]);
-        if end < chars.len() {
-            s.push('…');
+        first.map(|f| (f, last))
+    }
+}
+
+/// Test-only contiguous-literal probes. The production `search_substring` was
+/// removed when fuzzy became the sole lexical read (the `exact` tier is now
+/// recovered in the KERNEL by literal-verifying fuzzy hits). The store-level
+/// tests still need a contiguous-literal probe to assert build/ingest/remove/
+/// scope correctness independent of the overlap ranker — these wrap the
+/// production [`DerivedEngine::match_rows`] (the same FTS5 phrase MATCH the old
+/// `search_substring` delegated to, kept for recognition/ingest) in the old
+/// ergonomic signature. The 4th tuple slot is always `None`: the snippet/span is
+/// the kernel's concern now, and no store test reads it.
+#[cfg(test)]
+impl DerivedEngine {
+    fn search_substring(
+        &self,
+        query: &str,
+        limit: i64,
+        scope: Option<&[i64]>,
+        exclude_sources: &[&str],
+    ) -> NativeResult<Option<Vec<LexicalRow>>> {
+        let normalized = nfc(query);
+        let q = normalized.trim();
+        if q.chars().count() < MIN_TRIGRAM {
+            return Ok(None);
         }
-        Some(s)
+        let rows = self.match_rows(&fts_quote(q), limit, false, scope, exclude_sources)?;
+        Ok(Some(
+            rows.into_iter()
+                .map(|(nid, source, r, _txt, _snippet)| (nid, source, r, None))
+                .collect(),
+        ))
+    }
+
+    fn search_substring_batch(
+        &self,
+        queries: &[&str],
+        limit: i64,
+        scope: Option<&[i64]>,
+        exclude_sources: &[&str],
+    ) -> NativeResult<Vec<Option<Vec<LexicalRow>>>> {
+        queries
+            .iter()
+            .map(|q| self.search_substring(q, limit, scope, exclude_sources))
+            .collect()
     }
 }
 
@@ -4309,6 +4212,29 @@ mod lexical_tests {
     /// `&[&str]` literals → `Vec<Trigram>`.
     fn tgs(ss: &[&str]) -> Vec<Trigram> {
         ss.iter().map(|s| tg(s)).collect()
+    }
+
+    #[test]
+    fn match_span_is_byte_offsets_of_first_through_last_trigram() {
+        // The span is UTF-8 BYTE offsets into the ORIGINAL text (so a leading
+        // multibyte char shifts them past the char index), spanning the FIRST
+        // matching trigram's start to the LAST matching trigram's end.
+        let terms = tgs(&["cat", "dog"]);
+        // "héllo " is 7 bytes ("é" is 2): "cat" starts at byte 7, char 6.
+        let txt = "héllo cat and dog";
+        let (lo, hi) = DerivedEngine::match_span(txt, &terms).unwrap();
+        assert_eq!(lo, 7);
+        assert_eq!(&txt[lo..hi], "cat and dog");
+
+        // Case-insensitive: an uppercase occurrence in the text still matches, and
+        // the span indexes the original (uppercase) bytes.
+        let (lo2, hi2) = DerivedEngine::match_span("THE CAT", &tgs(&["cat"])).unwrap();
+        assert_eq!(&"THE CAT"[lo2..hi2], "CAT");
+
+        // No matching trigram → None (no misleading head-of-text span).
+        assert!(DerivedEngine::match_span("nothing here", &tgs(&["zzz"])).is_none());
+        // Text shorter than a trigram → None.
+        assert!(DerivedEngine::match_span("ab", &tgs(&["abc"])).is_none());
     }
 
     fn store() -> DerivedEngine {
@@ -4432,17 +4358,19 @@ mod lexical_tests {
             let df = DerivedEngine::trigram_dfs(&conn, &gram_vec).unwrap();
             let pruned = DerivedEngine::prune_to_rare_terms(&grams, &df, policy);
             let bitmaps = DerivedEngine::load_trigram_bitmaps(&conn, &pruned).unwrap();
+            // The per-query overlap floor the bit-sliced ranker derives internally.
+            let floor = FUZZY_MIN_SHARED.min(pruned.len());
             for &top_k in &[1usize, 2, 3, 5, 10, 100] {
-                // Reference: accumulate_overlap → candidates(≥2) → seg_meta → rank.
+                // Reference: accumulate_overlap → candidates(≥floor) → seg_meta → rank.
                 let overlap = DerivedEngine::accumulate_overlap(&pruned, &bitmaps);
                 let candidates: Vec<i64> = overlap
                     .iter()
-                    .filter(|(_, &c)| c >= FUZZY_MIN_SHARED)
+                    .filter(|(_, &c)| c >= floor)
                     .map(|(&r, _)| r)
                     .collect();
                 let seg_meta =
                     DerivedEngine::seg_meta_for_rowids(&conn, &candidates, &[], None).unwrap();
-                let reference = DerivedEngine::rank_overlap(&overlap, &seg_meta, top_k);
+                let reference = DerivedEngine::rank_overlap(&overlap, &seg_meta, floor, top_k);
                 let bit_sliced =
                     DerivedEngine::fuzzy_rank_query(&conn, &pruned, &bitmaps, top_k, &[], None)
                         .unwrap();
@@ -4731,12 +4659,12 @@ mod lexical_tests {
     }
 
     #[test]
-    fn batch_lexical_matches_loop_of_singular() {
-        // The batched reads must return, per query and in order, EXACTLY what
-        // looping the singular reads returns — across servable / sub-trigram /
+    fn fuzzy_batch_matches_loop_of_singular() {
+        // The batched fuzzy read must return, per query and in order, EXACTLY what
+        // looping the singular read returns — across servable / sub-trigram /
         // no-match queries, scoped / unscoped / empty-scope, and with / without a
         // hidden source. Batching changes only HOW the reads are issued (one lock,
-        // one scope staging, one compiled statement), never WHAT they return.
+        // one DF lookup, one shared posting read), never WHAT they return.
         let dir = std::env::temp_dir().join(format!(
             "shrike-derived-batchparity-{}-{}",
             std::process::id(),
@@ -4814,18 +4742,6 @@ mod lexical_tests {
 
         for scope in scopes {
             for exclude in excludes {
-                let want_sub: Vec<Option<Vec<LexicalRow>>> = queries
-                    .iter()
-                    .map(|q| e.search_substring(q, limit, scope, exclude).unwrap())
-                    .collect();
-                let got_sub = e
-                    .search_substring_batch(&q_refs, limit, scope, exclude)
-                    .unwrap();
-                assert_eq!(
-                    got_sub, want_sub,
-                    "substring parity (scope={scope:?}, exclude={exclude:?})"
-                );
-
                 let want_fz: Vec<Vec<LexicalRow>> = queries
                     .iter()
                     .map(|q| e.search_fuzzy(q, limit, scope, exclude).unwrap())
@@ -6653,22 +6569,6 @@ mod adversarial_tests {
             let exclude: &[&str] = if exclude_vlm { &excl_vlm } else { &[] };
             let limit = 10i64;
 
-            let want_sub: Vec<Option<Vec<LexicalRow>>> = queries
-                .iter()
-                .map(|q| e.search_substring(q, limit, scope, exclude).unwrap())
-                .collect();
-            let got_sub = e
-                .search_substring_batch(&queries, limit, scope, exclude)
-                .unwrap();
-            prop_assert_eq!(
-                got_sub,
-                want_sub,
-                "substring batch != loop (queries={:?} scope={:?} exclude={:?})",
-                queries,
-                scope,
-                exclude
-            );
-
             let want_fz: Vec<Vec<LexicalRow>> = queries
                 .iter()
                 .map(|q| e.search_fuzzy(q, limit, scope, exclude).unwrap())
@@ -6691,7 +6591,7 @@ mod adversarial_tests {
     #[test]
     fn empty_query_batch_returns_empty_vec() {
         // The fixed per-call cost is paid once; an empty batch must short-circuit
-        // to an empty result vec (not error, not a one-element vec) on both paths.
+        // to an empty result vec (not error, not a one-element vec).
         let (e, dir) = store();
         build_snapshot_live(
             &e,
@@ -6699,10 +6599,6 @@ mod adversarial_tests {
             1,
         )
         .unwrap();
-        assert!(e
-            .search_substring_batch(&[], 10, None, &[])
-            .unwrap()
-            .is_empty());
         assert!(e.search_fuzzy_batch(&[], 10, None, &[]).unwrap().is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
