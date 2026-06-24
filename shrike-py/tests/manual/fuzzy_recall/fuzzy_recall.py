@@ -20,7 +20,7 @@ Two axes with very different trust:
   verdict + the cap pick + the tail-driver, come ONLY from the maintainer's clean-env
   run; the local output is a template that run fills in (loudly labelled untrusted).
 
-The prune sweep is the 2D ``M × k_max`` grid — see :func:`cap_grid`.
+The prune sweep is the 2D ``F × B`` grid (typo floor × cost budget) — see :func:`cap_grid`.
 On a clean run the latency harness picks the curve with max recall@10 whose single-query
 **p95** clears the budget (the #927 cap-default decision), and the **tail diagnostic**
 (:func:`_render_slow_query_diagnostic`) names which query shapes (trigram count,
@@ -82,40 +82,43 @@ BUDGET_MS = 10.0
 
 @dataclass(frozen=True)
 class PrunePolicy:
-    """One prune-policy arm: a label and the ``(target_candidates, max_terms)`` set on
-    the engine before its queries run. The evidence pruner keeps a query's rarest
-    trigrams until the accumulated IDF targets ~``target_candidates`` (``M``) surviving
-    docs (``T = ln(N/M)``) or ``max_terms`` (``k_max``) is reached. The control is the
-    shipped default."""
+    """One prune-policy arm set on the engine before its queries run. The cost-budget
+    pruner keeps a query's rarest trigrams first, always at least the typo floor ``F``,
+    then admits more until the cumulative scan cost (``α·|kept| + β·Σdf``) reaches the
+    budget ``B``, capped at ``k_max``. The control is the shipped default (``B=0`` →
+    exactly ``F`` rarest = the proven fixed-floor). The eval sweeps ``F`` and ``B``;
+    ``α``/``β`` are profiled separately (a per-list-vs-per-rowid cost measurement) and
+    held at the pure-``Σdf`` hypothesis (``α=0, β=1``) here."""
 
     label: str
-    target_candidates: int
-    max_terms: int
+    typo_floor: int
+    cost_budget: float
+    max_terms: int = 12
+    cost_per_term: float = 0.0
+    cost_per_df: float = 1.0
 
 
-#: The prune policy every arm is read against — the shipped default (M=200, k_max=12).
-CONTROL: PrunePolicy = PrunePolicy("default M=200 (control)", target_candidates=200, max_terms=12)
+#: The prune policy every arm is read against — the shipped default (F=6, B=0).
+CONTROL: PrunePolicy = PrunePolicy("default F=6 B=0 (control)", typo_floor=6, cost_budget=0.0)
 
-#: The 2D prune grid: `M` (target survivor count — smaller `M` raises `T` and keeps
-#: MORE rare trigrams, narrowing harder) × `k_max` (the cost cap on a starved query).
-#: The frontier sweeps both so the recall / single-query-latency knee is visible across
-#: the flank — smaller `M` trades latency for recall; `k_max` only binds on the
-#: all-common tail.
-GRID_TARGETS: tuple[int, ...] = (50, 100, 200, 400, 800)
-GRID_MAX_TERMS: tuple[int, ...] = (8, 12, 16)
+#: The 2D prune grid: `F` (constant typo floor — survive an edit and still clear the
+#: overlap floor) × `B` (cost budget admitting breadth past `F`, in Σdf "rowids
+#: scanned" units). The frontier sweeps both so the recall / single-query-latency knee
+#: is visible: larger `F`/`B` trade latency for typo + near-match recall. `B=0` is the
+#: fixed-floor baseline.
+GRID_FLOORS: tuple[int, ...] = (4, 5, 6, 7)
+GRID_BUDGETS: tuple[float, ...] = (0.0, 2_000.0, 10_000.0, 50_000.0, 200_000.0)
 
 
 def cap_grid(
-    targets: tuple[int, ...] = GRID_TARGETS,
-    max_terms: tuple[int, ...] = GRID_MAX_TERMS,
+    floors: tuple[int, ...] = GRID_FLOORS,
+    budgets: tuple[float, ...] = GRID_BUDGETS,
 ) -> tuple[PrunePolicy, ...]:
-    """The control followed by the full `M × k_max` grid. A cell whose evidence never
-    reaches `T` over the query set still runs — it just behaves like its `k_max`, which
-    the frontier reads correctly. The control is first so it anchors the per-arm deltas."""
+    """The control followed by the full `F × B` grid. The control is first so it anchors
+    the per-arm deltas. (`α`/`β` are fixed at the pure-`Σdf` hypothesis across the grid;
+    re-profile them before trusting `B`'s absolute scale — see the findings note.)"""
     grid = tuple(
-        PrunePolicy(f"M={m} k_max={k}", target_candidates=m, max_terms=k)
-        for m in targets
-        for k in max_terms
+        PrunePolicy(f"F={f} B={b:g}", typo_floor=f, cost_budget=b) for f in floors for b in budgets
     )
     return (CONTROL, *grid)
 
@@ -314,7 +317,13 @@ def _evaluate_arm(
     control arm). Recall is computed from the batched fuzzy read (deterministic,
     mode-independent); latency is a separate single-query pass. Timing is off by
     default — it belongs on a clean machine."""
-    engine.set_prune_policy(policy.target_candidates, policy.max_terms)
+    engine.set_prune_policy(
+        policy.typo_floor,
+        policy.cost_budget,
+        policy.max_terms,
+        policy.cost_per_term,
+        policy.cost_per_df,
+    )
     texts = [q.query for q in queries]
 
     results: list[list[tuple]] = []
@@ -487,13 +496,13 @@ def render_results(run: EvalRun) -> str:
     # Headline table.
     lines.append("## Overall")
     lines.append("")
-    lines.append("| arm | M | k_max | recall@10 | Δ vs control | MRR |")
+    lines.append("| arm | F | B | recall@10 | Δ vs control | MRR |")
     lines.append("|---|---:|---:|---:|---:|---:|")
     for a in run.arms:
         delta = a.recall_at_k - control.recall_at_k
         dstr = "—" if a is control else f"{delta * 100:+.1f}"
         lines.append(
-            f"| {a.policy.label} | {a.policy.target_candidates} | {a.policy.max_terms} | "
+            f"| {a.policy.label} | {a.policy.typo_floor} | {a.policy.cost_budget:g} | "
             f"{_fmt_pct(a.recall_at_k)} | {dstr} | {_fmt_pct(a.mrr)} |"
         )
     lines.append("")
@@ -625,8 +634,8 @@ def _render_picks(timed: list[ArmResult]) -> list[str]:
         )
         assert best.latency is not None
         return (
-            f"- **{pct} budget:** `{best.policy.label}` (M={best.policy.target_candidates}, "
-            f"k_max={best.policy.max_terms}) — recall@10 "
+            f"- **{pct} budget:** `{best.policy.label}` (F={best.policy.typo_floor}, "
+            f"B={best.policy.cost_budget:g}) — recall@10 "
             f"{_fmt_pct(best.recall_at_k)} at {pct} {value(best.latency):.3f}ms."
         )
 

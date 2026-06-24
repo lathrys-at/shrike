@@ -1275,38 +1275,7 @@ impl DerivedEngine {
             [],
         )
         .map_err(db_err)?;
-        // Stamp the corpus document count `N` alongside the DF snapshot — the evidence
-        // prune's `T = ln(N/M)` and per-trigram `ln(N/df)` must read `N` from the SAME
-        // snapshot as `df`, and a per-query `count(*)` would be an O(rows) hot-path read.
-        conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES('doc_count', \
-             (SELECT count(*) FROM rowmap))",
-            [],
-        )
-        .map_err(db_err)?;
         Ok(())
-    }
-
-    /// The corpus document count `N` for the evidence prune — the row count stamped
-    /// with the DF snapshot ([`Self::refresh_trigram_df_in`]), snapshot-consistent with
-    /// the `df` the prune reads. Falls back to a live `rowmap` count when the stamp is
-    /// absent (a store that has had writes but no DF refresh yet), and reads `1` for a
-    /// genuinely empty store (a safe non-zero denominator; fuzzy returns nothing there
-    /// anyway).
-    fn doc_count(conn: &Connection) -> NativeResult<i64> {
-        let stamped: Option<i64> = conn
-            .query_row("SELECT value FROM meta WHERE key='doc_count'", [], |r| {
-                r.get(0)
-            })
-            .optional()
-            .map_err(db_err)?;
-        if let Some(n) = stamped {
-            return Ok(n.max(1));
-        }
-        let live: i64 = conn
-            .query_row("SELECT count(*) FROM rowmap", [], |r| r.get(0))
-            .map_err(db_err)?;
-        Ok(live.max(1))
     }
 
     /// Fully (re)materialize the BASE posting bitmaps from the live index — by
@@ -3151,62 +3120,88 @@ pub const FUZZY_MIN_SHARED: usize = 2;
 /// the per-write-cost / coverage knee is tuned on the perf harness at 50k.
 pub const MATERIALIZE_DF_CEILING: usize = 4096;
 
-/// Default target candidate-set size `M` for the evidence pruner
-/// ([`PrunePolicy`]): the prune keeps rarest-first trigrams until the accumulated
-/// IDF evidence targets ~`M` surviving documents (`T = ln(N/M)` nats). Generous to
-/// start — real candidate sets run LARGER than `M` because query trigrams co-occur
-/// (the IDF-independence the threshold assumes is optimistic), so `M` is a tuning
-/// starting point, not a guarantee. Tuned down on the recall eval.
-pub const PRUNE_TARGET_CANDIDATES: usize = 200;
+/// Default constant typo floor `F` ([`PrunePolicy`]): the prune always keeps at least
+/// `min(F, |present|)` of a query's rarest present trigrams, so a single edit (which
+/// corrupts the ~2-3 trigrams spanning that character) still leaves
+/// [`FUZZY_MIN_SHARED`] intact trigrams for a candidate to overlap on. Derivation:
+/// `F ≈ FUZZY_MIN_SHARED + one-typo-damage ≈ 2 + 3`. A CONSTANT, not a curve — query
+/// length enters typo recall only via the count of edits, which scales with characters
+/// typed, not with the (logarithmic) trigram count. `F = 6` reproduces the historical
+/// fixed-6 floor. Swept {4,5,6,7} on the adversarial eval.
+pub const PRUNE_TYPO_FLOOR: usize = 6;
 
-/// Default hard cap `k_max` on the number of trigrams the evidence pruner keeps
-/// ([`PrunePolicy`]) — a cost guard for a starved query whose evidence never
-/// reaches `T` (all-common-word queries). It bounds the COUNT of kept trigrams, not
-/// their posting LENGTH, so a short all-common query stays the residual slow case.
+/// Default cost budget `B` ([`PrunePolicy`]) in the cost units of [`PrunePolicy::cost`].
+/// Past the typo floor, the rarest-first walk keeps admitting trigrams (breadth — it
+/// reaches into the shared common part, which hedges typos and surfaces near-matches)
+/// until the cumulative scan cost reaches `B`. The DEFAULT is `0`: the budget binds
+/// immediately at the floor, so the out-of-box prune keeps exactly `F` rarest trigrams
+/// — the proven fixed-6 behaviour, no recall change on adoption. Breadth is turned on
+/// by raising `B`; the recall/latency knee (#977 p95 ≤ 10ms vs #927 recall) is found by
+/// sweeping `B` on the eval AFTER profiling the cost coefficients (below).
+pub const PRUNE_COST_BUDGET: f64 = 0.0;
+
+/// Default hard cap `k_max` on the number of trigrams the pruner keeps
+/// ([`PrunePolicy`]) — an absolute ceiling, and (if the per-list term dominates cost)
+/// the real bound on the `α·|kept|` cost. Bounds the COUNT of kept trigrams, not their
+/// posting LENGTH, so a short all-common query stays the residual slow case.
 pub const PRUNE_MAX_TERMS: usize = 12;
 
-/// Knobs for the evidence-accumulation trigram pruner ([`DerivedEngine::prune_to_rare_terms`]):
-/// keep a query's RAREST trigrams first (lowest DF = highest IDF = cheapest to scan
-/// AND most discriminating), accumulating `ln(N/df)` nats of evidence, and stop once
-/// `evidence >= T = ln(N/M)` (≈`M` surviving docs) or `max_terms` is reached. The
-/// prune derives from THIS query's own trigram DFs, never a batch aggregate, so
-/// `search_fuzzy_batch([…,q,…]) == search_fuzzy(q)`. `T` is derived inline from `N`
-/// (the corpus doc count) and `target_candidates`; there is no precompute job.
+/// Default per-kept-list cost coefficient `α` ([`PrunePolicy::cost`]): each kept
+/// trigram costs a bitmap load + delta merge BEFORE row iteration — a fixed per-list
+/// cost present even for a `df=1` trigram. Whether this term matters vs the per-rowid
+/// `β·Σdf` term is a measurement (profile many-cheap-lists vs one-expensive-list at
+/// matched `Σdf`); defaulted to `0` (pure-`Σdf` hypothesis) pending that profile, both
+/// terms inert anyway while `B = 0`.
+pub const PRUNE_COST_PER_TERM: f64 = 0.0;
+
+/// Default per-rowid cost coefficient `β` ([`PrunePolicy::cost`]): the per-posting-row
+/// scan cost (`β·Σdf`). Defaulted to `1` so the budget reads in "rowids scanned".
+pub const PRUNE_COST_PER_DF: f64 = 1.0;
+
+/// Knobs for the cost-budget trigram pruner ([`DerivedEngine::prune_to_rare_terms`]):
+/// keep a query's RAREST trigrams first (lowest DF = cheapest to scan AND most
+/// discriminating); always keep at least the typo floor `F`; past it keep admitting
+/// until the cumulative [`Self::cost`] reaches the budget `B`; never exceed `k_max`.
+/// The selection derives from THIS query's own trigram DFs, never a batch aggregate or
+/// the corpus size `N`, so `search_fuzzy_batch([…,q,…]) == search_fuzzy(q)`.
 ///
-/// The default ([`PRUNE_TARGET_CANDIDATES`] / [`PRUNE_MAX_TERMS`]) is settable
-/// ([`DerivedEngine::set_prune_policy`]) so the recall eval can sweep `M`/`k_max`
-/// without recompiling.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The default is settable ([`DerivedEngine::set_prune_policy`]) so the recall eval can
+/// sweep `F`/`B` (and the cost coefficients) without recompiling. The default `B = 0`
+/// reduces to the proven fixed-`F` floor (no breadth, no recall change).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PrunePolicy {
-    /// `M`: the target surviving-document count the evidence threshold aims for.
-    pub target_candidates: usize,
-    /// `k_max`: the hard ceiling on kept trigrams (a never-stops-on-evidence guard).
+    /// `F`: the constant typo floor — keep at least `min(F, |present|)` rarest present.
+    pub typo_floor: usize,
+    /// `B`: the cost budget admitted PAST the floor (in [`Self::cost`] units).
+    pub cost_budget: f64,
+    /// `k_max`: the absolute ceiling on kept trigrams.
     pub max_terms: usize,
+    /// `α`: per-kept-list fixed cost (bitmap load + delta merge).
+    pub cost_per_term: f64,
+    /// `β`: per-rowid scan cost (multiplies a trigram's `df`).
+    pub cost_per_df: f64,
 }
 
 impl Default for PrunePolicy {
     fn default() -> Self {
         Self {
-            target_candidates: PRUNE_TARGET_CANDIDATES,
+            typo_floor: PRUNE_TYPO_FLOOR,
+            cost_budget: PRUNE_COST_BUDGET,
             max_terms: PRUNE_MAX_TERMS,
+            cost_per_term: PRUNE_COST_PER_TERM,
+            cost_per_df: PRUNE_COST_PER_DF,
         }
     }
 }
 
 impl PrunePolicy {
-    /// The evidence threshold `T = ln(N / M)` in nats for a corpus of `n_docs`
-    /// documents. Clamped at 0: when `N <= M` the corpus is already smaller than the
-    /// target, so the first kept trigram's evidence clears it and the prune keeps just
-    /// its `min(FUZZY_MIN_SHARED, |present|)` floor of present trigrams. `n_docs <= 0`
-    /// (an empty or never-built store) yields 0 likewise.
+    /// The two-term scan cost of keeping `n_kept` trigrams whose document frequencies
+    /// sum to `sum_df`: `α·n_kept + β·Σdf`. `α` is the fixed per-list cost (a bitmap
+    /// load + delta merge), `β` the per-rowid scan cost. The budget `B` is compared
+    /// against this. (Profiling decides whether `α` matters; pure-`Σdf` is `α = 0`.)
     #[must_use]
-    fn evidence_threshold(&self, n_docs: i64) -> f64 {
-        if n_docs <= 0 || self.target_candidates == 0 {
-            return 0.0;
-        }
-        (n_docs as f64 / self.target_candidates as f64)
-            .ln()
-            .max(0.0)
+    fn cost(&self, n_kept: usize, sum_df: i64) -> f64 {
+        self.cost_per_term * n_kept as f64 + self.cost_per_df * sum_df.max(0) as f64
     }
 }
 
@@ -3434,34 +3429,30 @@ impl DerivedEngine {
     }
 
     /// The fuzzy candidate trigrams the overlap ranker queries and counts, selected by
-    /// EVIDENCE accumulation: walk the query's PRESENT trigrams rarest-first (lowest
-    /// DF = highest IDF = cheapest to scan AND most discriminating), summing each one's
-    /// `ln(N/df)` nats, and stop once the evidence targets ~`M` surviving documents
-    /// (`evidence >= T = ln(N/M)`) or `k_max` ([`PrunePolicy`]) trigrams are kept. A
-    /// prefix of the rarest-first order is exactly the right set: rare trigrams narrow
-    /// the corpus fastest, and a common trigram added later buys little discrimination
-    /// for a long posting scan.
+    /// a COST-BUDGET walk: take the query's PRESENT trigrams rarest-first (lowest DF =
+    /// cheapest to scan AND most discriminating), always keep at least the typo floor
+    /// `F`, then keep admitting trigrams until the cumulative scan cost
+    /// ([`PrunePolicy::cost`]) reaches the budget `B`, never exceeding `k_max`. Rare
+    /// anchors have tiny postings so the budget keeps MANY of them cheaply (the typo
+    /// hedge + surfaces a sub-word near-match); common trigrams have huge postings so
+    /// the budget keeps FEW (cost-bounded). The default `B = 0` keeps exactly `F` — the
+    /// proven fixed-floor; raising `B` admits breadth within a latency budget.
     ///
-    /// ABSENT (DF-0) trigrams are KEPT but contribute NO evidence (`ln(N/0)` is
-    /// infinite — crediting it would stop the walk early on a trigram that, in a FRESH
-    /// snapshot, surfaces nothing). `df` is the materialized `trigram_df`, which lags
-    /// writes, so a DF-0 trigram can mean "written since the snapshot" rather than
-    /// "absent" — and the #1000 base+delta bitmap IS fresh, so scanning it surfaces the
-    /// just-written note (the #958 recall guarantee). Keeping them costs ~nothing (a
-    /// genuinely-absent trigram has an empty posting) and never starves the evidence
-    /// walk (they are appended, not counted).
+    /// ABSENT (DF-0) trigrams are KEPT but charged NO cost. `df` is the materialized
+    /// `trigram_df`, which lags writes, so a DF-0 trigram can mean "written since the
+    /// snapshot" rather than "absent" — and the #1000 base+delta bitmap IS fresh, so
+    /// scanning it surfaces the just-written note (the #958 recall guarantee). A
+    /// genuinely-absent trigram has an empty posting (free); either way they are
+    /// appended after the budgeted walk, never charged.
     ///
-    /// At least `min(FUZZY_MIN_SHARED, |present|)` present trigrams are always kept, so
-    /// the overlap ranker's shared-trigram floor stays reachable — a query whose
-    /// evidence is satisfied by a single rare anchor would otherwise leave every
-    /// candidate one trigram short of the floor.
-    ///
-    /// The selection derives from THIS query's own trigram DFs and `N`, never a batch
-    /// aggregate, so `search_fuzzy_batch([…,q,…]) == search_fuzzy(q)`.
+    /// The typo floor `F` is clamped to at least [`FUZZY_MIN_SHARED`] (so the overlap
+    /// ranker's shared floor is always reachable) and `k_max` to at least `F` (so a
+    /// mis-swept ceiling can't undercut the floor). Selection derives from THIS query's
+    /// own trigram DFs — never a batch aggregate or the corpus size — so
+    /// `search_fuzzy_batch([…,q,…]) == search_fuzzy(q)`.
     fn prune_to_rare_terms(
         grams: &std::collections::BTreeSet<Trigram>,
         df: &std::collections::HashMap<Trigram, i64>,
-        n_docs: i64,
         policy: PrunePolicy,
     ) -> Vec<Trigram> {
         // Present (DF>0) trigrams, rarest first (DF ascending, term as a deterministic
@@ -3475,29 +3466,26 @@ impl DerivedEngine {
             .collect();
         present.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
 
-        let threshold = policy.evidence_threshold(n_docs);
-        // Always keep enough present trigrams for the overlap floor to be reachable.
-        let min_present = FUZZY_MIN_SHARED.min(present.len());
-        // The cost guard never bites BELOW the floor: a swept `max_terms` smaller than
-        // `min_present` would otherwise stop the walk before the overlap floor is
-        // reachable, making every query on that arm silently un-rankable.
-        let max_terms = policy.max_terms.max(min_present);
-        let n_docs_f = (n_docs.max(1)) as f64;
+        // The typo floor, clamped to the hard reachability floor and to what's present;
+        // the ceiling can't undercut it.
+        let floor = policy.typo_floor.max(FUZZY_MIN_SHARED).min(present.len());
+        let max_terms = policy.max_terms.max(floor);
 
         let mut kept: Vec<Trigram> = Vec::new();
-        let mut evidence = 0.0f64;
+        let mut sum_df: i64 = 0;
         for (g, d) in present {
             kept.push(*g);
-            evidence += (n_docs_f / d as f64).ln().max(0.0);
+            sum_df += d;
             if kept.len() >= max_terms {
-                break; // cost guard: never scan more than k_max postings
+                break; // absolute ceiling
             }
-            if kept.len() >= min_present && evidence >= threshold {
-                break; // enough evidence to narrow to ~M survivors
+            // Past the floor, stop once the kept lists' scan cost reaches the budget.
+            if kept.len() >= floor && policy.cost(kept.len(), sum_df) >= policy.cost_budget {
+                break;
             }
         }
-        // Append every ABSENT (DF-0) trigram — kept for the stale-snapshot recall, no
-        // evidence credit. `grams` is a BTreeSet, so this is deterministic term order.
+        // Append every ABSENT (DF-0) trigram — kept for the stale-snapshot recall, not
+        // charged. `grams` is a BTreeSet, so this is deterministic term order.
         kept.extend(
             grams
                 .iter()
@@ -3975,17 +3963,16 @@ impl DerivedEngine {
         // as before; the freshness bracket flags a write that lands mid-read.
         let conn = self.read_pool.checkout()?;
         let df = Self::trigram_dfs(&conn, &distinct.into_iter().collect::<Vec<Trigram>>())?;
-        // Read the prune policy and the corpus doc count `N` ONCE for the whole batch,
-        // so every query is pruned under one snapshot (a concurrent set never splits a
-        // batch). The evidence threshold is still derived per query from that query's
-        // own trigram DFs — never batch-wide — so batch==serial holds.
+        // Read the prune policy ONCE for the whole batch, so every query is pruned
+        // under one snapshot (a concurrent set never splits a batch). The cost-budget
+        // walk is still derived per query from that query's own trigram DFs — never
+        // batch-wide — so batch==serial holds.
         let policy = self.prune_policy();
-        let n_docs = Self::doc_count(&conn)?;
         let pruned: Vec<Option<Vec<Trigram>>> = gram_sets
             .iter()
             .map(|g| {
                 g.as_ref()
-                    .map(|gs| Self::prune_to_rare_terms(gs, &df, n_docs, policy))
+                    .map(|gs| Self::prune_to_rare_terms(gs, &df, policy))
             })
             .collect();
         // Read each DISTINCT pruned trigram's posting once (shared across queries).
@@ -4431,7 +4418,6 @@ mod lexical_tests {
 
         let conn = e.read_pool.checkout().unwrap();
         let policy = e.prune_policy();
-        let n_docs = DerivedEngine::doc_count(&conn).unwrap();
         let queries = [
             "alphabravo charlie",
             "deltaecho foxtrot golfhotel",
@@ -4444,7 +4430,7 @@ mod lexical_tests {
             };
             let gram_vec: Vec<Trigram> = grams.iter().copied().collect();
             let df = DerivedEngine::trigram_dfs(&conn, &gram_vec).unwrap();
-            let pruned = DerivedEngine::prune_to_rare_terms(&grams, &df, n_docs, policy);
+            let pruned = DerivedEngine::prune_to_rare_terms(&grams, &df, policy);
             let bitmaps = DerivedEngine::load_trigram_bitmaps(&conn, &pruned).unwrap();
             for &top_k in &[1usize, 2, 3, 5, 10, 100] {
                 // Reference: accumulate_overlap → candidates(≥2) → seg_meta → rank.
@@ -4794,13 +4780,16 @@ mod lexical_tests {
         )
         .unwrap();
 
-        // A non-default prune policy (a tighter target so the evidence walk keeps
-        // different sets across the short and long queries below) — the parity check
-        // proves batch==serial holds when the kept set varies by query, not just at the
-        // default.
+        // A non-default prune policy with a non-zero cost budget so the walk keeps
+        // breadth past the floor (varying the kept set across the short and long queries
+        // below) — the parity check proves batch==serial holds when the kept set varies
+        // by query, not just at the default.
         e.set_prune_policy(PrunePolicy {
-            target_candidates: 50,
+            typo_floor: 4,
+            cost_budget: 200.0,
             max_terms: 12,
+            cost_per_term: 0.0,
+            cost_per_df: 1.0,
         });
 
         // literal hit, transposition typo, sub-trigram (None/empty), no-match,
@@ -5059,151 +5048,165 @@ mod lexical_tests {
     }
 
     #[test]
-    fn prune_evidence_stops_at_threshold_and_appends_absent() {
-        // The worked example's shape: keep rarest-first until the accumulated IDF
-        // evidence targets ~M survivors (T = ln(N/M)), then APPEND the absent trigram.
+    fn prune_default_keeps_exactly_the_typo_floor() {
+        // Default policy (F=6, B=0): the budget binds at the floor, so the prune keeps
+        // exactly the 6 rarest present trigrams — the proven fixed-6 — plus all absent.
         use std::collections::{BTreeSet, HashMap};
-        let grams: BTreeSet<Trigram> = tgs(&["rch", "arc", "sea", "ear", "zzz"])
-            .into_iter()
+        let names: Vec<String> = (0..8).map(|i| format!("p{i:02}")).collect();
+        let grams: BTreeSet<Trigram> = names
+            .iter()
+            .map(|s| tg(s))
+            .chain(std::iter::once(tg("zzz")))
             .collect();
-        let df: HashMap<Trigram, i64> = [
-            ("rch", 3000),
-            ("arc", 6000),
-            ("sea", 8000),
-            ("ear", 15000),
-            ("zzz", 0),
-        ]
-        .iter()
-        .map(|(k, v)| (tg(k), *v))
-        .collect();
-        // N=100000, M=200 → T=ln(500)≈6.215. rch (3.507) is below T; +arc (2.813) →
-        // 6.320 ≥ T, so the walk stops after the two rarest present. sea/ear are dropped.
-        let policy = PrunePolicy {
-            target_candidates: 200,
-            max_terms: 12,
-        };
-        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, 100_000, policy);
-        assert_eq!(kept, tgs(&["rch", "arc", "zzz"]));
-        assert!(
-            !kept.iter().any(|t| t.as_str() == "sea"),
-            "sea dropped past the threshold"
+        // df 1..=8 (distinct, so the rarest-6 are unambiguous) + zzz absent.
+        let mut df: HashMap<Trigram, i64> = names
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (tg(s), (i + 1) as i64))
+            .collect();
+        df.insert(tg("zzz"), 0);
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, PrunePolicy::default());
+        assert_eq!(kept.len(), 7, "6 rarest present + 1 absent");
+        assert_eq!(
+            &kept[..6],
+            &tgs(&["p00", "p01", "p02", "p03", "p04", "p05"])[..],
+            "the 6 rarest present, rarest-first"
         );
-        assert!(
-            kept.iter().any(|t| t.as_str() == "zzz"),
-            "absent zzz appended (no evidence credit)"
-        );
+        assert!(kept.iter().any(|t| t.as_str() == "zzz"), "absent appended");
     }
 
     #[test]
-    fn prune_floors_to_min_present_on_a_single_rare_anchor() {
-        // A single ultra-rare anchor already clears T after ONE trigram, but the prune
-        // keeps min(FUZZY_MIN_SHARED, |present|) present so the overlap floor stays
-        // reachable — otherwise every candidate would be one trigram short.
+    fn prune_cost_budget_admits_breadth_past_the_floor_then_stops() {
+        // With a non-zero budget the walk keeps admitting rarest-first past the floor
+        // until the cumulative scan cost (pure Σdf here) reaches B, then stops.
+        use std::collections::{BTreeSet, HashMap};
+        let grams: BTreeSet<Trigram> = tgs(&["rch", "arc", "sea", "ear"]).into_iter().collect();
+        let df: HashMap<Trigram, i64> =
+            [("rch", 3000), ("arc", 6000), ("sea", 8000), ("ear", 15000)]
+                .iter()
+                .map(|(k, v)| (tg(k), *v))
+                .collect();
+        let policy = PrunePolicy {
+            typo_floor: 2,
+            cost_budget: 10_000.0,
+            max_terms: 12,
+            cost_per_term: 0.0,
+            cost_per_df: 1.0,
+        };
+        // rch(3000)+arc(6000)=9000 < 10000 → keep going; +sea → 17000 ≥ B → stop.
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, policy);
+        assert_eq!(kept, tgs(&["rch", "arc", "sea"]), "ear dropped over budget");
+    }
+
+    #[test]
+    fn prune_floor_caps_at_present_count() {
+        // The floor is min(F, |present|): a query with fewer present trigrams than F
+        // keeps all of them (and B=0 doesn't cut below the floor).
         use std::collections::{BTreeSet, HashMap};
         let grams: BTreeSet<Trigram> = tgs(&["ddd", "eee", "ccc"]).into_iter().collect();
         let df: HashMap<Trigram, i64> = [("ddd", 1), ("eee", 2), ("ccc", 3)]
             .iter()
             .map(|(k, v)| (tg(k), *v))
             .collect();
-        // ddd alone is ln(100000)=11.5 ≥ T, but min_present=2 forces a second.
-        let policy = PrunePolicy {
-            target_candidates: 200,
-            max_terms: 12,
-        };
-        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, 100_000, policy);
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, PrunePolicy::default());
         assert_eq!(
             kept,
-            tgs(&["ddd", "eee"]),
-            "keeps 2 present despite T met after 1"
+            tgs(&["ddd", "eee", "ccc"]),
+            "all 3 present kept (floor capped at 3)"
         );
     }
 
     #[test]
-    fn prune_k_max_never_undercuts_the_overlap_floor() {
-        // A swept k_max below FUZZY_MIN_SHARED must not stop the walk before the overlap
-        // floor is reachable — that would make every query on the arm un-rankable. The
-        // cost guard is raised to min_present, so a k_max of 1 still keeps 2 present.
-        use std::collections::{BTreeSet, HashMap};
-        let grams: BTreeSet<Trigram> = tgs(&["ddd", "eee", "ccc"]).into_iter().collect();
-        let df: HashMap<Trigram, i64> = [("ddd", 1), ("eee", 2), ("ccc", 3)]
-            .iter()
-            .map(|(k, v)| (tg(k), *v))
-            .collect();
-        let policy = PrunePolicy {
-            target_candidates: 200,
-            max_terms: 1,
-        };
-        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, 100_000, policy);
-        assert_eq!(
-            kept,
-            tgs(&["ddd", "eee"]),
-            "k_max=1 still keeps the floor of 2"
-        );
-    }
-
-    #[test]
-    fn prune_k_max_caps_a_starved_common_query() {
-        // An all-common query never reaches T (each trigram's IDF is tiny), so the
-        // cost guard k_max bounds the kept COUNT — the residual slow case we accept.
+    fn prune_k_max_caps_breadth_under_a_large_budget() {
+        // A budget so large it never binds within k_max: the absolute ceiling stops it.
         use std::collections::{BTreeSet, HashMap};
         let names: Vec<String> = (0..15).map(|i| format!("c{i:02}")).collect();
         let grams: BTreeSet<Trigram> = names.iter().map(|s| tg(s)).collect();
-        let df: HashMap<Trigram, i64> = names.iter().map(|s| (tg(s), 90_000)).collect();
-        // Each common trigram is ln(100000/90000)=0.105 nats; ~59 would be needed to
-        // reach T≈6.215, but k_max=12 stops first.
+        let df: HashMap<Trigram, i64> = names.iter().map(|s| (tg(s), 1)).collect();
         let policy = PrunePolicy {
-            target_candidates: 200,
+            typo_floor: 2,
+            cost_budget: 1e9,
             max_terms: 12,
+            cost_per_term: 0.0,
+            cost_per_df: 1.0,
         };
-        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, 100_000, policy);
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, policy);
         assert_eq!(
             kept.len(),
             12,
-            "k_max bounds a starved query to 12 kept trigrams"
+            "k_max bounds breadth when the budget never binds"
         );
     }
 
     #[test]
-    fn prune_keeps_absent_without_crediting_evidence() {
-        // The df=0 hybrid: absent trigrams are kept (the #958 stale-snapshot recall)
-        // but contribute NO evidence — so a single present trigram is kept (min_present
-        // floors to 1 here), and the absent ones are appended in BTreeSet order without
-        // having stopped the walk early on fake infinite IDF.
+    fn prune_k_max_never_undercuts_the_typo_floor() {
+        // A swept k_max below the floor must not stop the walk before F is reached —
+        // that would make every query on the arm un-rankable. k_max is raised to the
+        // floor, so k_max=1 with F=6 still keeps 6.
+        use std::collections::{BTreeSet, HashMap};
+        let names: Vec<String> = (0..8).map(|i| format!("p{i:02}")).collect();
+        let grams: BTreeSet<Trigram> = names.iter().map(|s| tg(s)).collect();
+        let df: HashMap<Trigram, i64> = names
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (tg(s), (i + 1) as i64))
+            .collect();
+        let policy = PrunePolicy {
+            typo_floor: 6,
+            cost_budget: 0.0,
+            max_terms: 1,
+            cost_per_term: 0.0,
+            cost_per_df: 1.0,
+        };
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, policy);
+        assert_eq!(kept.len(), 6, "k_max=1 can't undercut the floor of 6");
+    }
+
+    #[test]
+    fn prune_keeps_absent_uncharged() {
+        // The df=0 hybrid: absent trigrams are kept (the #958 stale-snapshot recall) and
+        // charged NO cost, appended after the budgeted walk in BTreeSet order. Here the
+        // single present trigram is kept (floor caps at 1) and the two absent appended.
         use std::collections::{BTreeSet, HashMap};
         let grams: BTreeSet<Trigram> = tgs(&["rch", "yyy", "zzz"]).into_iter().collect();
         let df: HashMap<Trigram, i64> = [("rch", 3000), ("yyy", 0), ("zzz", 0)]
             .iter()
             .map(|(k, v)| (tg(k), *v))
             .collect();
-        let policy = PrunePolicy {
-            target_candidates: 200,
-            max_terms: 12,
-        };
-        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, 100_000, policy);
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, PrunePolicy::default());
         assert_eq!(kept, tgs(&["rch", "yyy", "zzz"]));
     }
 
     #[test]
-    fn prune_policy_default_is_target_200_kmax_12() {
+    fn prune_policy_default_is_fixed_six_floor_zero_budget() {
         let p = PrunePolicy::default();
-        assert_eq!(p.target_candidates, PRUNE_TARGET_CANDIDATES);
-        assert_eq!(p.max_terms, PRUNE_MAX_TERMS);
-        assert_eq!((p.target_candidates, p.max_terms), (200, 12));
+        assert_eq!(p.typo_floor, PRUNE_TYPO_FLOOR);
+        assert_eq!(p.typo_floor, 6);
+        assert_eq!(
+            p.cost_budget, 0.0,
+            "B=0 → keep exactly the floor (proven fixed-6)"
+        );
+        assert_eq!(p.max_terms, 12);
+        assert_eq!(p.cost_per_term, 0.0);
+        assert_eq!(p.cost_per_df, 1.0);
     }
 
     #[test]
-    fn evidence_threshold_is_ln_n_over_m_and_clamps_at_zero() {
+    fn prune_cost_is_two_term() {
         let p = PrunePolicy {
-            target_candidates: 200,
+            typo_floor: 6,
+            cost_budget: 0.0,
             max_terms: 12,
+            cost_per_term: 2.0,
+            cost_per_df: 3.0,
         };
-        assert!((p.evidence_threshold(100_000) - (500.0f64).ln()).abs() < 1e-9);
-        assert_eq!(
-            p.evidence_threshold(100),
-            0.0,
-            "N < M → threshold clamps to 0"
-        );
-        assert_eq!(p.evidence_threshold(0), 0.0, "empty corpus → 0");
+        assert_eq!(p.cost(4, 10), 2.0 * 4.0 + 3.0 * 10.0);
+        let pure = PrunePolicy {
+            cost_per_term: 0.0,
+            cost_per_df: 1.0,
+            ..p
+        };
+        assert_eq!(pure.cost(4, 10), 10.0, "pure-Σdf when α=0");
     }
 
     #[test]

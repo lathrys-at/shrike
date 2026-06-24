@@ -993,23 +993,44 @@ impl DerivedTextEngine {
         .map_err(to_py_err)
     }
 
-    /// Set the evidence-pruner policy: `target_candidates` (`M`, the survivor count the
-    /// `T = ln(N/M)` threshold aims for) and `max_terms` (`k_max`, the kept-trigram
-    /// cap). The recall eval sweeps these; production never calls it.
-    fn set_prune_policy(&self, py: Python<'_>, target_candidates: usize, max_terms: usize) {
+    /// Set the cost-budget pruner policy: `typo_floor` (`F`, min rarest trigrams kept),
+    /// `cost_budget` (`B`, scan-cost admitted past the floor), `max_terms` (`k_max`),
+    /// and the cost coefficients `cost_per_term` (`α`, per kept list) / `cost_per_df`
+    /// (`β`, per rowid). The recall eval sweeps `F`/`B` (and profiles `α`/`β`);
+    /// production never calls it.
+    #[allow(clippy::too_many_arguments)]
+    fn set_prune_policy(
+        &self,
+        py: Python<'_>,
+        typo_floor: usize,
+        cost_budget: f64,
+        max_terms: usize,
+        cost_per_term: f64,
+        cost_per_df: f64,
+    ) {
         py.detach(|| {
             self.inner.set_prune_policy(shrike_derived::PrunePolicy {
-                target_candidates,
+                typo_floor,
+                cost_budget,
                 max_terms,
+                cost_per_term,
+                cost_per_df,
             });
         });
     }
 
-    /// The current `(target_candidates, max_terms)` prune policy.
-    fn prune_policy(&self, py: Python<'_>) -> (usize, usize) {
+    /// The current `(typo_floor, cost_budget, max_terms, cost_per_term, cost_per_df)`
+    /// prune policy.
+    fn prune_policy(&self, py: Python<'_>) -> (usize, f64, usize, f64, f64) {
         py.detach(|| {
             let p = self.inner.prune_policy();
-            (p.target_candidates, p.max_terms)
+            (
+                p.typo_floor,
+                p.cost_budget,
+                p.max_terms,
+                p.cost_per_term,
+                p.cost_per_df,
+            )
         })
     }
 
