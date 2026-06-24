@@ -20,7 +20,7 @@ Two axes with very different trust:
   verdict + the cap pick + the tail-driver, come ONLY from the maintainer's clean-env
   run; the local output is a template that run fills in (loudly labelled untrusted).
 
-The cap sweep is the 2D ``k × ceiling`` grid (floor pinned at 6) — see :func:`cap_grid`.
+The prune sweep is the 2D ``M × k_max`` grid — see :func:`cap_grid`.
 On a clean run the latency harness picks the curve with max recall@10 whose single-query
 **p95** clears the budget (the #927 cap-default decision), and the **tail diagnostic**
 (:func:`_render_slow_query_diagnostic`) names which query shapes (trigram count,
@@ -81,48 +81,47 @@ BUDGET_MS = 10.0
 
 
 @dataclass(frozen=True)
-class CapPolicy:
-    """One cap-policy arm: a label and the ``(floor, k, ceiling)`` set on the engine
-    before its queries run. The control is ``fixed-6`` (floor == ceiling == 6)."""
+class PrunePolicy:
+    """One prune-policy arm: a label and the ``(target_candidates, max_terms)`` set on
+    the engine before its queries run. The evidence pruner keeps a query's rarest
+    trigrams until the accumulated IDF targets ~``target_candidates`` (``M``) surviving
+    docs (``T = ln(N/M)``) or ``max_terms`` (``k_max``) is reached. The control is the
+    shipped default."""
 
     label: str
-    floor: int
-    k: float
-    ceiling: int
+    target_candidates: int
+    max_terms: int
 
 
-#: The fixed cap policy every arm is read against — the shipped default.
-CONTROL: CapPolicy = CapPolicy("fixed-6 (control)", floor=6, k=2.7, ceiling=6)
+#: The prune policy every arm is read against — the shipped default (M=200, k_max=12).
+CONTROL: PrunePolicy = PrunePolicy("default M=200 (control)", target_candidates=200, max_terms=12)
 
-#: The 2D cap grid (#927/#977): per-query rare-trigram budget = clamp(k·ln(n), floor,
-#: ceiling). The frontier sweeps `k` (growth rate) × `ceiling` (the hard cap a long
-#: query saturates at) with `floor` pinned at 6, so the recall/single-query-latency
-#: knee is visible across the whole flank — the prior 3-point curve sweep sat on the
-#: steep part and couldn't show where the budget cuts.
-GRID_KS: tuple[float, ...] = (2.0, 3.0, 4.0, 6.0, 8.0)
-GRID_CEILINGS: tuple[int, ...] = (10, 12, 16, 20, 24)
-GRID_FLOOR: int = 6
+#: The 2D prune grid: `M` (target survivor count — smaller `M` raises `T` and keeps
+#: MORE rare trigrams, narrowing harder) × `k_max` (the cost cap on a starved query).
+#: The frontier sweeps both so the recall / single-query-latency knee is visible across
+#: the flank — smaller `M` trades latency for recall; `k_max` only binds on the
+#: all-common tail.
+GRID_TARGETS: tuple[int, ...] = (50, 100, 200, 400, 800)
+GRID_MAX_TERMS: tuple[int, ...] = (8, 12, 16)
 
 
 def cap_grid(
-    ks: tuple[float, ...] = GRID_KS,
-    ceilings: tuple[int, ...] = GRID_CEILINGS,
-    floor: int = GRID_FLOOR,
-) -> tuple[CapPolicy, ...]:
-    """The control followed by the full `k × ceiling` grid (floor pinned). A
-    `(k, ceiling)` cell whose `k·ln(n)` never reaches `ceiling` over the query set
-    still runs — it just behaves like a lower effective ceiling, which the frontier
-    reads correctly. The control is first so it anchors the per-arm deltas."""
+    targets: tuple[int, ...] = GRID_TARGETS,
+    max_terms: tuple[int, ...] = GRID_MAX_TERMS,
+) -> tuple[PrunePolicy, ...]:
+    """The control followed by the full `M × k_max` grid. A cell whose evidence never
+    reaches `T` over the query set still runs — it just behaves like its `k_max`, which
+    the frontier reads correctly. The control is first so it anchors the per-arm deltas."""
     grid = tuple(
-        CapPolicy(f"k={k:g} ceil={ceil}", floor=floor, k=k, ceiling=ceil)
-        for k in ks
-        for ceil in ceilings
+        PrunePolicy(f"M={m} k_max={k}", target_candidates=m, max_terms=k)
+        for m in targets
+        for k in max_terms
     )
     return (CONTROL, *grid)
 
 
 #: The arms swept by default: the control + the 2D frontier grid.
-DEFAULT_ARMS: tuple[CapPolicy, ...] = cap_grid()
+DEFAULT_ARMS: tuple[PrunePolicy, ...] = cap_grid()
 
 
 @dataclass(frozen=True)
@@ -159,7 +158,7 @@ class ArmResult:
     """One arm's aggregated recall@10 / MRR over the query set, plus the per-slice
     breakdowns and the optional measured single-query latency + slow-query samples."""
 
-    policy: CapPolicy
+    policy: PrunePolicy
     recall_at_k: float
     mrr: float
     n_queries: int
@@ -300,7 +299,7 @@ def _measure_single_query_latency(
 
 def _evaluate_arm(
     engine: shrike_native.DerivedTextEngine,
-    policy: CapPolicy,
+    policy: PrunePolicy,
     queries: list[TypoQuery],
     *,
     batch_size: int = 200,
@@ -315,7 +314,7 @@ def _evaluate_arm(
     control arm). Recall is computed from the batched fuzzy read (deterministic,
     mode-independent); latency is a separate single-query pass. Timing is off by
     default — it belongs on a clean machine."""
-    engine.set_fuzzy_cap_policy(policy.floor, policy.k, policy.ceiling)
+    engine.set_prune_policy(policy.target_candidates, policy.max_terms)
     texts = [q.query for q in queries]
 
     results: list[list[tuple]] = []
@@ -393,7 +392,7 @@ def run_eval(
     notes: int = 5000,
     seed: int = 0,
     sample_size: int = 500,
-    arms: tuple[CapPolicy, ...] = DEFAULT_ARMS,
+    arms: tuple[PrunePolicy, ...] = DEFAULT_ARMS,
     measure_latency: bool = False,
     offline: bool = False,
     cache_root: Path | None = None,
@@ -488,13 +487,13 @@ def render_results(run: EvalRun) -> str:
     # Headline table.
     lines.append("## Overall")
     lines.append("")
-    lines.append("| arm | floor | k | ceiling | recall@10 | Δ vs control | MRR |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+    lines.append("| arm | M | k_max | recall@10 | Δ vs control | MRR |")
+    lines.append("|---|---:|---:|---:|---:|---:|")
     for a in run.arms:
         delta = a.recall_at_k - control.recall_at_k
         dstr = "—" if a is control else f"{delta * 100:+.1f}"
         lines.append(
-            f"| {a.policy.label} | {a.policy.floor} | {a.policy.k:g} | {a.policy.ceiling} | "
+            f"| {a.policy.label} | {a.policy.target_candidates} | {a.policy.max_terms} | "
             f"{_fmt_pct(a.recall_at_k)} | {dstr} | {_fmt_pct(a.mrr)} |"
         )
     lines.append("")
@@ -626,8 +625,8 @@ def _render_picks(timed: list[ArmResult]) -> list[str]:
         )
         assert best.latency is not None
         return (
-            f"- **{pct} budget:** `{best.policy.label}` (floor={best.policy.floor}, "
-            f"k={best.policy.k:g}, ceiling={best.policy.ceiling}) — recall@10 "
+            f"- **{pct} budget:** `{best.policy.label}` (M={best.policy.target_candidates}, "
+            f"k_max={best.policy.max_terms}) — recall@10 "
             f"{_fmt_pct(best.recall_at_k)} at {pct} {value(best.latency):.3f}ms."
         )
 

@@ -993,22 +993,23 @@ impl DerivedTextEngine {
         .map_err(to_py_err)
     }
 
-    /// Set the per-query rare-trigram cap policy
-    /// (`clamp(floor + round(k·ln(n/floor)), floor, ceiling)`, `n` = the query's own
-    /// trigram count). The fuzzy-recall eval A/Bs a floor sweep and the log-growth
-    /// curve against the fixed-6 default through this; production never calls it.
-    fn set_fuzzy_cap_policy(&self, py: Python<'_>, floor: usize, k: f64, ceiling: usize) {
+    /// Set the evidence-pruner policy: `target_candidates` (`M`, the survivor count the
+    /// `T = ln(N/M)` threshold aims for) and `max_terms` (`k_max`, the kept-trigram
+    /// cap). The recall eval sweeps these; production never calls it.
+    fn set_prune_policy(&self, py: Python<'_>, target_candidates: usize, max_terms: usize) {
         py.detach(|| {
-            self.inner
-                .set_fuzzy_cap_policy(shrike_derived::FuzzyCapPolicy { floor, k, ceiling });
+            self.inner.set_prune_policy(shrike_derived::PrunePolicy {
+                target_candidates,
+                max_terms,
+            });
         });
     }
 
-    /// The current `(floor, k, ceiling)` cap policy.
-    fn fuzzy_cap_policy(&self, py: Python<'_>) -> (usize, f64, usize) {
+    /// The current `(target_candidates, max_terms)` prune policy.
+    fn prune_policy(&self, py: Python<'_>) -> (usize, usize) {
         py.detach(|| {
-            let p = self.inner.fuzzy_cap_policy();
-            (p.floor, p.k, p.ceiling)
+            let p = self.inner.prune_policy();
+            (p.target_candidates, p.max_terms)
         })
     }
 
