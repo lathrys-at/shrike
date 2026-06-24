@@ -90,3 +90,33 @@ impl DerivedSnapshotRefresher {
         self.job.is_idle()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A just-built refresher is fully quiescent, and its lifecycle pokes
+    /// (`request` arms the debounce, `shutdown` disarms it) run without firing a
+    /// refresh — the `is_idle` freshness probe a test awaits to know no late
+    /// refresh can still land.
+    #[test]
+    fn a_fresh_refresher_is_idle_and_arms_then_shuts_down() {
+        crate::runtime::testing::run(async {
+            let dir = crate::test_support::collision_proof_dir("shrike-df-refresh");
+            std::fs::create_dir_all(&dir).unwrap();
+            let engine = shrike_derived::DerivedEngine::open(
+                dir.join("shrike.db").to_str().unwrap(),
+                shrike_derived::DerivedEngine::SCHEMA_VERSION,
+            )
+            .unwrap();
+            let refresher = DerivedSnapshotRefresher::new(Arc::new(engine));
+
+            assert!(refresher.is_idle(), "a fresh refresher is quiescent");
+            // Arm the re-arming debounce, then disarm it on shutdown before the
+            // delay fires — no refresh runs, the teardown is clean.
+            refresher.request();
+            refresher.shutdown();
+            std::fs::remove_dir_all(dir).ok();
+        });
+    }
+}

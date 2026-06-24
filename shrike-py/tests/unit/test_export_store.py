@@ -7,6 +7,7 @@ tests/native/test_export_package.py and the shrike-collection Rust tests.
 
 from __future__ import annotations
 
+import logging
 import os
 
 from shrike.server.export_store import ExportStore
@@ -86,3 +87,42 @@ class TestExportStore:
         t2, _ = store.new_temp_path(suffix=".apkg")
         assert t1 != t2
         assert len(t1) >= 24  # secrets.token_urlsafe(24) → ~32 chars
+
+    def test_dir_is_the_exports_subdir(self, tmp_path) -> None:
+        store = ExportStore(str(tmp_path / "cache"))
+        assert store.dir == os.path.join(str(tmp_path / "cache"), "exports")
+
+    def test_claim_drops_the_entry_when_the_file_vanished(self, tmp_path) -> None:
+        # The file is deleted out from under the store (a manual delete or a
+        # prior reap racing this claim): claim must return None AND forget the
+        # entry, so a second claim is a clean None, never a KeyError — distinct
+        # from the already-claimed miss and the expired-sweep miss.
+        store = ExportStore(str(tmp_path / "cache"))
+        token, path = store.new_temp_path(suffix=".apkg")
+        with open(path, "wb") as f:
+            f.write(b"pkg")
+        store.register(token, path, "apkg")
+        os.remove(path)
+        assert store.claim(token) is None
+        assert store.claim(token) is None
+
+    def test_reap_of_an_unknown_token_is_a_noop(self, tmp_path) -> None:
+        # Reaping a token that was never registered (or already reaped) must not
+        # raise — the BackgroundTask reap fires unconditionally after a stream.
+        store = ExportStore(str(tmp_path / "cache"))
+        store.reap("never-registered")
+
+    def test_reap_swallows_a_non_filenotfound_oserror_and_warns(self, tmp_path, caplog) -> None:
+        # The registered path is a directory, so os.remove raises an OSError
+        # that is NOT FileNotFoundError — the warn-and-continue arm (a leftover
+        # temp the reap couldn't clear must never propagate out of the
+        # BackgroundTask and 500 the next request).
+        store = ExportStore(str(tmp_path / "cache"))
+        token, path = store.new_temp_path(suffix=".apkg")
+        os.makedirs(path)
+        with open(os.path.join(path, "child"), "wb") as f:
+            f.write(b"x")
+        store.register(token, path, "apkg")
+        with caplog.at_level(logging.WARNING, logger="shrike.export"):
+            store.reap(token)  # must not raise
+        assert any("could not reap" in r.message for r in caplog.records)

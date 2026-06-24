@@ -2087,4 +2087,696 @@ mod tests {
         );
         std::fs::remove_dir_all(dir).ok();
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Note-type op rejection/edge branches: the adversarial counterpart to
+    // `note_types_round_trip` — every error and edge arm the happy-path
+    // round-trip never reaches (atomicity is re-asserted on each rejection).
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Build a `field_map`/`template_map` literal for `migrate_note_type`.
+    fn name_map(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn create_note_type_rejects_missing_fields_and_duplicates() {
+        let (core, dir) = temp_core();
+
+        // Each per-item create omits ONE required field (or supplies it empty)
+        // → a per-item error naming that field, never sinking the batch. Covers
+        // the four `ok_or_else` arms AND the `.filter(!is_empty)` arms.
+        let cases = [
+            (
+                r#"[{"fields":["A"],"templates":[{"name":"C","front":"x","back":"y"}],"css":""}]"#,
+                "name is required",
+            ),
+            (
+                r#"[{"name":"","fields":["A"],"templates":[{"name":"C","front":"x","back":"y"}],"css":""}]"#,
+                "name is required",
+            ),
+            (
+                r#"[{"name":"X","templates":[{"name":"C","front":"x","back":"y"}],"css":""}]"#,
+                "fields is required",
+            ),
+            (
+                r#"[{"name":"X","fields":[],"templates":[{"name":"C","front":"x","back":"y"}],"css":""}]"#,
+                "fields is required",
+            ),
+            (
+                r#"[{"name":"X","fields":["A"],"css":""}]"#,
+                "templates is required",
+            ),
+            (
+                r#"[{"name":"X","fields":["A"],"templates":[{"name":"C","front":"x","back":"y"}]}]"#,
+                "css is required",
+            ),
+        ];
+        for (json, want) in cases {
+            let res = note_types_json(&core, json);
+            assert_eq!(res[0]["status"], "error", "{json}");
+            assert!(
+                res[0]["error"].as_str().unwrap().contains(want),
+                "{json} -> {:?}",
+                res[0]["error"]
+            );
+        }
+
+        // A valid create succeeds, then re-creating the same name is a per-item
+        // error (the `already exists` guard), not a panic or a silent overwrite.
+        let make = r#"[{"name":"Dup","fields":["A"],"templates":[{"name":"C","front":"{{A}}","back":"y"}],"css":""}]"#;
+        assert_eq!(note_types_json(&core, make)[0]["status"], "created");
+        let dup = note_types_json(&core, make);
+        assert_eq!(dup[0]["status"], "error");
+        assert!(dup[0]["error"].as_str().unwrap().contains("already exists"));
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn update_note_type_not_found_cloze_mismatch_and_field_arms() {
+        let (core, dir) = temp_core();
+        let basic = core.notetype_id("Basic").unwrap();
+
+        // An unknown id is a per-item not-found error.
+        let nf = note_types_json(&core, r#"[{"id":99999999,"name":"X"}]"#);
+        assert_eq!(nf[0]["status"], "error");
+        assert!(nf[0]["error"].as_str().unwrap().contains("not found"));
+
+        // Flipping a standard type to cloze is refused (the kind is structural,
+        // not editable).
+        let flip = note_types_json(&core, &format!(r#"[{{"id":{basic},"is_cloze":true}}]"#));
+        assert_eq!(flip[0]["status"], "error");
+        assert!(flip[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("standard and cloze"));
+
+        // A multi-field update (name + css + templates, with a matching
+        // is_cloze:false) drives the name/css/template update arms and persists.
+        let upd = note_types_json(
+            &core,
+            &format!(
+                r#"[{{"id":{basic},"name":"BasicRenamed","css":".x{{color:teal}}","is_cloze":false,"templates":[{{"name":"Card 1","front":"{{{{Front}}}}!","back":"{{{{Back}}}}"}}]}}]"#
+            ),
+        );
+        assert_eq!(upd[0]["status"], "updated");
+        assert_eq!(upd[0]["name"], "BasicRenamed");
+        let info = serde_json::to_value(
+            core.collection_info(&["note_types".to_string()], &["BasicRenamed".to_string()])
+                .unwrap(),
+        )
+        .unwrap();
+        let nt = info["note_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == "BasicRenamed")
+            .unwrap();
+        assert!(nt["detail"]["css"].as_str().unwrap().contains("teal"));
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn upsert_templates_positional_replace_and_reject_move() {
+        let (core, dir) = temp_core();
+        let made = note_types_json(
+            &core,
+            r#"[{"name":"T2","fields":["A"],"templates":[
+                {"name":"C1","front":"{{A}} one","back":"a"},
+                {"name":"C2","front":"{{A}} two","back":"b"}],"css":""}]"#,
+        );
+        let id = made[0]["id"].as_i64().unwrap();
+
+        // Sound positional template replace: rename-in-place C1→C1x, keep C2,
+        // append C3 — drives the whole `set_templates_positional` body.
+        let ok = note_types_json(
+            &core,
+            &format!(
+                r#"[{{"id":{id},"templates":[
+                    {{"name":"C1x","front":"{{{{A}}}} one","back":"a"}},
+                    {{"name":"C2","front":"{{{{A}}}} two","back":"b"}},
+                    {{"name":"C3","front":"{{{{A}}}} three","back":"c"}}]}}]"#
+            ),
+        );
+        assert_eq!(ok[0]["status"], "updated");
+
+        // Reordering an existing template by position is the unsound move the
+        // positional path refuses (it would silently mislabel cards) — pointing
+        // the caller at the identity tool.
+        let moved = note_types_json(
+            &core,
+            &format!(
+                r#"[{{"id":{id},"templates":[
+                    {{"name":"C2","front":"{{{{A}}}} two","back":"b"}},
+                    {{"name":"C1x","front":"{{{{A}}}} one","back":"a"}},
+                    {{"name":"C3","front":"{{{{A}}}} three","back":"c"}}]}}]"#
+            ),
+        );
+        assert_eq!(moved[0]["status"], "error");
+        let msg = moved[0]["error"].as_str().unwrap();
+        assert!(msg.contains("update_note_type_templates"), "{msg}");
+        assert!(
+            msg.contains("cards (and their scheduling history)"),
+            "{msg}"
+        );
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn field_ops_simulate_every_rejection_arm_is_atomic() {
+        let (core, dir) = temp_core();
+        // Basic has fields [Front, Back].
+        let before = core
+            .notetype_field_names(core.notetype_id("Basic").unwrap())
+            .unwrap();
+
+        let cases: &[(&str, &str)] = &[
+            (r#"[{"op":"add","name":"Front"}]"#, "already exists"),
+            (
+                r#"[{"op":"add","name":"New","position":99}]"#,
+                "position 99 out of range 0..2",
+            ),
+            (
+                r#"[{"op":"add","name":"New","position":-1}]"#,
+                "position -1 out of range 0..2",
+            ),
+            (
+                r#"[{"op":"remove","name":"Ghost"}]"#,
+                "field 'Ghost' not found",
+            ),
+            (
+                r#"[{"op":"rename","name":"Ghost","new_name":"X"}]"#,
+                "field 'Ghost' not found",
+            ),
+            (
+                r#"[{"op":"rename","name":"Front","new_name":"Back"}]"#,
+                "field 'Back' already exists",
+            ),
+            (
+                r#"[{"op":"reposition","name":"Ghost","position":0}]"#,
+                "field 'Ghost' not found",
+            ),
+            (
+                r#"[{"op":"reposition","name":"Front","position":99}]"#,
+                "position 99 out of range 0..1",
+            ),
+        ];
+        for (ops, want) in cases {
+            let err = field_ops_json(&core, "Basic", ops).unwrap_err();
+            assert_eq!(err.kind(), shrike_error::ErrorKind::InvalidInput, "{ops}");
+            assert!(err.message.contains(want), "{ops} -> {}", err.message);
+        }
+        // A 1-field type: removing its only field hits the "keep at least one"
+        // guard (Basic's 2 fields can't reach it).
+        let made = note_types_json(
+            &core,
+            r#"[{"name":"One","fields":["Only"],"templates":[{"name":"C","front":"{{Only}}","back":""}],"css":""}]"#,
+        );
+        assert_eq!(made[0]["status"], "created");
+        let err = field_ops_json(&core, "One", r#"[{"op":"remove","name":"Only"}]"#).unwrap_err();
+        assert!(
+            err.message.contains("at least one field"),
+            "{}",
+            err.message
+        );
+
+        // Every rejection left the field list untouched (the simulate-then-apply
+        // atomicity contract).
+        assert_eq!(
+            core.notetype_field_names(core.notetype_id("Basic").unwrap())
+                .unwrap(),
+            before
+        );
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn template_ops_simulate_rejections_use_template_wording() {
+        let (core, dir) = temp_core();
+        // The simulator is shared with fields; this pins the `template` `what`
+        // wording and the keep-at-least-one-template guard.
+        let dup = template_ops_json(
+            &core,
+            "Basic",
+            r#"[{"op":"add","name":"Card 1","front":"x","back":"y"}]"#,
+        )
+        .unwrap_err();
+        assert!(
+            dup.message.contains("template 'Card 1' already exists"),
+            "{}",
+            dup.message
+        );
+        let last =
+            template_ops_json(&core, "Basic", r#"[{"op":"remove","name":"Card 1"}]"#).unwrap_err();
+        assert!(
+            last.message.contains("must keep at least one template"),
+            "{}",
+            last.message
+        );
+
+        // An op on an unknown note type is a not-found error (the
+        // `notetype_legacy_by_name` None arm).
+        let nf =
+            template_ops_json(&core, "NoSuchType", r#"[{"op":"remove","name":"X"}]"#).unwrap_err();
+        assert!(nf.message.contains("not found"), "{}", nf.message);
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn find_replace_invalid_regex_and_no_match_are_clean() {
+        let (core, dir) = temp_core();
+        note_types_json(
+            &core,
+            r#"[{"name":"FR","fields":["A"],"templates":[{"name":"C","front":"{{A}} FOO","back":"baz"}],"css":".card{color:green}"}]"#,
+        );
+
+        // An unparseable regex is a clean input error, not a panic.
+        let err = core
+            .find_and_replace_note_types("FR", "(unclosed", "x", true, true, true, true, true)
+            .unwrap_err();
+        assert_eq!(err.kind(), shrike_error::ErrorKind::InvalidInput);
+        assert!(err.message.contains("invalid regex"), "{}", err.message);
+
+        // A non-matching search is a 0-replacement no-op that persists nothing
+        // (the css-loop-with-no-match and the total==0 return arms).
+        let none = core
+            .find_and_replace_note_types("FR", "zzz-absent", "y", false, true, true, true, true)
+            .unwrap();
+        assert_eq!(none.replacements, 0);
+        assert!(!none.css_changed);
+        assert!(none.templates_changed.is_empty());
+
+        // A case-insensitive replace that lands ONLY in a template back (afmt)
+        // drives the back-side change accounting + the (?i) flagged path.
+        let back = core
+            .find_and_replace_note_types("FR", "baz", "QUX", false, false, false, true, false)
+            .unwrap();
+        assert_eq!(back.replacements, 1);
+        assert!(!back.css_changed);
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn find_replace_translates_python_group_ref_forms() {
+        let (core, dir) = temp_core();
+        let gr = note_types_json(
+            &core,
+            r#"[{"name":"GR","fields":["A"],"templates":[{"name":"C","front":"{{A}}","back":""}],"css":"PLACEHOLDER"}]"#,
+        )[0]["id"]
+            .as_i64()
+            .unwrap();
+        // Reset the css to a known token before each form, then a regex replace
+        // exercises one branch of `python_replacement_template`; read the result
+        // back. The pattern always captures `MARK`.
+        let reset = |c: &str| {
+            note_types_json(
+                &core,
+                &format!(
+                    r#"[{{"id":{gr},"css":{}}}]"#,
+                    serde_json::to_string(c).unwrap()
+                ),
+            );
+        };
+        let css_now = || -> String {
+            let info = serde_json::to_value(
+                core.collection_info(&["note_types".to_string()], &["GR".to_string()])
+                    .unwrap(),
+            )
+            .unwrap();
+            info["note_types"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|n| n["name"] == "GR")
+                .unwrap()["detail"]["css"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        // \g<1> named/numeric group form → ${1}
+        reset("MARK");
+        core.find_and_replace_note_types(
+            "GR", "(MARK)", r"[\g<1>]", true, true, false, false, true,
+        )
+        .unwrap();
+        assert_eq!(css_now(), "[MARK]");
+
+        // $ must be escaped so it can't be read as a group ref → literal $
+        reset("MARK");
+        core.find_and_replace_note_types("GR", "(MARK)", r"$\1", true, true, false, false, true)
+            .unwrap();
+        assert_eq!(css_now(), "$MARK");
+
+        // \\ → a single literal backslash
+        reset("MARK");
+        core.find_and_replace_note_types("GR", "(MARK)", r"x\\y", true, true, false, false, true)
+            .unwrap();
+        assert_eq!(css_now(), r"x\y");
+
+        // \g NOT followed by `<` → a literal `g`
+        reset("MARK");
+        core.find_and_replace_note_types("GR", "(MARK)", r"\gz", true, true, false, false, true)
+            .unwrap();
+        assert_eq!(css_now(), "gz");
+
+        // A trailing lone backslash → a literal backslash
+        reset("MARK");
+        core.find_and_replace_note_types("GR", "(MARK)", "end\\", true, true, false, false, true)
+            .unwrap();
+        assert_eq!(css_now(), "end\\");
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn field_metadata_rejects_unknown_field_and_empty_update() {
+        let (core, dir) = temp_core();
+        // Unknown field → a clean per-update error (direct call: the json helper
+        // unwraps, so it can't carry an error).
+        let unknown = core
+            .update_note_type_field_metadata(
+                "Basic",
+                &[shrike_schemas::FieldMetadataInput {
+                    name: "Ghost".into(),
+                    font: Some("Courier".into()),
+                    size: None,
+                    description: None,
+                }],
+            )
+            .unwrap_err();
+        assert!(
+            unknown.message.contains("field 'Ghost' not in note type"),
+            "{}",
+            unknown.message
+        );
+        // No metadata set at all → "set at least one of font, size, description".
+        let empty = core
+            .update_note_type_field_metadata(
+                "Basic",
+                &[shrike_schemas::FieldMetadataInput {
+                    name: "Front".into(),
+                    font: None,
+                    size: None,
+                    description: None,
+                }],
+            )
+            .unwrap_err();
+        assert!(
+            empty
+                .message
+                .contains("set at least one of font, size, description"),
+            "{}",
+            empty.message
+        );
+        // Unknown note type → not found.
+        let nf = core
+            .update_note_type_field_metadata(
+                "NoSuchType",
+                &[shrike_schemas::FieldMetadataInput {
+                    name: "Front".into(),
+                    font: Some("Courier".into()),
+                    size: None,
+                    description: None,
+                }],
+            )
+            .unwrap_err();
+        assert!(nf.message.contains("not found"), "{}", nf.message);
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn migrate_note_type_validation_errors_change_nothing() {
+        let (core, dir) = temp_core();
+        // Two custom types + a note on Src.
+        note_types_json(
+            &core,
+            r#"[{"name":"Src","fields":["A","B"],"templates":[{"name":"T1","front":"{{A}}","back":"{{B}}"}],"css":""}]"#,
+        );
+        note_types_json(
+            &core,
+            r#"[{"name":"Dst","fields":["X","Y"],"templates":[{"name":"U1","front":"{{X}}","back":"{{Y}}"}],"css":""}]"#,
+        );
+        let src = core.notetype_id("Src").unwrap();
+        let CreateOutcome::Created(nid) = core
+            .create_note(
+                src,
+                DEFAULT_DECK,
+                &["a".into(), "b".into()],
+                &[],
+                DuplicatePolicy::Error,
+            )
+            .unwrap()
+        else {
+            panic!("seed failed")
+        };
+
+        let valid = name_map(&[("A", "X")]);
+        let empty = std::collections::BTreeMap::new();
+        let assert_err = |res: NativeResult<shrike_schemas::MigrateNoteTypeResponse>,
+                          want: &str| {
+            let err = res.unwrap_err();
+            assert_eq!(err.kind(), shrike_error::ErrorKind::InvalidInput, "{want}");
+            assert!(
+                err.message.contains(want),
+                "want {want:?} got {}",
+                err.message
+            );
+        };
+
+        assert_err(
+            core.migrate_note_type(&[99999999], "Dst", &valid, &empty, true),
+            "Note not found: 99999999",
+        );
+        assert_err(
+            core.migrate_note_type(&[nid], "Src", &name_map(&[("A", "A")]), &empty, true),
+            "already use note type",
+        );
+        assert_err(
+            core.migrate_note_type(&[nid], "Dst", &empty, &empty, true),
+            "field_map is required",
+        );
+        assert_err(
+            core.migrate_note_type(&[nid], "Dst", &name_map(&[("Ghost", "X")]), &empty, true),
+            "Source field 'Ghost' not in note type 'Src'",
+        );
+        assert_err(
+            core.migrate_note_type(&[nid], "Dst", &name_map(&[("A", "Ghost")]), &empty, true),
+            "Target field 'Ghost' not in note type 'Dst'",
+        );
+        assert_err(
+            core.migrate_note_type(
+                &[nid],
+                "Dst",
+                &name_map(&[("A", "X"), ("B", "X")]),
+                &empty,
+                true,
+            ),
+            "Multiple source fields map to the same target field(s): ['X']",
+        );
+        assert_err(
+            core.migrate_note_type(&[nid], "Dst", &valid, &name_map(&[("Ghost", "U1")]), true),
+            "Source template 'Ghost' not in note type 'Src'",
+        );
+        assert_err(
+            core.migrate_note_type(&[nid], "Dst", &valid, &name_map(&[("T1", "Ghost")]), true),
+            "Target template 'Ghost' not in note type 'Dst'",
+        );
+        assert_err(
+            core.migrate_note_type(&[nid], "NoSuch", &valid, &empty, true),
+            "not found",
+        );
+
+        // Nothing migrated through any rejection.
+        assert_eq!(core.get_note(nid).unwrap().notetype_id, src);
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn migrate_note_type_applies_with_an_explicit_template_map() {
+        let (core, dir) = temp_core();
+        note_types_json(
+            &core,
+            r#"[{"name":"S2","fields":["A","B"],"templates":[
+                {"name":"T1","front":"{{A}}","back":"{{B}}"},
+                {"name":"T2","front":"{{B}}","back":"{{A}}"}],"css":""}]"#,
+        );
+        note_types_json(
+            &core,
+            r#"[{"name":"D2","fields":["X","Y"],"templates":[
+                {"name":"U1","front":"{{X}}","back":"{{Y}}"},
+                {"name":"U2","front":"{{Y}}","back":"{{X}}"}],"css":""}]"#,
+        );
+        let s2 = core.notetype_id("S2").unwrap();
+        let CreateOutcome::Created(nid) = core
+            .create_note(
+                s2,
+                DEFAULT_DECK,
+                &["a".into(), "b".into()],
+                &[],
+                DuplicatePolicy::Error,
+            )
+            .unwrap()
+        else {
+            panic!("seed failed")
+        };
+
+        // Apply (not dry-run) with a NON-EMPTY template map — the cmap build +
+        // the (Some, non-cloze) template-conversion arm.
+        let applied = core
+            .migrate_note_type(
+                &[nid],
+                "D2",
+                &name_map(&[("A", "X"), ("B", "Y")]),
+                &name_map(&[("T1", "U1"), ("T2", "U2")]),
+                false,
+            )
+            .unwrap();
+        assert_eq!(applied.to_note_type, "D2");
+        assert!(!applied.dry_run);
+        assert_eq!(
+            core.get_note(nid).unwrap().notetype_id,
+            core.notetype_id("D2").unwrap()
+        );
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn export_colpkg_rejects_a_scope_before_any_write() {
+        let (core, dir) = temp_core();
+        core.create_note(
+            core.notetype_id("Basic").unwrap(),
+            DEFAULT_DECK,
+            &["f".into(), "b".into()],
+            &[],
+            DuplicatePolicy::Error,
+        )
+        .unwrap();
+        let out = dir.join("backup.colpkg");
+        let err = core
+            .export_package(&ExportRequest {
+                out_path: out.to_str().unwrap().to_string(),
+                format: PackageFormat::Colpkg,
+                scope: ExportScope::Deck("Default".into()),
+                with_scheduling: false,
+                with_media: false,
+                legacy: false,
+            })
+            .unwrap_err();
+        assert_eq!(err.kind(), shrike_error::ErrorKind::InvalidInput);
+        assert!(
+            err.message.contains("whole-collection backup"),
+            "{}",
+            err.message
+        );
+        // The reject fires before any write — no file is created.
+        assert!(!out.exists());
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn export_apkg_deck_and_note_scopes_resolve_limits() {
+        let (core, dir) = temp_core();
+        let basic = core.notetype_id("Basic").unwrap();
+        // One note in Default, two in a fresh deck.
+        core.create_note(
+            basic,
+            DEFAULT_DECK,
+            &["d0".into(), "x".into()],
+            &[],
+            DuplicatePolicy::Error,
+        )
+        .unwrap();
+        let spanish = upsert_decks_json(&core, r#"[{"name":"Spanish"}]"#)[0]["id"]
+            .as_i64()
+            .unwrap();
+        let CreateOutcome::Created(n1) = core
+            .create_note(
+                basic,
+                spanish,
+                &["s1".into(), "y".into()],
+                &[],
+                DuplicatePolicy::Error,
+            )
+            .unwrap()
+        else {
+            panic!("seed failed")
+        };
+        let CreateOutcome::Created(_n2) = core
+            .create_note(
+                basic,
+                spanish,
+                &["s2".into(), "z".into()],
+                &[],
+                DuplicatePolicy::Allow,
+            )
+            .unwrap()
+        else {
+            panic!("seed failed")
+        };
+
+        let req = |scope: ExportScope, name: &str| ExportRequest {
+            out_path: dir.join(name).to_str().unwrap().to_string(),
+            format: PackageFormat::Apkg,
+            scope,
+            with_scheduling: false,
+            with_media: false,
+            legacy: false,
+        };
+
+        // Deck scope resolves the deck-ref → deck id and exports just its notes.
+        let deck = core
+            .export_package(&req(ExportScope::Deck("Spanish".into()), "deck.apkg"))
+            .unwrap();
+        assert_eq!(deck.note_count, 2);
+        assert!(dir.join("deck.apkg").is_file());
+
+        // Note scope exports exactly the listed ids.
+        let notes = core
+            .export_package(&req(ExportScope::Notes(vec![n1]), "notes.apkg"))
+            .unwrap();
+        assert_eq!(notes.note_count, 1);
+
+        // Unknown deck and empty note-set are clean input errors, not silently
+        // empty packages.
+        let unknown = core
+            .export_package(&req(ExportScope::Deck("#999999".into()), "nope.apkg"))
+            .unwrap_err();
+        assert_eq!(unknown.kind(), shrike_error::ErrorKind::InvalidInput);
+        let empty = core
+            .export_package(&req(ExportScope::Notes(vec![]), "nope2.apkg"))
+            .unwrap_err();
+        assert!(
+            empty.message.contains("at least one note id"),
+            "{}",
+            empty.message
+        );
+
+        core.close().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
 }

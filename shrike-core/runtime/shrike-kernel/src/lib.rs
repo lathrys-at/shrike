@@ -7248,4 +7248,103 @@ mod no_cpython_smoke {
             kernel.close().await.unwrap();
         });
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Public-API error / empty-input / absence branches (coverage
+    // convergence): the no-embedder, no-recognizer edge arms the
+    // composition-level tests above never reach.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Open a bare kernel (no embedder, no recognizer) over a fresh collection.
+    async fn bare_kernel(dir: &test_support::ScratchDir) -> Kernel {
+        Kernel::open(
+            dir.join("c.anki2").to_str().unwrap(),
+            dir.join("cache").to_str().unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[test]
+    fn empty_and_unknown_write_inputs_are_clean_noops() {
+        crate::runtime::testing::run_with_collection(async {
+            let dir = temp_dir();
+            let kernel = bare_kernel(&dir).await;
+            kernel.settle().await;
+
+            // delete_notes([]) takes the empty-existence-set arm: nothing
+            // scanned, both partitions empty.
+            let empty = kernel.delete_notes(vec![]).await.unwrap();
+            assert!(empty.deleted.is_empty() && empty.not_found.is_empty());
+
+            // An id that was never created lands wholly in not_found, nothing
+            // deleted (the existence partition).
+            let unknown = kernel.delete_notes(vec![999_999]).await.unwrap();
+            assert!(unknown.deleted.is_empty());
+            assert_eq!(unknown.not_found, vec![999_999]);
+
+            // forget_notes([]) / reindex_notes([]) short-circuit: Ok with no
+            // maintenance enqueued, so the kernel stays settled.
+            kernel.forget_notes(vec![]).await.unwrap();
+            kernel.reindex_notes(&[]).await.unwrap();
+            assert!(
+                kernel.is_settled(),
+                "empty forget/reindex must enqueue nothing"
+            );
+
+            kernel.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn recognition_without_a_recognizer_is_unavailable() {
+        crate::runtime::testing::run_with_collection(async {
+            let dir = temp_dir();
+            let kernel = bare_kernel(&dir).await;
+
+            // No purpose attached → the multi-purpose driver short-circuits.
+            assert!(matches!(
+                kernel.recognize_pending(10).await.unwrap(),
+                recognize::SweepReport::Unavailable
+            ));
+
+            // Every single-purpose entry point reports Unavailable (the
+            // recognize_service_for None guard), per purpose.
+            for purpose in [
+                recognize::RecognitionPurpose::Ocr,
+                recognize::RecognitionPurpose::Describe,
+                recognize::RecognitionPurpose::Asr,
+            ] {
+                assert!(matches!(
+                    kernel.recognize_pending_for(purpose, 10).await.unwrap(),
+                    recognize::SweepReport::Unavailable
+                ));
+            }
+
+            // The to-quiescence driver stops on the first non-Ran report with a
+            // zeroed run summary (the `other =>` loop exit).
+            let run = kernel.recognize_all_pending(10, None).await.unwrap();
+            assert!(matches!(run.last, recognize::SweepReport::Unavailable));
+            assert_eq!(run.total_stored, 0);
+            assert_eq!(run.batches, 0);
+
+            kernel.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn notetype_id_unknown_errors_and_close_is_idempotent() {
+        crate::runtime::testing::run_with_collection(async {
+            let dir = temp_dir();
+            let kernel = bare_kernel(&dir).await;
+
+            // An unknown notetype name is a typed error, not a panic.
+            assert!(kernel.notetype_id("DoesNotExist").await.is_err());
+
+            // close() is idempotent: a second close on the drained actor is the
+            // already-closed success, not an error.
+            kernel.close().await.unwrap();
+            kernel.close().await.unwrap();
+        });
+    }
 }
