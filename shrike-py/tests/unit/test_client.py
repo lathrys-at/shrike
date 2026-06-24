@@ -422,3 +422,49 @@ def test_collection_busy_is_a_shrike_error() -> None:
     from shrike.client import ShrikeError
 
     assert issubclass(CollectionBusyError, ShrikeError)
+
+
+def test_read_media_non_200_raises_http_error() -> None:
+    # An unknown / path-escaping media name returns a non-200; the byte-fetch
+    # must raise a typed ServerHTTPError carrying the status, not return garbage.
+    c = ShrikeClient("http://x:1/mcp", autostart=False)
+    with (
+        patch("httpx.Client.get", return_value=_resp(404)),
+        pytest.raises(ServerHTTPError) as ei,
+    ):
+        c.read_media("missing.png")
+    assert ei.value.status_code == 404
+
+
+def test_download_export_non_200_raises_http_error() -> None:
+    # The one-shot export URL 404s once consumed/expired; download_export must
+    # raise ServerHTTPError, not hand back an empty body.
+    c = ShrikeClient("http://x:1/mcp", autostart=False)
+    with (
+        patch("httpx.Client.get", return_value=_resp(404)),
+        pytest.raises(ServerHTTPError) as ei,
+    ):
+        c.download_export("http://x:1/export/tok")
+    assert ei.value.status_code == 404
+
+
+def test_control_request_timeout_is_unreachable() -> None:
+    # A control call that times out (distinct from the ConnectError arm) raises
+    # ServerUnreachableError with a "timed out" message.
+    c = ShrikeClient("http://x:1/mcp", autostart=False)
+    with (
+        patch("httpx.Client.request", side_effect=httpx.TimeoutException("slow")),
+        pytest.raises(ServerUnreachableError, match="timed out"),
+    ):
+        c.index_rebuild()
+
+
+def test_action_timeout_without_autostart_is_unreachable() -> None:
+    # An action POST that times out (autostart off) raises ServerUnreachableError
+    # with a "timed out" message — the timeout arm, distinct from ConnectError.
+    c = ShrikeClient("http://x:1/mcp", autostart=False)
+    with (
+        patch("httpx.Client.post", side_effect=httpx.TimeoutException("slow")),
+        pytest.raises(ServerUnreachableError, match="timed out"),
+    ):
+        c._action("collection_info", {})
