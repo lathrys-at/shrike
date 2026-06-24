@@ -3196,9 +3196,9 @@ impl Default for PrunePolicy {
 impl PrunePolicy {
     /// The evidence threshold `T = ln(N / M)` in nats for a corpus of `n_docs`
     /// documents. Clamped at 0: when `N <= M` the corpus is already smaller than the
-    /// target, so any evidence (`> 0`) clears it — the prune then keeps only its
-    /// minimum (the rarest trigram, plus the overlap floor). `n_docs <= 0` (an empty
-    /// or never-built store) yields 0 likewise.
+    /// target, so the first kept trigram's evidence clears it and the prune keeps just
+    /// its `min(FUZZY_MIN_SHARED, |present|)` floor of present trigrams. `n_docs <= 0`
+    /// (an empty or never-built store) yields 0 likewise.
     #[must_use]
     fn evidence_threshold(&self, n_docs: i64) -> f64 {
         if n_docs <= 0 || self.target_candidates == 0 {
@@ -3478,6 +3478,10 @@ impl DerivedEngine {
         let threshold = policy.evidence_threshold(n_docs);
         // Always keep enough present trigrams for the overlap floor to be reachable.
         let min_present = FUZZY_MIN_SHARED.min(present.len());
+        // The cost guard never bites BELOW the floor: a swept `max_terms` smaller than
+        // `min_present` would otherwise stop the walk before the overlap floor is
+        // reachable, making every query on that arm silently un-rankable.
+        let max_terms = policy.max_terms.max(min_present);
         let n_docs_f = (n_docs.max(1)) as f64;
 
         let mut kept: Vec<Trigram> = Vec::new();
@@ -3485,7 +3489,7 @@ impl DerivedEngine {
         for (g, d) in present {
             kept.push(*g);
             evidence += (n_docs_f / d as f64).ln().max(0.0);
-            if kept.len() >= policy.max_terms {
+            if kept.len() >= max_terms {
                 break; // cost guard: never scan more than k_max postings
             }
             if kept.len() >= min_present && evidence >= threshold {
@@ -5111,6 +5115,29 @@ mod lexical_tests {
             kept,
             tgs(&["ddd", "eee"]),
             "keeps 2 present despite T met after 1"
+        );
+    }
+
+    #[test]
+    fn prune_k_max_never_undercuts_the_overlap_floor() {
+        // A swept k_max below FUZZY_MIN_SHARED must not stop the walk before the overlap
+        // floor is reachable — that would make every query on the arm un-rankable. The
+        // cost guard is raised to min_present, so a k_max of 1 still keeps 2 present.
+        use std::collections::{BTreeSet, HashMap};
+        let grams: BTreeSet<Trigram> = tgs(&["ddd", "eee", "ccc"]).into_iter().collect();
+        let df: HashMap<Trigram, i64> = [("ddd", 1), ("eee", 2), ("ccc", 3)]
+            .iter()
+            .map(|(k, v)| (tg(k), *v))
+            .collect();
+        let policy = PrunePolicy {
+            target_candidates: 200,
+            max_terms: 1,
+        };
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, 100_000, policy);
+        assert_eq!(
+            kept,
+            tgs(&["ddd", "eee"]),
+            "k_max=1 still keeps the floor of 2"
         );
     }
 
