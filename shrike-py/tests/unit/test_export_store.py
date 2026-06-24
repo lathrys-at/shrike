@@ -92,18 +92,19 @@ class TestExportStore:
         store = ExportStore(str(tmp_path / "cache"))
         assert store.dir == os.path.join(str(tmp_path / "cache"), "exports")
 
-    def test_resolve_drops_the_entry_when_the_file_vanished(self, tmp_path) -> None:
+    def test_claim_drops_the_entry_when_the_file_vanished(self, tmp_path) -> None:
         # The file is deleted out from under the store (a manual delete or a
-        # prior reap racing this resolve): resolve must return None AND forget
-        # the entry, so a second resolve is a clean None, never a KeyError.
+        # prior reap racing this claim): claim must return None AND forget the
+        # entry, so a second claim is a clean None, never a KeyError — distinct
+        # from the already-claimed miss and the expired-sweep miss.
         store = ExportStore(str(tmp_path / "cache"))
         token, path = store.new_temp_path(suffix=".apkg")
         with open(path, "wb") as f:
             f.write(b"pkg")
         store.register(token, path, "apkg")
         os.remove(path)
-        assert store.resolve(token) is None
-        assert store.resolve(token) is None
+        assert store.claim(token) is None
+        assert store.claim(token) is None
 
     def test_reap_of_an_unknown_token_is_a_noop(self, tmp_path) -> None:
         # Reaping a token that was never registered (or already reaped) must not
