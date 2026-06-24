@@ -993,22 +993,44 @@ impl DerivedTextEngine {
         .map_err(to_py_err)
     }
 
-    /// Set the per-query rare-trigram cap policy
-    /// (`clamp(floor + round(k·ln(n/floor)), floor, ceiling)`, `n` = the query's own
-    /// trigram count). The fuzzy-recall eval A/Bs a floor sweep and the log-growth
-    /// curve against the fixed-6 default through this; production never calls it.
-    fn set_fuzzy_cap_policy(&self, py: Python<'_>, floor: usize, k: f64, ceiling: usize) {
+    /// Set the cost-budget pruner policy: `typo_floor` (`F`, min rarest trigrams kept),
+    /// `cost_budget` (`B`, scan-cost admitted past the floor), `max_terms` (`k_max`),
+    /// and the cost coefficients `cost_per_term` (`α`, per kept list) / `cost_per_df`
+    /// (`β`, per rowid). The recall eval sweeps `F`/`B` (and profiles `α`/`β`);
+    /// production never calls it.
+    #[allow(clippy::too_many_arguments)]
+    fn set_prune_policy(
+        &self,
+        py: Python<'_>,
+        typo_floor: usize,
+        cost_budget: f64,
+        max_terms: usize,
+        cost_per_term: f64,
+        cost_per_df: f64,
+    ) {
         py.detach(|| {
-            self.inner
-                .set_fuzzy_cap_policy(shrike_derived::FuzzyCapPolicy { floor, k, ceiling });
+            self.inner.set_prune_policy(shrike_derived::PrunePolicy {
+                typo_floor,
+                cost_budget,
+                max_terms,
+                cost_per_term,
+                cost_per_df,
+            });
         });
     }
 
-    /// The current `(floor, k, ceiling)` cap policy.
-    fn fuzzy_cap_policy(&self, py: Python<'_>) -> (usize, f64, usize) {
+    /// The current `(typo_floor, cost_budget, max_terms, cost_per_term, cost_per_df)`
+    /// prune policy.
+    fn prune_policy(&self, py: Python<'_>) -> (usize, f64, usize, f64, f64) {
         py.detach(|| {
-            let p = self.inner.fuzzy_cap_policy();
-            (p.floor, p.k, p.ceiling)
+            let p = self.inner.prune_policy();
+            (
+                p.typo_floor,
+                p.cost_budget,
+                p.max_terms,
+                p.cost_per_term,
+                p.cost_per_df,
+            )
         })
     }
 

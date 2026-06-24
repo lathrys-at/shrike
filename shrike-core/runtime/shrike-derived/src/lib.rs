@@ -125,17 +125,16 @@ pub struct DerivedEngine {
     /// Under WAL these read concurrently with each other and with the write
     /// connection without blocking.
     read_pool: ReadPool,
-    /// The per-query rare-trigram cap policy ([`FuzzyCapPolicy`]). Behind a `Mutex`
-    /// for interior mutability — the engine is shared `&self` (and `frozen` in the
-    /// pyo3 binding), but the fuzzy-recall eval sets the policy to A/B a floor sweep
-    /// and the log-growth curve. Read once per fuzzy batch and applied per query
-    /// from that query's own gram count, so a mid-flight set never splits one batch.
-    /// Default: fixed-6, no behaviour change.
-    fuzzy_cap: Mutex<FuzzyCapPolicy>,
+    /// The evidence-pruner policy ([`PrunePolicy`]: `M`/`k_max`). Behind a `Mutex` for
+    /// interior mutability — the engine is shared `&self` (and `frozen` in the pyo3
+    /// binding), but the recall eval sweeps `M`/`k_max`. Read once per fuzzy batch and
+    /// applied per query from that query's own trigram DFs, so a mid-flight set never
+    /// splits one batch.
+    prune_policy: Mutex<PrunePolicy>,
     /// The document-frequency ceiling `C` below which a trigram's posting is
     /// MATERIALIZED as a base bitmap ([`MATERIALIZE_DF_CEILING`]); commoner trigrams
     /// fall to the live posting read. Behind a `Mutex` for the same reason as
-    /// `fuzzy_cap`: the perf harness sweeps `C` to find the per-write-cost /
+    /// `prune_policy`: the perf harness sweeps `C` to find the per-write-cost /
     /// query-coverage knee without recompiling. Read once per build and per fold.
     materialize_ceiling: Mutex<usize>,
 }
@@ -477,7 +476,7 @@ impl DerivedEngine {
         Ok(Self {
             conn: Mutex::new(conn),
             read_pool: ReadPool::new(path),
-            fuzzy_cap: Mutex::new(FuzzyCapPolicy::default()),
+            prune_policy: Mutex::new(PrunePolicy::default()),
             materialize_ceiling: Mutex::new(MATERIALIZE_DF_CEILING),
         })
     }
@@ -616,8 +615,8 @@ impl DerivedEngine {
         self.conn.lock().expect("derived conn lock poisoned")
     }
 
-    fn fuzzy_cap_lock(&self) -> std::sync::MutexGuard<'_, FuzzyCapPolicy> {
-        self.fuzzy_cap.lock().expect("fuzzy cap policy poisoned")
+    fn prune_policy_lock(&self) -> std::sync::MutexGuard<'_, PrunePolicy> {
+        self.prune_policy.lock().expect("prune policy poisoned")
     }
 
     fn materialize_ceiling_lock(&self) -> std::sync::MutexGuard<'_, usize> {
@@ -3100,13 +3099,11 @@ mod tests {
 
 /// FTS5's trigram tokenizer can't match a term shorter than 3 chars.
 pub const MIN_TRIGRAM: usize = 3;
-/// A fuzzy candidate must share at least this many query trigrams (noise floor).
+/// A fuzzy candidate must share at least this many query trigrams (noise floor). A
+/// query that keeps fewer than this many present trigrams floors to its kept count
+/// (see [`DerivedEngine::prune_to_rare_terms`]) so a genuinely short query can't be
+/// silently un-rankable.
 pub const FUZZY_MIN_SHARED: usize = 2;
-/// Cap on the trigrams a fuzzy `OR` generates candidates from: the rarest (most
-/// discriminative) N of the query's trigrams. Bounds the match set `ORDER BY rank`
-/// (bm25) scans — the search hotspot — without dropping typo recall (a typo'd word
-/// has only a handful of trigrams, all kept). A perf/recall dial.
-pub const FUZZY_MAX_TRIGRAMS: usize = 6;
 
 /// Default document-frequency ceiling `C` for base-bitmap materialization
 /// ([`DerivedEngine::materialize_ceiling`]): a trigram present in FEWER than `C` idx
@@ -3118,78 +3115,93 @@ pub const FUZZY_MAX_TRIGRAMS: usize = 6;
 /// per-write delta cost (higher `C` materializes more trigrams → more delta
 /// read-modify-writes per write) against query coverage (more trigrams served by the
 /// `O(containers)` bitmap rather than a live FTS5 scan). The query-relevant trigrams
-/// are the RAREST (the prune keeps `FuzzyCapPolicy::cap` of them), which sit far
+/// are the RAREST (the evidence prune keeps a rarest-first prefix), which sit far
 /// below any sensible `C`, so a moderate ceiling captures them cheaply. Provisional;
 /// the per-write-cost / coverage knee is tuned on the perf harness at 50k.
 pub const MATERIALIZE_DF_CEILING: usize = 4096;
 
-/// The per-query rare-trigram cap as a clamped log-growth curve in the query's OWN
-/// trigram count `n`: `clamp(floor + round(k·ln(n/floor)), floor, ceiling)`.
+/// Default constant typo floor `F` ([`PrunePolicy`]): the prune always keeps at least
+/// `min(F, |present|)` of a query's rarest present trigrams, so a single edit (which
+/// corrupts the ~2-3 trigrams spanning that character) still leaves
+/// [`FUZZY_MIN_SHARED`] intact trigrams for a candidate to overlap on. Derivation:
+/// `F ≈ FUZZY_MIN_SHARED + one-typo-damage ≈ 2 + 3`. A CONSTANT, not a curve — query
+/// length enters typo recall only via the count of edits, which scales with characters
+/// typed, not with the (logarithmic) trigram count. `F = 6` reproduces the historical
+/// fixed-6 floor. Swept {4,5,6,7} on the adversarial eval.
+pub const PRUNE_TYPO_FLOOR: usize = 6;
+
+/// Default cost budget `B` ([`PrunePolicy`]) in the cost units of [`PrunePolicy::cost`].
+/// Past the typo floor, the rarest-first walk keeps admitting trigrams (breadth — it
+/// reaches into the shared common part, which hedges typos and surfaces near-matches)
+/// until the cumulative scan cost reaches `B`. The DEFAULT is `0`: the budget binds
+/// immediately at the floor, so the out-of-box prune keeps exactly `F` rarest trigrams
+/// — the proven fixed-6 behaviour, no recall change on adoption. Breadth is turned on
+/// by raising `B`; the recall/latency knee (#977 p95 ≤ 10ms vs #927 recall) is found by
+/// sweeping `B` on the eval AFTER profiling the cost coefficients (below).
+pub const PRUNE_COST_BUDGET: f64 = 0.0;
+
+/// Default hard cap `k_max` on the number of trigrams the pruner keeps
+/// ([`PrunePolicy`]) — an absolute ceiling, and (if the per-list term dominates cost)
+/// the real bound on the `α·|kept|` cost. Bounds the COUNT of kept trigrams, not their
+/// posting LENGTH, so a short all-common query stays the residual slow case.
+pub const PRUNE_MAX_TERMS: usize = 12;
+
+/// Default per-kept-list cost coefficient `α` ([`PrunePolicy::cost`]): each kept
+/// trigram costs a bitmap load + delta merge BEFORE row iteration — a fixed per-list
+/// cost present even for a `df=1` trigram. Whether this term matters vs the per-rowid
+/// `β·Σdf` term is a measurement (profile many-cheap-lists vs one-expensive-list at
+/// matched `Σdf`); defaulted to `0` (pure-`Σdf` hypothesis) pending that profile, both
+/// terms inert anyway while `B = 0`.
+pub const PRUNE_COST_PER_TERM: f64 = 0.0;
+
+/// Default per-rowid cost coefficient `β` ([`PrunePolicy::cost`]): the per-posting-row
+/// scan cost (`β·Σdf`). Defaulted to `1` so the budget reads in "rowids scanned".
+pub const PRUNE_COST_PER_DF: f64 = 1.0;
+
+/// Knobs for the cost-budget trigram pruner ([`DerivedEngine::prune_to_rare_terms`]):
+/// keep a query's RAREST trigrams first (lowest DF = cheapest to scan AND most
+/// discriminating); always keep at least the typo floor `F`; past it keep admitting
+/// until the cumulative [`Self::cost`] reaches the budget `B`; never exceed `k_max`.
+/// The selection derives from THIS query's own trigram DFs, never a batch aggregate or
+/// the corpus size `N`, so `search_fuzzy_batch([…,q,…]) == search_fuzzy(q)`.
 ///
-/// The cap has two jobs and the curve serves both. It keeps the RAREST (most
-/// discriminative) trigrams and drops the common ones — the perf win (a common
-/// trigram's posting is huge) and a precision win. On a LONG query a fixed cap can
-/// under-count overlap by ranking on too few of its rare trigrams; growing the cap
-/// recovers that recall. But growth must stay a small FRACTION of `n` or a long
-/// query re-admits the common trigrams the prune deliberately drops — so the
-/// ceiling is an ABSOLUTE constant, not a fraction, and growth is sub-linear (log):
-/// the kept fraction shrinks as the query grows.
-///
-/// The cap derives strictly from `n = grams.len()` for THIS query, never from a
-/// batch-wide aggregate, so `search_fuzzy_batch([…,q,…]) == search_fuzzy(q)`: a
-/// trigram's DF is a collection property, batch-independent, and the cap depends
-/// only on `q`'s own gram count. A batch-wide cap (by the longest query) would
-/// break that invariant and is deliberately not used.
-///
-/// The engine's default is fixed-6 ([`FuzzyCapPolicy::default`], `floor == ceiling
-/// == 6`), so every `n` clamps to 6 and there is no behaviour change from the
-/// historical `FUZZY_MAX_TRIGRAMS` truncate. The `(floor, k, ceiling)` are settable
-/// ([`DerivedEngine::set_fuzzy_cap_policy`]) so the fuzzy-recall eval can A/B a
-/// floor sweep and the log-growth curve against fixed-6 without recompiling.
+/// The default is settable ([`DerivedEngine::set_prune_policy`]) so the recall eval can
+/// sweep `F`/`B` (and the cost coefficients) without recompiling. The default `B = 0`
+/// reduces to the proven fixed-`F` floor (no breadth, no recall change).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FuzzyCapPolicy {
-    /// The floor (and, by default, also the ceiling) on the cap — today's fixed
-    /// value. The `ln` term is `<= 0` for `n <= floor`, so the cap pins here for
-    /// short queries.
-    pub floor: usize,
-    /// The log-growth rate of the cap in `n`. Larger `k` admits the next-rarest
-    /// trigrams faster. Inert when `floor == ceiling` (the default).
-    pub k: f64,
-    /// The absolute ceiling on the cap — a constant, NOT a fraction of `n`, so a
-    /// long query can never re-admit the common trigrams the prune drops.
-    pub ceiling: usize,
+pub struct PrunePolicy {
+    /// `F`: the constant typo floor — keep at least `min(F, |present|)` rarest present.
+    pub typo_floor: usize,
+    /// `B`: the cost budget admitted PAST the floor (in [`Self::cost`] units).
+    pub cost_budget: f64,
+    /// `k_max`: the absolute ceiling on kept trigrams.
+    pub max_terms: usize,
+    /// `α`: per-kept-list fixed cost (bitmap load + delta merge).
+    pub cost_per_term: f64,
+    /// `β`: per-rowid scan cost (multiplies a trigram's `df`).
+    pub cost_per_df: f64,
 }
 
-impl Default for FuzzyCapPolicy {
-    /// Fixed-6: `floor == ceiling == 6`, so [`Self::cap`] returns 6 for every `n`
-    /// — byte-identical to the historical [`FUZZY_MAX_TRIGRAMS`] truncate. `k` is
-    /// the documented default the eval sweeps up from; it is inert while the floor
-    /// and ceiling coincide.
+impl Default for PrunePolicy {
     fn default() -> Self {
         Self {
-            floor: FUZZY_MAX_TRIGRAMS,
-            k: 2.7,
-            ceiling: FUZZY_MAX_TRIGRAMS,
+            typo_floor: PRUNE_TYPO_FLOOR,
+            cost_budget: PRUNE_COST_BUDGET,
+            max_terms: PRUNE_MAX_TERMS,
+            cost_per_term: PRUNE_COST_PER_TERM,
+            cost_per_df: PRUNE_COST_PER_DF,
         }
     }
 }
 
-impl FuzzyCapPolicy {
-    /// The cap for a query of `n` trigrams: `clamp(floor + round(k·ln(n/floor)),
-    /// floor, ceiling)`. For `n <= floor` the `ln` term is `<= 0` so the result
-    /// pins at `floor`. A `ceiling < floor` mis-config degrades to fixed-at-floor:
-    /// the upper bound is `max(floor, ceiling)`, so the cap never returns below the
-    /// floor and `clamp` never sees an inverted range.
+impl PrunePolicy {
+    /// The two-term scan cost of keeping `n_kept` trigrams whose document frequencies
+    /// sum to `sum_df`: `α·n_kept + β·Σdf`. `α` is the fixed per-list cost (a bitmap
+    /// load + delta merge), `β` the per-rowid scan cost. The budget `B` is compared
+    /// against this. (Profiling decides whether `α` matters; pure-`Σdf` is `α = 0`.)
     #[must_use]
-    pub fn cap(&self, n: usize) -> usize {
-        if n <= self.floor {
-            return self.floor;
-        }
-        let grown = self.floor as f64 + (self.k * ((n as f64) / self.floor as f64).ln()).round();
-        // `grown >= floor` here (the `ln` term is positive for `n > floor`), so the
-        // `as usize` cast cannot underflow. `max(floor, ceiling)` keeps the clamp
-        // range valid even if a caller sets a ceiling below the floor.
-        (grown as usize).clamp(self.floor, self.ceiling.max(self.floor))
+    fn cost(&self, n_kept: usize, sum_df: i64) -> f64 {
+        self.cost_per_term * n_kept as f64 + self.cost_per_df * sum_df.max(0) as f64
     }
 }
 
@@ -3373,21 +3385,20 @@ pub fn fts_quote(term: &str) -> String {
 }
 
 impl DerivedEngine {
-    /// Set the per-query rare-trigram cap policy ([`FuzzyCapPolicy`]). The
-    /// fuzzy-recall eval uses this to A/B a floor sweep and the log-growth curve
-    /// against the fixed-6 default without recompiling. Production opens the engine
-    /// with the default and never calls this.
+    /// Set the evidence-pruner policy ([`PrunePolicy`]: `M`/`k_max`). The recall eval
+    /// uses this to sweep the target candidate size and the term cap without
+    /// recompiling. Production opens the engine with the default and never calls this.
     ///
-    /// Applied from the NEXT fuzzy batch on (each batch reads the policy once), so
-    /// it never splits a batch in flight. The cap is still derived per query from
-    /// that query's own gram count, so batch==serial is preserved under any policy.
-    pub fn set_fuzzy_cap_policy(&self, policy: FuzzyCapPolicy) {
-        *self.fuzzy_cap_lock() = policy;
+    /// Applied from the NEXT fuzzy batch on (each batch reads the policy once), so it
+    /// never splits a batch in flight. The prune is still derived per query from that
+    /// query's own trigram DFs, so batch==serial is preserved under any policy.
+    pub fn set_prune_policy(&self, policy: PrunePolicy) {
+        *self.prune_policy_lock() = policy;
     }
 
-    /// The current per-query rare-trigram cap policy.
-    pub fn fuzzy_cap_policy(&self) -> FuzzyCapPolicy {
-        *self.fuzzy_cap_lock()
+    /// The current evidence-pruner policy.
+    pub fn prune_policy(&self) -> PrunePolicy {
+        *self.prune_policy_lock()
     }
 
     /// Set the materialization DF ceiling `C` ([`MATERIALIZE_DF_CEILING`]). Takes
@@ -3417,45 +3428,71 @@ impl DerivedEngine {
         Some(grams.into_iter().collect())
     }
 
-    /// The fuzzy candidate trigrams the overlap ranker queries and counts: the
-    /// `policy.cap(grams.len())` rarest KNOWN (present in the DF snapshot) trigrams,
-    /// PLUS every trigram ABSENT from the snapshot. Common trigrams bloat the match
-    /// set and discriminate least, so the rarest known ones are kept; but
-    /// absent-from-the-snapshot does NOT mean globally rare. `df` is read from the
-    /// materialized `trigram_df`, which lags the live index between rebuilds, so an
-    /// absent trigram can mean "written since the snapshot" — and truncating those
-    /// away would drop a fuzzy match whose overlap is dominated by just-written
-    /// trigrams. So absent trigrams are KEPT, not pruned:
-    /// on a FRESH snapshot they are genuine typos with empty postings (recall-safe,
-    /// results-neutral, near-free to scan), and on a STALE one they are exactly the
-    /// new trigrams the prune must scan to keep recall. The floor is over this kept
-    /// set, not the full query gram set.
+    /// The fuzzy candidate trigrams the overlap ranker queries and counts, selected by
+    /// a COST-BUDGET walk: take the query's PRESENT trigrams rarest-first (lowest DF =
+    /// cheapest to scan AND most discriminating), always keep at least the typo floor
+    /// `F`, then keep admitting trigrams until the cumulative scan cost
+    /// ([`PrunePolicy::cost`]) reaches the budget `B`, never exceeding `k_max`. Rare
+    /// anchors have tiny postings so the budget keeps MANY of them cheaply (the typo
+    /// hedge + surfaces a sub-word near-match); common trigrams have huge postings so
+    /// the budget keeps FEW (cost-bounded). The default `B = 0` keeps exactly `F` — the
+    /// proven fixed-floor; raising `B` admits breadth within a latency budget.
+    ///
+    /// ABSENT (DF-0) trigrams are KEPT but charged NO cost. `df` is the materialized
+    /// `trigram_df`, which lags writes, so a DF-0 trigram can mean "written since the
+    /// snapshot" rather than "absent" — and the #1000 base+delta bitmap IS fresh, so
+    /// scanning it surfaces the just-written note (the #958 recall guarantee). A
+    /// genuinely-absent trigram has an empty posting (free); either way they are
+    /// appended after the budgeted walk, never charged.
+    ///
+    /// The typo floor `F` is clamped to at least [`FUZZY_MIN_SHARED`] (so the overlap
+    /// ranker's shared floor is always reachable) and `k_max` to at least `F` (so a
+    /// mis-swept ceiling can't undercut the floor). Selection derives from THIS query's
+    /// own trigram DFs — never a batch aggregate or the corpus size — so
+    /// `search_fuzzy_batch([…,q,…]) == search_fuzzy(q)`.
     fn prune_to_rare_terms(
         grams: &std::collections::BTreeSet<Trigram>,
         df: &std::collections::HashMap<Trigram, i64>,
-        policy: FuzzyCapPolicy,
+        policy: PrunePolicy,
     ) -> Vec<Trigram> {
-        // The cap is derived from THIS query's own gram count (`grams.len()`), never
-        // a batch-wide count, so the pruned set is byte-identical whether the query
-        // runs alone or in a batch — the batch==serial invariant.
-        let cap = policy.cap(grams.len());
-        // The `cap` rarest PRESENT trigrams (DF ascending, term as a deterministic
-        // tie-break)...
-        let mut present: Vec<&Trigram> = grams
+        // Present (DF>0) trigrams, rarest first (DF ascending, term as a deterministic
+        // tie-break so the kept set is stable run to run).
+        let mut present: Vec<(&Trigram, i64)> = grams
             .iter()
-            .filter(|g| df.get(*g).copied().unwrap_or(0) > 0)
+            .filter_map(|g| {
+                let d = df.get(g).copied().unwrap_or(0);
+                (d > 0).then_some((g, d))
+            })
             .collect();
-        present.sort_by(|a, b| {
-            let d = |g: &Trigram| df.get(g).copied().unwrap_or(0);
-            d(a).cmp(&d(b)).then_with(|| a.cmp(b))
-        });
-        present.truncate(cap);
-        // ...then EVERY absent (DF-0) trigram appended. `grams` is a BTreeSet, so the
-        // absent filter yields them in deterministic term order.
-        let absent = grams
-            .iter()
-            .filter(|g| df.get(*g).copied().unwrap_or(0) == 0);
-        present.into_iter().chain(absent).copied().collect()
+        present.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+
+        // The typo floor, clamped to the hard reachability floor and to what's present;
+        // the ceiling can't undercut it.
+        let floor = policy.typo_floor.max(FUZZY_MIN_SHARED).min(present.len());
+        let max_terms = policy.max_terms.max(floor);
+
+        let mut kept: Vec<Trigram> = Vec::new();
+        let mut sum_df: i64 = 0;
+        for (g, d) in present {
+            kept.push(*g);
+            sum_df += d;
+            if kept.len() >= max_terms {
+                break; // absolute ceiling
+            }
+            // Past the floor, stop once the kept lists' scan cost reaches the budget.
+            if kept.len() >= floor && policy.cost(kept.len(), sum_df) >= policy.cost_budget {
+                break;
+            }
+        }
+        // Append every ABSENT (DF-0) trigram — kept for the stale-snapshot recall, not
+        // charged. `grams` is a BTreeSet, so this is deterministic term order.
+        kept.extend(
+            grams
+                .iter()
+                .filter(|g| df.get(*g).copied().unwrap_or(0) == 0)
+                .copied(),
+        );
+        kept
     }
 
     /// Accumulate one query's per-segment trigram overlap: how many of its pruned
@@ -3926,11 +3963,11 @@ impl DerivedEngine {
         // as before; the freshness bracket flags a write that lands mid-read.
         let conn = self.read_pool.checkout()?;
         let df = Self::trigram_dfs(&conn, &distinct.into_iter().collect::<Vec<Trigram>>())?;
-        // Read the cap policy ONCE for the whole batch, so every query in this batch
-        // is pruned under one snapshot of the policy (a concurrent set never splits a
-        // batch). The cap is still derived per query from that query's own gram
-        // count inside the map — never batch-wide — so batch==serial holds.
-        let policy = self.fuzzy_cap_policy();
+        // Read the prune policy ONCE for the whole batch, so every query is pruned
+        // under one snapshot (a concurrent set never splits a batch). The cost-budget
+        // walk is still derived per query from that query's own trigram DFs — never
+        // batch-wide — so batch==serial holds.
+        let policy = self.prune_policy();
         let pruned: Vec<Option<Vec<Trigram>>> = gram_sets
             .iter()
             .map(|g| {
@@ -4380,7 +4417,7 @@ mod lexical_tests {
         build_snapshot_live(&e, &rows, 1).unwrap();
 
         let conn = e.read_pool.checkout().unwrap();
-        let policy = e.fuzzy_cap_policy();
+        let policy = e.prune_policy();
         let queries = [
             "alphabravo charlie",
             "deltaecho foxtrot golfhotel",
@@ -4445,12 +4482,22 @@ mod lexical_tests {
         rows.push((6, "field".into(), "Front".into(), "qwxzvk".into()));
         build_snapshot_live(&e, &rows, 1).unwrap();
 
+        // Drive the RANKER directly over the full query trigram set (the prune is a
+        // separate concern, exercised by the prune_* tests — here it would keep only
+        // the rare wxz/xzv unique to note 6 and correctly drop the distractors). The
+        // distractors share two trigrams (qwx, zvk); the target "qwxzvk" shares all
+        // four (qwx, wxz, xzv, zvk).
+        let conn = e.read_pool.checkout().unwrap();
+        let terms = tgs(&["qwx", "wxz", "xzv", "zvk"]);
+        let bitmaps = DerivedEngine::load_trigram_bitmaps(&conn, &terms).unwrap();
+
         // top_k=1: the highest-rowid, highest-overlap note wins — not a low-rowid
         // distractor. Proves the cut is overlap-ordered, not rowid-truncated.
-        let top1 = e.search_fuzzy("qwxzvk", 1, None, &[]).unwrap();
+        let top1 = DerivedEngine::fuzzy_rank_query(&conn, &terms, &bitmaps, 1, &[], None).unwrap();
         assert_eq!(top1.iter().map(|(nid, ..)| *nid).collect::<Vec<_>>(), [6]);
         // Widen: the target still leads, distractors (overlap 2) follow by note id.
-        let top_all = e.search_fuzzy("qwxzvk", 10, None, &[]).unwrap();
+        let top_all =
+            DerivedEngine::fuzzy_rank_query(&conn, &terms, &bitmaps, 10, &[], None).unwrap();
         assert_eq!(top_all[0].0, 6, "highest overlap ranks first");
         assert_eq!(
             top_all.len(),
@@ -4733,13 +4780,16 @@ mod lexical_tests {
         )
         .unwrap();
 
-        // A growth policy (cap > 6 on a long query) so the parity check exercises a
-        // per-query cap that is NOT the fixed floor — proving batch==serial holds
-        // when the cap varies by query length, not just at fixed-6.
-        e.set_fuzzy_cap_policy(FuzzyCapPolicy {
-            floor: 6,
-            k: 2.7,
-            ceiling: 12,
+        // A non-default prune policy with a non-zero cost budget so the walk keeps
+        // breadth past the floor (varying the kept set across the short and long queries
+        // below) — the parity check proves batch==serial holds when the kept set varies
+        // by query, not just at the default.
+        e.set_prune_policy(PrunePolicy {
+            typo_floor: 4,
+            cost_budget: 200.0,
+            max_terms: 12,
+            cost_per_term: 0.0,
+            cost_per_df: 1.0,
         });
 
         // literal hit, transposition typo, sub-trigram (None/empty), no-match,
@@ -4998,156 +5048,165 @@ mod lexical_tests {
     }
 
     #[test]
-    fn prune_to_rare_keeps_rarest_present_plus_all_absent_drops_common() {
+    fn prune_default_keeps_exactly_the_typo_floor() {
+        // Default policy (F=6, B=0): the budget binds at the floor, so the prune keeps
+        // exactly the 6 rarest present trigrams — the proven fixed-6 — plus all absent.
         use std::collections::{BTreeSet, HashMap};
-        let grams: BTreeSet<Trigram> =
-            tgs(&["aaa", "bbb", "ccc", "ddd", "eee", "fff", "ggg", "zzz"])
-                .into_iter()
-                .collect();
-        let df: HashMap<Trigram, i64> = [
-            ("aaa", 1000),
-            ("bbb", 500),
-            ("ccc", 3),
-            ("ddd", 1),
-            ("eee", 2),
-            ("fff", 800),
-            ("ggg", 50),
-            ("zzz", 0), // absent from the snapshot (a typo, OR written since #958)
-        ]
-        .iter()
-        .map(|(k, v)| (tg(k), *v))
-        .collect();
-        // Under the default (fixed-6) policy: the 6 rarest PRESENT (rarest-first),
-        // THEN every absent trigram appended.
-        let terms = DerivedEngine::prune_to_rare_terms(&grams, &df, FuzzyCapPolicy::default());
+        let names: Vec<String> = (0..8).map(|i| format!("p{i:02}")).collect();
+        let grams: BTreeSet<Trigram> = names
+            .iter()
+            .map(|s| tg(s))
+            .chain(std::iter::once(tg("zzz")))
+            .collect();
+        // df 1..=8 (distinct, so the rarest-6 are unambiguous) + zzz absent.
+        let mut df: HashMap<Trigram, i64> = names
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (tg(s), (i + 1) as i64))
+            .collect();
+        df.insert(tg("zzz"), 0);
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, PrunePolicy::default());
+        assert_eq!(kept.len(), 7, "6 rarest present + 1 absent");
         assert_eq!(
-            terms,
-            tgs(&["ddd", "eee", "ccc", "ggg", "bbb", "fff", "zzz"])
+            &kept[..6],
+            &tgs(&["p00", "p01", "p02", "p03", "p04", "p05"])[..],
+            "the 6 rarest present, rarest-first"
         );
-        assert!(
-            !terms.iter().any(|t| t.as_str() == "aaa"),
-            "dropped the commonest PRESENT (DF 1000, beyond the rarest 6)"
-        );
-        assert!(
-            terms.iter().any(|t| t.as_str() == "zzz"),
-            "KEEPS the absent (DF 0) trigram — it may be written-since-snapshot"
-        );
+        assert!(kept.iter().any(|t| t.as_str() == "zzz"), "absent appended");
     }
 
     #[test]
-    fn fuzzy_cap_default_is_fixed_six() {
-        // The default policy is byte-identical to the historical FUZZY_MAX_TRIGRAMS
-        // truncate: every gram count clamps to 6, so adopting the policy is a no-op
-        // until an eval sets a different one.
-        let p = FuzzyCapPolicy::default();
-        assert_eq!(p.floor, FUZZY_MAX_TRIGRAMS);
-        assert_eq!(p.ceiling, FUZZY_MAX_TRIGRAMS);
-        for n in [0usize, 1, 5, 6, 7, 12, 30, 60, 200] {
-            assert_eq!(p.cap(n), 6, "default cap must stay fixed-6 at n={n}");
-        }
-    }
-
-    #[test]
-    fn fuzzy_cap_curve_table() {
-        // Pin the log-growth curve at the representative trigram counts the eval
-        // sweeps, so a change to the constants or the rounding is caught here. The
-        // curve is `clamp(6 + round(2.7·ln(n/6)), 6, 12)`.
-        let p = FuzzyCapPolicy {
-            floor: 6,
-            k: 2.7,
-            ceiling: 12,
-        };
-        // (n, expected cap): the floor pins n<=6 at 6; growth is slow (log); the
-        // ceiling pins the long tail at 12.
-        let table = [
-            (2usize, 6usize), // below floor → floor
-            (6, 6),           // at floor → floor (ln term is 0)
-            (9, 7),           // 6 + round(2.7·0.405)=6+1
-            (12, 8),          // 6 + round(2.7·0.693)=6+2
-            (18, 9),          // 6 + round(2.7·1.099)=6+3
-            (24, 10),         // 6 + round(2.7·1.386)=6+4
-            (30, 10),         // 6 + round(2.7·1.609)=6+4
-            (45, 11),         // 6 + round(2.7·2.015)=6+5
-            (60, 12),         // 6 + round(2.7·2.303)=6+6 → ceiling
-            (120, 12),        // well past the ceiling → clamped to 12
-        ];
-        for (n, want) in table {
-            assert_eq!(p.cap(n), want, "cap({n}) under k=2.7 ceiling=12");
-        }
-    }
-
-    #[test]
-    fn fuzzy_cap_floor_sweep() {
-        // The floor sweep arms (fixed-6/5/4): floor==ceiling pins the cap flat at
-        // the floor for every n — the simplest lever the eval measures.
-        for floor in [4usize, 5, 6] {
-            let p = FuzzyCapPolicy {
-                floor,
-                k: 2.7,
-                ceiling: floor,
-            };
-            for n in [0usize, 3, floor, floor + 10, 60] {
-                assert_eq!(p.cap(n), floor, "fixed-{floor} cap at n={n}");
-            }
-        }
-    }
-
-    #[test]
-    fn fuzzy_cap_misconfigured_ceiling_below_floor_degrades_to_floor() {
-        // A ceiling below the floor must not panic the clamp (an inverted range) —
-        // the upper bound is taken as max(floor, ceiling), so a mis-config degrades
-        // to "fixed at the floor" rather than aborting.
-        let p = FuzzyCapPolicy {
-            floor: 6,
-            k: 2.7,
-            ceiling: 3,
-        };
-        for n in [2usize, 6, 30, 100] {
-            assert_eq!(p.cap(n), 6, "pins at the floor at n={n}");
-        }
-    }
-
-    #[test]
-    fn prune_grows_cap_under_a_log_policy() {
-        // Under a growth policy a longer gram set keeps MORE of its rarest present
-        // trigrams than fixed-6 — the recall lever the eval measures. With 8 present
-        // grams and cap(8)=7 (6 + round(2.7·ln(8/6))=6+round(0.78)=7), the prune
-        // keeps 7, one more than the fixed-6 default.
+    fn prune_cost_budget_admits_breadth_past_the_floor_then_stops() {
+        // With a non-zero budget the walk keeps admitting rarest-first past the floor
+        // until the cumulative scan cost (pure Σdf here) reaches B, then stops.
         use std::collections::{BTreeSet, HashMap};
-        let grams: BTreeSet<Trigram> =
-            tgs(&["aaa", "bbb", "ccc", "ddd", "eee", "fff", "ggg", "hhh"])
-                .into_iter()
+        let grams: BTreeSet<Trigram> = tgs(&["rch", "arc", "sea", "ear"]).into_iter().collect();
+        let df: HashMap<Trigram, i64> =
+            [("rch", 3000), ("arc", 6000), ("sea", 8000), ("ear", 15000)]
+                .iter()
+                .map(|(k, v)| (tg(k), *v))
                 .collect();
-        let df: HashMap<Trigram, i64> = [
-            ("aaa", 800),
-            ("bbb", 700),
-            ("ccc", 600),
-            ("ddd", 500),
-            ("eee", 400),
-            ("fff", 300),
-            ("ggg", 200),
-            ("hhh", 100),
-        ]
-        .iter()
-        .map(|(k, v)| (tg(k), *v))
-        .collect();
-        let growth = FuzzyCapPolicy {
-            floor: 6,
-            k: 2.7,
-            ceiling: 12,
+        let policy = PrunePolicy {
+            typo_floor: 2,
+            cost_budget: 10_000.0,
+            max_terms: 12,
+            cost_per_term: 0.0,
+            cost_per_df: 1.0,
         };
-        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, growth);
-        assert_eq!(kept.len(), 7, "cap(8)=7 keeps the 7 rarest present");
-        // The 7 rarest (lowest DF first); the commonest one ("aaa", DF 800) is the
-        // only one dropped.
+        // rch(3000)+arc(6000)=9000 < 10000 → keep going; +sea → 17000 ≥ B → stop.
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, policy);
+        assert_eq!(kept, tgs(&["rch", "arc", "sea"]), "ear dropped over budget");
+    }
+
+    #[test]
+    fn prune_floor_caps_at_present_count() {
+        // The floor is min(F, |present|): a query with fewer present trigrams than F
+        // keeps all of them (and B=0 doesn't cut below the floor).
+        use std::collections::{BTreeSet, HashMap};
+        let grams: BTreeSet<Trigram> = tgs(&["ddd", "eee", "ccc"]).into_iter().collect();
+        let df: HashMap<Trigram, i64> = [("ddd", 1), ("eee", 2), ("ccc", 3)]
+            .iter()
+            .map(|(k, v)| (tg(k), *v))
+            .collect();
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, PrunePolicy::default());
         assert_eq!(
             kept,
-            tgs(&["hhh", "ggg", "fff", "eee", "ddd", "ccc", "bbb"])
+            tgs(&["ddd", "eee", "ccc"]),
+            "all 3 present kept (floor capped at 3)"
         );
-        // Default fixed-6 over the same input keeps only 6.
-        let default_kept =
-            DerivedEngine::prune_to_rare_terms(&grams, &df, FuzzyCapPolicy::default());
-        assert_eq!(default_kept.len(), 6, "fixed-6 keeps 6");
+    }
+
+    #[test]
+    fn prune_k_max_caps_breadth_under_a_large_budget() {
+        // A budget so large it never binds within k_max: the absolute ceiling stops it.
+        use std::collections::{BTreeSet, HashMap};
+        let names: Vec<String> = (0..15).map(|i| format!("c{i:02}")).collect();
+        let grams: BTreeSet<Trigram> = names.iter().map(|s| tg(s)).collect();
+        let df: HashMap<Trigram, i64> = names.iter().map(|s| (tg(s), 1)).collect();
+        let policy = PrunePolicy {
+            typo_floor: 2,
+            cost_budget: 1e9,
+            max_terms: 12,
+            cost_per_term: 0.0,
+            cost_per_df: 1.0,
+        };
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, policy);
+        assert_eq!(
+            kept.len(),
+            12,
+            "k_max bounds breadth when the budget never binds"
+        );
+    }
+
+    #[test]
+    fn prune_k_max_never_undercuts_the_typo_floor() {
+        // A swept k_max below the floor must not stop the walk before F is reached —
+        // that would make every query on the arm un-rankable. k_max is raised to the
+        // floor, so k_max=1 with F=6 still keeps 6.
+        use std::collections::{BTreeSet, HashMap};
+        let names: Vec<String> = (0..8).map(|i| format!("p{i:02}")).collect();
+        let grams: BTreeSet<Trigram> = names.iter().map(|s| tg(s)).collect();
+        let df: HashMap<Trigram, i64> = names
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (tg(s), (i + 1) as i64))
+            .collect();
+        let policy = PrunePolicy {
+            typo_floor: 6,
+            cost_budget: 0.0,
+            max_terms: 1,
+            cost_per_term: 0.0,
+            cost_per_df: 1.0,
+        };
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, policy);
+        assert_eq!(kept.len(), 6, "k_max=1 can't undercut the floor of 6");
+    }
+
+    #[test]
+    fn prune_keeps_absent_uncharged() {
+        // The df=0 hybrid: absent trigrams are kept (the #958 stale-snapshot recall) and
+        // charged NO cost, appended after the budgeted walk in BTreeSet order. Here the
+        // single present trigram is kept (floor caps at 1) and the two absent appended.
+        use std::collections::{BTreeSet, HashMap};
+        let grams: BTreeSet<Trigram> = tgs(&["rch", "yyy", "zzz"]).into_iter().collect();
+        let df: HashMap<Trigram, i64> = [("rch", 3000), ("yyy", 0), ("zzz", 0)]
+            .iter()
+            .map(|(k, v)| (tg(k), *v))
+            .collect();
+        let kept = DerivedEngine::prune_to_rare_terms(&grams, &df, PrunePolicy::default());
+        assert_eq!(kept, tgs(&["rch", "yyy", "zzz"]));
+    }
+
+    #[test]
+    fn prune_policy_default_is_fixed_six_floor_zero_budget() {
+        let p = PrunePolicy::default();
+        assert_eq!(p.typo_floor, PRUNE_TYPO_FLOOR);
+        assert_eq!(p.typo_floor, 6);
+        assert_eq!(
+            p.cost_budget, 0.0,
+            "B=0 → keep exactly the floor (proven fixed-6)"
+        );
+        assert_eq!(p.max_terms, 12);
+        assert_eq!(p.cost_per_term, 0.0);
+        assert_eq!(p.cost_per_df, 1.0);
+    }
+
+    #[test]
+    fn prune_cost_is_two_term() {
+        let p = PrunePolicy {
+            typo_floor: 6,
+            cost_budget: 0.0,
+            max_terms: 12,
+            cost_per_term: 2.0,
+            cost_per_df: 3.0,
+        };
+        assert_eq!(p.cost(4, 10), 2.0 * 4.0 + 3.0 * 10.0);
+        let pure = PrunePolicy {
+            cost_per_term: 0.0,
+            cost_per_df: 1.0,
+            ..p
+        };
+        assert_eq!(pure.cost(4, 10), 10.0, "pure-Σdf when α=0");
     }
 
     #[test]

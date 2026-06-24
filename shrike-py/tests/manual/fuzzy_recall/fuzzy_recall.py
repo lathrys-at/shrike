@@ -20,7 +20,7 @@ Two axes with very different trust:
   verdict + the cap pick + the tail-driver, come ONLY from the maintainer's clean-env
   run; the local output is a template that run fills in (loudly labelled untrusted).
 
-The cap sweep is the 2D ``k × ceiling`` grid (floor pinned at 6) — see :func:`cap_grid`.
+The prune sweep is the 2D ``F × B`` grid (typo floor × cost budget) — see :func:`cap_grid`.
 On a clean run the latency harness picks the curve with max recall@10 whose single-query
 **p95** clears the budget (the #927 cap-default decision), and the **tail diagnostic**
 (:func:`_render_slow_query_diagnostic`) names which query shapes (trigram count,
@@ -81,48 +81,50 @@ BUDGET_MS = 10.0
 
 
 @dataclass(frozen=True)
-class CapPolicy:
-    """One cap-policy arm: a label and the ``(floor, k, ceiling)`` set on the engine
-    before its queries run. The control is ``fixed-6`` (floor == ceiling == 6)."""
+class PrunePolicy:
+    """One prune-policy arm set on the engine before its queries run. The cost-budget
+    pruner keeps a query's rarest trigrams first, always at least the typo floor ``F``,
+    then admits more until the cumulative scan cost (``α·|kept| + β·Σdf``) reaches the
+    budget ``B``, capped at ``k_max``. The control is the shipped default (``B=0`` →
+    exactly ``F`` rarest = the proven fixed-floor). The eval sweeps ``F`` and ``B``;
+    ``α``/``β`` are profiled separately (a per-list-vs-per-rowid cost measurement) and
+    held at the pure-``Σdf`` hypothesis (``α=0, β=1``) here."""
 
     label: str
-    floor: int
-    k: float
-    ceiling: int
+    typo_floor: int
+    cost_budget: float
+    max_terms: int = 12
+    cost_per_term: float = 0.0
+    cost_per_df: float = 1.0
 
 
-#: The fixed cap policy every arm is read against — the shipped default.
-CONTROL: CapPolicy = CapPolicy("fixed-6 (control)", floor=6, k=2.7, ceiling=6)
+#: The prune policy every arm is read against — the shipped default (F=6, B=0).
+CONTROL: PrunePolicy = PrunePolicy("default F=6 B=0 (control)", typo_floor=6, cost_budget=0.0)
 
-#: The 2D cap grid (#927/#977): per-query rare-trigram budget = clamp(k·ln(n), floor,
-#: ceiling). The frontier sweeps `k` (growth rate) × `ceiling` (the hard cap a long
-#: query saturates at) with `floor` pinned at 6, so the recall/single-query-latency
-#: knee is visible across the whole flank — the prior 3-point curve sweep sat on the
-#: steep part and couldn't show where the budget cuts.
-GRID_KS: tuple[float, ...] = (2.0, 3.0, 4.0, 6.0, 8.0)
-GRID_CEILINGS: tuple[int, ...] = (10, 12, 16, 20, 24)
-GRID_FLOOR: int = 6
+#: The 2D prune grid: `F` (constant typo floor — survive an edit and still clear the
+#: overlap floor) × `B` (cost budget admitting breadth past `F`, in Σdf "rowids
+#: scanned" units). The frontier sweeps both so the recall / single-query-latency knee
+#: is visible: larger `F`/`B` trade latency for typo + near-match recall. `B=0` is the
+#: fixed-floor baseline.
+GRID_FLOORS: tuple[int, ...] = (4, 5, 6, 7)
+GRID_BUDGETS: tuple[float, ...] = (0.0, 2_000.0, 10_000.0, 50_000.0, 200_000.0)
 
 
 def cap_grid(
-    ks: tuple[float, ...] = GRID_KS,
-    ceilings: tuple[int, ...] = GRID_CEILINGS,
-    floor: int = GRID_FLOOR,
-) -> tuple[CapPolicy, ...]:
-    """The control followed by the full `k × ceiling` grid (floor pinned). A
-    `(k, ceiling)` cell whose `k·ln(n)` never reaches `ceiling` over the query set
-    still runs — it just behaves like a lower effective ceiling, which the frontier
-    reads correctly. The control is first so it anchors the per-arm deltas."""
+    floors: tuple[int, ...] = GRID_FLOORS,
+    budgets: tuple[float, ...] = GRID_BUDGETS,
+) -> tuple[PrunePolicy, ...]:
+    """The control followed by the full `F × B` grid. The control is first so it anchors
+    the per-arm deltas. (`α`/`β` are fixed at the pure-`Σdf` hypothesis across the grid;
+    re-profile them before trusting `B`'s absolute scale — see the findings note.)"""
     grid = tuple(
-        CapPolicy(f"k={k:g} ceil={ceil}", floor=floor, k=k, ceiling=ceil)
-        for k in ks
-        for ceil in ceilings
+        PrunePolicy(f"F={f} B={b:g}", typo_floor=f, cost_budget=b) for f in floors for b in budgets
     )
     return (CONTROL, *grid)
 
 
 #: The arms swept by default: the control + the 2D frontier grid.
-DEFAULT_ARMS: tuple[CapPolicy, ...] = cap_grid()
+DEFAULT_ARMS: tuple[PrunePolicy, ...] = cap_grid()
 
 
 @dataclass(frozen=True)
@@ -159,7 +161,7 @@ class ArmResult:
     """One arm's aggregated recall@10 / MRR over the query set, plus the per-slice
     breakdowns and the optional measured single-query latency + slow-query samples."""
 
-    policy: CapPolicy
+    policy: PrunePolicy
     recall_at_k: float
     mrr: float
     n_queries: int
@@ -300,7 +302,7 @@ def _measure_single_query_latency(
 
 def _evaluate_arm(
     engine: shrike_native.DerivedTextEngine,
-    policy: CapPolicy,
+    policy: PrunePolicy,
     queries: list[TypoQuery],
     *,
     batch_size: int = 200,
@@ -315,7 +317,13 @@ def _evaluate_arm(
     control arm). Recall is computed from the batched fuzzy read (deterministic,
     mode-independent); latency is a separate single-query pass. Timing is off by
     default — it belongs on a clean machine."""
-    engine.set_fuzzy_cap_policy(policy.floor, policy.k, policy.ceiling)
+    engine.set_prune_policy(
+        policy.typo_floor,
+        policy.cost_budget,
+        policy.max_terms,
+        policy.cost_per_term,
+        policy.cost_per_df,
+    )
     texts = [q.query for q in queries]
 
     results: list[list[tuple]] = []
@@ -393,7 +401,7 @@ def run_eval(
     notes: int = 5000,
     seed: int = 0,
     sample_size: int = 500,
-    arms: tuple[CapPolicy, ...] = DEFAULT_ARMS,
+    arms: tuple[PrunePolicy, ...] = DEFAULT_ARMS,
     measure_latency: bool = False,
     offline: bool = False,
     cache_root: Path | None = None,
@@ -488,13 +496,13 @@ def render_results(run: EvalRun) -> str:
     # Headline table.
     lines.append("## Overall")
     lines.append("")
-    lines.append("| arm | floor | k | ceiling | recall@10 | Δ vs control | MRR |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+    lines.append("| arm | F | B | recall@10 | Δ vs control | MRR |")
+    lines.append("|---|---:|---:|---:|---:|---:|")
     for a in run.arms:
         delta = a.recall_at_k - control.recall_at_k
         dstr = "—" if a is control else f"{delta * 100:+.1f}"
         lines.append(
-            f"| {a.policy.label} | {a.policy.floor} | {a.policy.k:g} | {a.policy.ceiling} | "
+            f"| {a.policy.label} | {a.policy.typo_floor} | {a.policy.cost_budget:g} | "
             f"{_fmt_pct(a.recall_at_k)} | {dstr} | {_fmt_pct(a.mrr)} |"
         )
     lines.append("")
@@ -626,8 +634,8 @@ def _render_picks(timed: list[ArmResult]) -> list[str]:
         )
         assert best.latency is not None
         return (
-            f"- **{pct} budget:** `{best.policy.label}` (floor={best.policy.floor}, "
-            f"k={best.policy.k:g}, ceiling={best.policy.ceiling}) — recall@10 "
+            f"- **{pct} budget:** `{best.policy.label}` (F={best.policy.typo_floor}, "
+            f"B={best.policy.cost_budget:g}) — recall@10 "
             f"{_fmt_pct(best.recall_at_k)} at {pct} {value(best.latency):.3f}ms."
         )
 
