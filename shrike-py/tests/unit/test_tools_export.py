@@ -51,9 +51,9 @@ class TestDownloadUrlDelivery:
         assert result.format == "apkg"
         assert result.url.startswith("http://127.0.0.1:8372/export/")
         assert result.bytes > 0
-        # The token resolves to a real on-disk temp file (the GET route serves it).
+        # The token claims a real on-disk temp file (the GET route serves it once).
         token = result.url.rsplit("/", 1)[1]
-        path = store.resolve(token)
+        path = store.claim(token)
         assert path is not None and os.path.isfile(path)
 
     def test_url_unavailable_without_store_or_base_url(self, kharness) -> None:

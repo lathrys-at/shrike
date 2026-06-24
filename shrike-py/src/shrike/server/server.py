@@ -605,7 +605,12 @@ def _register_custom_routes(
         if export_store is None:
             return Response(status_code=404)
         token = request.path_params.get("token", "")
-        path = export_store.resolve(token)
+        # claim() atomically consumes the token, so a fast-follow second GET of
+        # the same URL misses here (a clean 404) instead of resolving a file the
+        # first GET's post-response reap is concurrently removing → 500. With the
+        # token claimed, this serve is the only one in flight, so FileResponse
+        # cannot stat a vanished file.
+        path = export_store.claim(token)
         if path is None:
             return Response(status_code=404)
         from starlette.background import BackgroundTask

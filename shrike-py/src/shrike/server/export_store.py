@@ -10,8 +10,8 @@ so collection-bearing temp files never leak.
 The token is the capability: a ``secrets.token_urlsafe`` value, not a sequential
 id, so a guessing client can't enumerate other callers' exports. The
 ``GET /export/{token}`` route (behind the same ``_guard`` Host/Origin check as
-``/media``) resolves the token here, streams the file, then asks this store to
-reap it (one-shot).
+``/media``) **claims** the token here (one-shot), streams the file, then asks
+this store to reap it.
 """
 
 from __future__ import annotations
@@ -39,13 +39,14 @@ class _Pending:
     path: str
     format: str
     created: float
+    claimed: bool = False
 
 
 class ExportStore:
     """Tracks server-named export temp files awaiting download.
 
     Thread-safe (a plain lock around the small map): the action mints on the
-    event loop, the route resolves+reaps possibly on a worker thread. The temp
+    event loop, the route claims+reaps possibly on a worker thread. The temp
     files live under ``<cache_dir>/exports/``; a token maps to one file.
     """
 
@@ -78,21 +79,29 @@ class ExportStore:
         with self._lock:
             self._pending[token] = _Pending(path=path, format=fmt, created=time.monotonic())
 
-    def resolve(self, token: str) -> str | None:
-        """The on-disk path for a token, or None (unknown/expired/reaped). Does
-        NOT reap — the route reaps after a successful stream (so a failed GET
-        can be retried within the TTL)."""
+    def claim(self, token: str) -> str | None:
+        """Atomically consume a token for a one-shot download: returns its on-disk
+        path and marks it claimed, so any concurrent or later GET of the same
+        token misses (returns None) and the route serves it exactly once. Returns
+        None for an unknown, expired, already-claimed, or vanished token.
+
+        The mark — not the reap — is what kills the race: the reap removes the
+        file only *after* the body is streamed (a post-response background task),
+        but the claim is synchronous, so a fast-follow second GET sees ``claimed``
+        and 404s cleanly instead of racing the reap into a 500 on the vanished
+        file. A claimed-but-unreaped entry (an aborted stream) stays in the map,
+        so the TTL sweep and :meth:`close` still reap its file — it is not leaked."""
         self._sweep_expired()
         with self._lock:
             pending = self._pending.get(token)
-        if pending is None:
-            return None
-        if not os.path.isfile(pending.path):
-            # The file vanished (manual delete / a prior reap) — drop the entry.
-            with self._lock:
+            if pending is None or pending.claimed:
+                return None
+            if not os.path.isfile(pending.path):
+                # The file vanished (manual delete / a prior reap) — drop the entry.
                 self._pending.pop(token, None)
-            return None
-        return pending.path
+                return None
+            pending.claimed = True
+            return pending.path
 
     def reap(self, token: str) -> None:
         """Remove a token's temp file and entry (one-shot, after download)."""
