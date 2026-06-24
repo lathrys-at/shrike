@@ -59,29 +59,31 @@ _CORE = [
     "test_collection_prune.py",
     "test_collection_query.py",
     "test_collection_reload.py",
-    "test_deck_ref.py",
-    "test_decks.py",
-    "test_delete_notes.py",
-    "test_field_metadata.py",
-    "test_find_replace.py",
-    "test_list_notes.py",
-    "test_media.py",
-    "test_migrate_note_type.py",
-    "test_note_embedding_text.py",
-    "test_note_types.py",
-    "test_rehomed_actions.py",
+    "test_collection_deck_ref.py",
+    "test_collection_decks.py",
+    "test_collection_delete_notes.py",
+    "test_collection_field_metadata.py",
+    "test_collection_find_replace.py",
+    "test_collection_list_notes.py",
+    "test_media_lifecycle.py",
+    "test_media_store.py",
+    "test_collection_migrate_note_type.py",
+    "test_collection_note_embedding_text.py",
+    "test_note_type_fields.py",
+    "test_note_type_find_replace.py",
+    "test_note_type_templates.py",
+    "test_collection_note_types.py",
     "test_schema_contract.py",
     "test_schema_numeric_bounds.py",
     "test_schemas.py",
-    "test_substring_search.py",
-    "test_update_note_tags.py",
-    "test_upsert_notes.py",
+    "test_collection_substring_search.py",
+    "test_collection_update_note_tags.py",
+    "test_collection_upsert_notes.py",
 ]
 
 _CLIENT = [
     "test_client.py",
     "test_client_batching.py",
-    "test_client_busy.py",
 ]
 
 _DAEMON = [
@@ -120,10 +122,11 @@ _EMBED_HELPERS = [
 _SEARCH_QUALITY = ["test_search_quality_metrics.py"]
 
 _EMBEDDING = [
-    "test_embedding.py",
     "test_embedding_clip.py",
     "test_embedding_onnx.py",
     "test_embedding_remote.py",
+    "test_embedding_runtime.py",
+    "test_embedding_service.py",
     # Skips on the lean build (engine-synthetic is non-default); runs locally
     # after `scripts/build-native.sh --synthetic`.
     "test_embedding_synthetic.py",
@@ -141,11 +144,13 @@ _ACTIONS = [
 # always-collected tests keeps it green while still running where it can.
 _TOOLS = [
     "test_collection_busy.py",
+    "test_export_store.py",
     "test_readiness_gate.py",
     "test_recognition.py",
     "test_tool_logging.py",
     "test_tools_busy.py",
     "test_tools_decks.py",
+    "test_tools_delete.py",
     "test_tools_export.py",
     "test_tools_field_metadata.py",
     "test_tools_find_replace.py",
@@ -155,9 +160,12 @@ _TOOLS = [
     "test_tools_migrate.py",
     "test_tools_prune.py",
     "test_tools_query.py",
+    "test_tools_rename_tag.py",
     "test_tools_routing.py",
     "test_tools_search.py",
-    "test_tools_tags.py",
+    "test_tools_search_mode.py",
+    "test_tools_update_note_tags.py",
+    "test_tools_upsert.py",
 ]
 
 _SERVER = [
@@ -168,7 +176,9 @@ _SERVER = [
 
 _CONFIG = [
     "test_anki_discovery.py",
-    "test_config.py",
+    "test_config_cache_index.py",
+    "test_config_embedding.py",
+    "test_config_transport_locking.py",
     "test_profiles.py",
     "test_registry.py",
 ]
@@ -176,25 +186,26 @@ _CONFIG = [
 _CLI = [
     "test_cli_busy.py",
     "test_cli_collection_prune.py",
-    "test_cli_collection_query.py",
     "test_cli_deck.py",
+    "test_cli_embedding.py",
     "test_cli_export.py",
     "test_cli_import.py",
-    "test_cli_index_embedding.py",
+    "test_cli_index.py",
     "test_cli_info_commands.py",
     "test_cli_json_output.py",
     "test_cli_migrate_type.py",
     "test_cli_note_commands.py",
-    "test_cli_note_replace.py",
     "test_cli_ordering.py",
     "test_cli_output.py",
-    "test_cli_note_tag.py",
     "test_cli_profile.py",
     "test_cli_routing.py",
     "test_cli_search.py",
-    "test_cli_server.py",
-    "test_cli_type_commands.py",
-    "test_cli_type_info_output.py",
+    "test_cli_search_query.py",
+    "test_cli_server_logs.py",
+    "test_cli_server_start.py",
+    "test_cli_server_status.py",
+    "test_cli_server_stop.py",
+    "test_cli_type.py",
     "test_server_start_config.py",
 ]
 
@@ -212,7 +223,6 @@ pytest_test(
     deps = [
         ":conftest",
         "//shrike-py/src/shrike:client",
-        requirement("mcp"),  # test_client_busy drives the real FastMCP handler
     ],
 )
 
@@ -371,10 +381,6 @@ pytest_test(
     xdist = None,
     deps = [
         ":conftest",
-        # test_config.py drives server.main() (the daemon --config path),
-        # so the cluster needs the server library too — pytest sees the full
-        # package on path, but Bazel needs the per-target dep declared.
-        "//shrike-py/src/shrike:server",
         "//shrike-py/src/shrike:cli_core",
         "//shrike-py/src/shrike:profiles",
     ],

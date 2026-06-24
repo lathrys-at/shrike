@@ -1,4 +1,4 @@
-"""Tool-layer tests for tag ops: input validation + index col_mod bump.
+"""Tool-layer tests for update_note_tags: input validation + index col_mod bump.
 
 A tag change never alters a note's embedding vector (tags aren't part of the
 embedding text), but it does bump col.mod. The kernel op itself advances the
@@ -71,17 +71,3 @@ class TestUpdateNoteTagsBump:
         # Nothing modified, nothing written: collection and index stay
         # consistent with no drift (the kernel tail no-ops on changed=0).
         assert kharness.reindex_if_needed() is False
-
-
-class TestRenameTagTool:
-    def test_identical_rejected(self, kharness, mcp_app):
-        with pytest.raises(ToolError, match="identical"):
-            kharness.call_tool(mcp_app, "rename_tag", {"old": "a", "new": "a"})
-
-    def test_rename_bumps_col_mod(self, kharness, backend, mcp_app, kbasic_note):
-        # kbasic_note has tag "math"; collection-wide rename.
-        embeds_before = len(backend.calls)
-        result = kharness.call_tool(mcp_app, "rename_tag", {"old": "math", "new": "arithmetic"})
-        assert result["notes_modified"] == 1
-        assert len(backend.calls) == embeds_before
-        assert kharness.index_status()["col_mod"] == kharness.col_mod()

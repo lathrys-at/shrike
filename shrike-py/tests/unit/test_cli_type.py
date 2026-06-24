@@ -1,11 +1,11 @@
-"""Unit coverage for `shrike type` command branches not hit by the shared
-type/info output suite.
+"""Unit coverage for `shrike type` command branches.
 
-Covers the identifier-resolution edges (`_resolve_note_type` ID-not-found and
-name-not-found-with-available-list, the `#id` strip), the `type list` table /
-detail / empty / not-found render forks, the inline `create`/`update`
-validation errors, the JSON formatting variants, and the per-item delete error
-render. Driven through Click's CliRunner with a mocked ShrikeClient — no server.
+Covers the identifier-resolution edges (`_resolve_note_type` ID-not-found,
+name-not-found-with-available-list, the `#id` strip, and the bare-numeric
+id-over-name preference), the `type list` table / detail / empty / not-found /
+JSON render forks, the inline `create`/`update` validation errors, the JSON
+formatting variants, and the per-item delete error render. Driven through
+Click's CliRunner with a mocked ShrikeClient — no server.
 """
 
 from __future__ import annotations
@@ -48,10 +48,38 @@ def run(tmp_path, fake):
     return _run
 
 
+@pytest.fixture
+def run_strict(tmp_path, fake):
+    """Invoke the CLI with exceptions propagated (no Click capture)."""
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("")
+    runner = CliRunner()
+
+    def _run(*args: str, **kwargs):
+        with patch("shrike.client.ShrikeClient", return_value=fake):
+            return runner.invoke(
+                cli,
+                ["--config", str(cfg), *args],
+                catch_exceptions=False,
+                **kwargs,
+            )
+
+    return _run
+
+
 def _note_types() -> list[NoteTypeInfo]:
     return [
         NoteTypeInfo(name="Basic", id=10, type="standard", fields=["Front", "Back"]),
         NoteTypeInfo(name="Cloze", id=20, type="cloze", fields=["Text"]),
+    ]
+
+
+def _note_types_id_named() -> list[NoteTypeInfo]:
+    # A note type literally named "123" alongside "Basic" (id=123): exercises
+    # the bare-numeric id-over-name resolution preference.
+    return [
+        NoteTypeInfo(name="123", id=10, fields=["Front"]),
+        NoteTypeInfo(name="Basic", id=123, fields=["Front", "Back"]),
     ]
 
 
@@ -74,6 +102,12 @@ class TestResolveNoteType:
         msg = str(ei.value)
         assert "'Nope' not found" in msg
         assert "Basic" in msg and "Cloze" in msg  # the available list
+
+    def test_bare_numeric_prefers_id_over_name(self, fake):
+        fake.collection_info.return_value = CollectionInfo(note_types=_note_types_id_named())
+
+        assert _resolve_note_type(fake, "123") == (123, "Basic")
+        fake.collection_info.assert_called_once_with(include=["note_types"])
 
 
 class TestParseTemplate:
@@ -130,6 +164,23 @@ class TestTypeList:
         result = run("type", "list", "Basic")
         assert result.exit_code != 0
         assert "'Basic' not found" in result.output
+
+    def test_identifier_json_requests_details(self, run_strict, fake):
+        detail = NoteTypeDetail(
+            templates=[TemplateInfo(name="Card 1", front="{{Front}}", back="{{Back}}")],
+            css=".card { color: red; }",
+        )
+        fake.collection_info.side_effect = [
+            CollectionInfo(note_types=_note_types_id_named()),
+            CollectionInfo(note_types=[NoteTypeInfo(name="Basic", id=123, detail=detail)]),
+        ]
+
+        result = run_strict("type", "list", "123", "--json")
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["name"] == "Basic"
+        fake.collection_info.assert_any_call(include=["note_types"])
+        fake.collection_info.assert_any_call(include=["note_types"], note_type_details=["Basic"])
 
 
 class TestTypeShow:
@@ -224,6 +275,52 @@ class TestTypeCreate:
         # The unexpected `updated` result is not rendered by the create command.
         assert "Unexpected" not in result.output
 
+    def test_invalid_json_input_errors(self, run_strict, fake):
+        result = run_strict("type", "create", "--json-input", input="{")
+
+        assert result.exit_code == 1
+        assert "Invalid JSON input" in result.output
+        fake.upsert_note_types.assert_not_called()
+
+    def test_renders_created_result(self, run_strict, fake):
+        fake.upsert_note_types.return_value = UpsertNoteTypesResponse(
+            results=[{"status": "created", "id": 999, "name": "Vocab"}]
+        )
+
+        result = run_strict(
+            "type",
+            "create",
+            "--name",
+            "Vocab",
+            "--field",
+            "Front",
+            "--template",
+            "Card 1:{{Front}}:{{Front}}",
+        )
+
+        assert result.exit_code == 0
+        assert "Created note type" in result.output
+        assert "#999" in result.output
+
+    def test_renders_item_error(self, run_strict, fake):
+        fake.upsert_note_types.return_value = UpsertNoteTypesResponse(
+            results=[{"status": "error", "index": 0, "error": "missing templates"}]
+        )
+
+        result = run_strict(
+            "type",
+            "create",
+            "--name",
+            "Broken",
+            "--field",
+            "Front",
+            "--template",
+            "Card 1:{{Front}}:{{Front}}",
+        )
+
+        assert result.exit_code == 0
+        assert "missing templates" in result.stderr
+
 
 class TestTypeUpdate:
     def test_css_only_update_renders(self, run, fake) -> None:
@@ -274,6 +371,47 @@ class TestTypeUpdate:
         assert "Updated note type" in result.output
         assert "Unexpected" not in result.output
 
+    def test_invalid_json_input_errors_after_resolving_identifier(self, run_strict, fake):
+        fake.collection_info.return_value = CollectionInfo(note_types=_note_types_id_named())
+
+        result = run_strict("type", "update", "Basic", "--json-input", input="{")
+
+        assert result.exit_code == 1
+        assert "Invalid JSON input" in result.output
+        fake.upsert_note_types.assert_not_called()
+
+    def test_nothing_to_update_errors(self, run_strict, fake):
+        fake.collection_info.return_value = CollectionInfo(note_types=_note_types_id_named())
+
+        result = run_strict("type", "update", "Basic")
+
+        assert result.exit_code == 2
+        assert "Nothing to update" in result.output
+        fake.upsert_note_types.assert_not_called()
+
+    def test_renders_updated_result(self, run_strict, fake):
+        fake.collection_info.return_value = CollectionInfo(note_types=_note_types_id_named())
+        fake.upsert_note_types.return_value = UpsertNoteTypesResponse(
+            results=[{"status": "updated", "id": 123, "name": "Renamed"}]
+        )
+
+        result = run_strict("type", "update", "Basic", "--name", "Renamed")
+
+        assert result.exit_code == 0
+        assert "Updated note type" in result.output
+        assert "#123" in result.output
+
+    def test_renders_item_error(self, run_strict, fake):
+        fake.collection_info.return_value = CollectionInfo(note_types=_note_types_id_named())
+        fake.upsert_note_types.return_value = UpsertNoteTypesResponse(
+            results=[{"status": "error", "index": 0, "error": "rename failed"}]
+        )
+
+        result = run_strict("type", "update", "Basic", "--name", "Renamed")
+
+        assert result.exit_code == 0
+        assert "rename failed" in result.stderr
+
 
 class TestTypeDelete:
     def test_json_output(self, run, fake) -> None:
@@ -308,3 +446,46 @@ class TestTypeDelete:
         assert result.exit_code == 0, result.output
         assert "Deleted note type" in result.output
         assert "in use" in result.output
+
+    def test_prompt_cancel_skips_delete(self, run_strict, fake):
+        fake.collection_info.return_value = CollectionInfo(note_types=_note_types_id_named())
+
+        result = run_strict("type", "delete", "Basic", input="n\n")
+
+        assert result.exit_code == 0
+        assert "Cancelled" in result.output
+        fake.delete_note_types.assert_not_called()
+
+    def test_prompt_confirm_deletes(self, run_strict, fake):
+        fake.collection_info.return_value = CollectionInfo(note_types=_note_types_id_named())
+        fake.delete_note_types.return_value = DeleteNoteTypesResponse(
+            results=[{"status": "deleted", "id": 123, "name": "Basic"}]
+        )
+
+        result = run_strict("type", "delete", "Basic", input="y\n")
+
+        assert result.exit_code == 0
+        assert "Deleted note type" in result.output
+        assert "#123" in result.output
+        fake.delete_note_types.assert_called_once_with([123])
+
+    def test_renders_not_found_and_error_results(self, run_strict, fake):
+        fake.collection_info.return_value = CollectionInfo(note_types=_note_types_id_named())
+        fake.delete_note_types.return_value = DeleteNoteTypesResponse(
+            results=[
+                {"status": "not_found", "id": 123},
+                {
+                    "status": "error",
+                    "id": 10,
+                    "name": "123",
+                    "error": "note type is in use",
+                },
+            ]
+        )
+
+        result = run_strict("type", "delete", "Basic", "#10", "--yes")
+
+        assert result.exit_code == 0
+        assert "Not found: #123" in result.output
+        assert "note type is in use" in result.output
+        fake.delete_note_types.assert_called_once_with([123, 10])
