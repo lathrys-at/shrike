@@ -8,6 +8,8 @@ import pytest
 
 from shrike.cli.config import save_config
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture(autouse=True)
 def _clean_embedding_env(monkeypatch) -> None:

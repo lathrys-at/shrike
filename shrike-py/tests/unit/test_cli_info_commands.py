@@ -184,3 +184,37 @@ class TestInfoDetailRender:
         out = result.output
         assert out.index("Showing 1 decks") < out.index("Showing 1 tags")
         assert out.index("Showing 1 tags") < out.index("Showing statistics")
+
+
+class TestInfo:
+    def test_json_includes_detail_sections(self, run, fake) -> None:
+        summary = Summary(
+            path="/collection.anki2",
+            created="2026-01-01",
+            modified="2026-01-02",
+            notes=1,
+            cards=2,
+            decks=1,
+            note_types=1,
+            tags=3,
+            due_today=0,
+        )
+        fake.collection_info.return_value = CollectionInfo(
+            summary=summary,
+            note_types=[
+                NoteTypeInfo(name="123", id=10, fields=["Front"]),
+                NoteTypeInfo(name="Basic", id=123, fields=["Front", "Back"]),
+            ],
+            tags=["marked"],
+        )
+
+        result = run("collection", "info", "--types", "--tags", "--json")
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["note_types"][0]["name"] == "123"
+        assert data["tags"] == ["marked"]
+        fake.collection_info.assert_called_once_with(
+            include=["summary", "note_types", "tags"],
+            note_type_details=None,
+        )

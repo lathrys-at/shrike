@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import inspect
 
+import pytest
+
 from shrike.api.actions import ActionContext, build_actions
 
 EXPECTED_ACTIONS = {
@@ -67,3 +69,24 @@ def test_build_actions_requires_a_kernel(wrapper) -> None:
 
     with pytest.raises(ValueError, match="kernel mode"):
         build_actions(ActionContext(wrapper=wrapper))
+
+
+# The action-core registry seam: the kernel's list of re-homed actions and the
+# Python binding's forwarding set must not drift silently.
+
+shrike_native = pytest.importorskip("shrike_native")
+
+# The actions whose bodies run in shrike_kernel::actions — actions.py forwards
+# exactly these through the per-action bindings (the read surface).
+# Growing this list is deliberate: add the binding, rewire the action, then
+# extend this pin alongside the kernel's REHOMED_ACTIONS.
+REHOMED = ["collection_info", "list_notes", "collection_query", "search_notes"]
+
+
+def test_kernel_and_binding_agree_on_the_rehomed_set() -> None:
+    assert shrike_native.rehomed_actions() == REHOMED
+
+
+def test_rehomed_bindings_exist() -> None:
+    for name in REHOMED:
+        assert hasattr(shrike_native, f"action_{name}"), name
