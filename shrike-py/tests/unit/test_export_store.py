@@ -25,12 +25,11 @@ class TestExportStore:
         assert not os.path.exists(path)
 
     def test_claim_is_one_shot(self, tmp_path) -> None:
-        # The one-shot reap runs as a post-response background task, *after* the
-        # first GET's body is streamed — so it can land after the client has
-        # already issued a second GET. claim() consumes the token synchronously,
-        # so the second GET misses here (a clean 404) instead of serving a file
-        # the reap is concurrently removing → 500. No reap runs below — the
-        # second claim must already miss on the strength of the mark alone.
+        # claim() consumes the token synchronously, so a second GET misses on the
+        # strength of the mark alone — no reap runs below. (The real reap is a
+        # post-response background task that can land after the client's second
+        # GET; consuming on claim is what makes that second GET a clean 404 rather
+        # than a race against the reap.)
         store = ExportStore(str(tmp_path / "cache"))
         token, path = store.new_temp_path(suffix=".apkg")
         with open(path, "wb") as f:
@@ -40,6 +39,25 @@ class TestExportStore:
         assert store.claim(token) is None  # second GET misses (one-shot)
         # The claimed-but-unreaped file is not orphaned: close() still reaps it.
         store.close()
+        assert not os.path.exists(path)
+
+    def test_ttl_sweep_reaps_a_claimed_entry(self, tmp_path) -> None:
+        # An aborted stream leaves the token claimed but unreaped (its reap never
+        # runs). The TTL sweep must still collect its temp — it reaps on age, not
+        # on claimed state — so a collection-bearing file can't linger past the
+        # TTL when the post-response reap is skipped.
+        ttl = 3600.0
+        store = ExportStore(str(tmp_path / "cache"), ttl_seconds=ttl)
+        token, path = store.new_temp_path(suffix=".apkg")
+        with open(path, "wb") as f:
+            f.write(b"pkg")
+        store.register(token, path, "apkg")
+        assert store.claim(token) == path  # claimed; the reap never runs
+        # Age the claimed entry past the TTL, then sweep (mutating created is the
+        # deterministic stand-in for wall-clock passing — claim() can't be reached
+        # with ttl=0 since it sweeps before it marks).
+        store._pending[token].created -= ttl + 1.0
+        store._sweep_expired()
         assert not os.path.exists(path)
 
     def test_close_reaps_pending(self, tmp_path) -> None:
