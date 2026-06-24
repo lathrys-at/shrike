@@ -796,6 +796,42 @@ only by `scripts/coverage.sh`), and Rust's `scripts/coverage-rust.sh
 --fail-under-lines N`. Ratchet them up as coverage climbs; never lower one to make a
 run pass.
 
+### What the convergence pass deliberately leaves uncovered
+
+The coverage-guided convergence (the final pass of the test-engineering epic) drove
+the measured modules to target with adversarial tests, then **stopped at a recorded
+boundary** rather than chasing 100%. The line is drawn at *value*, not at the number —
+covering the classes below would inflate the metric without improving real coverage, so
+they are deliberately uncovered and must not be re-chased:
+
+- **Test-double / `#[cfg(test)]` lines.** A mock's unused trait-impl methods (e.g.
+  `RecordingDerived`'s delegating arms in `ingest.rs`) and in-crate test helpers count
+  toward `cargo-llvm-cov` but are not production code. Covering them games the metric.
+- **Feature/platform-gated code.** The `onnx/*`, `engines/shrike-platform/*` (Apple
+  Vision/Speech), and CLIP/image-embedding paths read as 0% in the standard
+  `cargo test --workspace` lane because it runs with no `onnx` feature, no Apple
+  platform, and no model. They are exercised only by the `manual` embedding Bazel lanes
+  under their features. Likewise the semantic-search arms of `kernel/src/lib.rs`
+  (`search_fused`'s embed fan-out, `build_cross_space`, `calibrate_secondary_floors`)
+  need a real/attached embedder; the no-embedder *lexical* arms are covered, the
+  embed arms are not.
+- **Defensive / infra-gated I/O arms.** A `rename` failure, a non-UTF-8 temp path, a
+  `create_dir_all` failure (`shrike-collection/src/export.rs`) — provoking these
+  deterministically needs a cross-device/permissions/encoding fault no `cargo test`
+  reliably reproduces, and the arm is a best-effort guard with no behavioural invariant
+  to assert beyond "doesn't propagate".
+- **Fault-injection-only log branches.** A single best-effort `tracing::warn!` reached
+  only by a forced failure (e.g. `derived_refresh.rs`'s warn-on-snapshot-refresh-failure)
+  whose only effect is the log line. Covering it costs a full ~20-method `DerivedStore`
+  double plus a debounce drive for one unassertable line.
+- **Lock-poison / actor-teardown races.** The `.expect("… poisoned")` arms and the
+  "actor is gone / executor dropped" internal errors fire only after a prior holder
+  panicked or the actor task was killed mid-flight — race/fault-injection, not logic.
+
+The corollary: a future coverage drop in these classes is **expected noise**, not a
+regression. Ratchet the floors against the *reachable* surface; when a gated path
+becomes reachable (a feature lands, a fixture appears), cover it then.
+
 ## Performance engineering
 
 ### Stub-vs-real embedding is a profile choice, via a first-class `synthetic` runtime (#865)

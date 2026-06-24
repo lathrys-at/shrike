@@ -279,7 +279,7 @@ scripts/coverage.sh                        # Python: full suite; report, exits n
 scripts/coverage.sh --html                 # also writes htmlcov/index.html
 scripts/coverage-rust.sh                    # Rust: shrike-core workspace; prints the per-crate table
 scripts/coverage-rust.sh --html            # also writes shrike-core/target/llvm-cov/html/index.html
-scripts/coverage-rust.sh --fail-under-lines 88   # local ratchet
+scripts/coverage-rust.sh --fail-under-lines 90   # local ratchet
 ```
 
 `scripts/coverage-rust.sh` needs `cargo-llvm-cov` + the `llvm-tools-preview`
