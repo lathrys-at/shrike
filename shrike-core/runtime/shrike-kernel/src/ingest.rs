@@ -1469,6 +1469,9 @@ mod tests {
         inner: shrike_derived::DerivedEngine,
         calls: CallLog,
         fail_ingest: bool,
+        fail_remove: bool,
+        fail_set_col_mod: bool,
+        fail_reads: bool,
     }
     impl RecordingDerived {
         fn record(&self, op: &str) {
@@ -1510,6 +1513,9 @@ mod tests {
         }
         fn remove(&self, ids: &[i64], source: Option<&str>) -> NativeResult<()> {
             self.record("remove");
+            if self.fail_remove {
+                return Err(NativeError::internal("derived removal failed (simulated)"));
+            }
             self.inner.remove(ids, source)
         }
         fn count(&self) -> NativeResult<i64> {
@@ -1520,6 +1526,9 @@ mod tests {
         }
         fn set_col_mod(&self, v: i64) -> NativeResult<()> {
             self.record("set_col_mod");
+            if self.fail_set_col_mod {
+                return Err(NativeError::internal("watermark stamp failed (simulated)"));
+            }
             self.inner.set_col_mod(v)
         }
         fn meta_get(&self, k: &str) -> NativeResult<Option<String>> {
@@ -1532,6 +1541,11 @@ mod tests {
             self.inner.refs_for_source(s)
         }
         fn texts_for_source(&self, s: &str) -> NativeResult<Vec<(i64, String, String)>> {
+            if self.fail_reads {
+                return Err(NativeError::internal(
+                    "recognized-text read failed (simulated)",
+                ));
+            }
             self.inner.texts_for_source(s)
         }
         fn texts_for_source_for_notes(
@@ -1539,6 +1553,11 @@ mod tests {
             s: &str,
             ids: &[i64],
         ) -> NativeResult<Vec<(i64, String, String)>> {
+            if self.fail_reads {
+                return Err(NativeError::internal(
+                    "recognized-text read failed (simulated)",
+                ));
+            }
             self.inner.texts_for_source_for_notes(s, ids)
         }
         fn mark_gated(&self, s: &str, pairs: &[(i64, String)]) -> NativeResult<()> {
@@ -1594,10 +1613,27 @@ mod tests {
                 inner,
                 calls: Arc::clone(&calls),
                 fail_ingest,
+                fail_remove: false,
+                fail_set_col_mod: false,
+                fail_reads: false,
             },
             calls,
             dir,
         )
+    }
+
+    /// A recording derived store with a specific failure injected on one method
+    /// (the asymmetric error arms `temp_recording_derived` doesn't reach).
+    fn temp_recording_derived_failing(
+        fail_remove: bool,
+        fail_set_col_mod: bool,
+        fail_reads: bool,
+    ) -> (RecordingDerived, CallLog, std::path::PathBuf) {
+        let (mut d, calls, dir) = temp_recording_derived(false);
+        d.fail_remove = fail_remove;
+        d.fail_set_col_mod = fail_set_col_mod;
+        d.fail_reads = fail_reads;
+        (d, calls, dir)
     }
 
     /// The #863 guarantee: the per-op derived (SQLite) write that
@@ -1811,5 +1847,121 @@ mod tests {
         );
         assert_eq!(inputs[0].text, "the field text");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The removal counterpart of `failed_derived_ingest_leaves_the_watermark_behind`:
+    /// a derived REMOVAL that fails floors the watermark exactly like a failed
+    /// ingest — the deleted note's rows can't be certified gone until a rebuild
+    /// heals, so no advance lands past them.
+    #[test]
+    fn failed_derived_removal_floors_the_watermark() {
+        let (derived, calls, dir) = temp_recording_derived_failing(true, false, false);
+        let derived: Arc<dyn DerivedStore> = Arc::new(derived);
+        let floors = Arc::new(Mutex::new(WatermarkFloors::default()));
+
+        // Empty ingest batch + a removal that fails → derived_ok flips false and
+        // the watermark floors (no set_col_mod issued past the un-removed rows).
+        let ok = apply_derived_writes(&*derived, &floors, Vec::new(), vec![7], 100, 0);
+
+        assert!(!ok, "a failed removal reports derived_ok == false");
+        let ops: Vec<String> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(o, _)| o.clone())
+            .collect();
+        assert_eq!(
+            ops,
+            vec!["remove"],
+            "no watermark stamp after a failed removal"
+        );
+        assert_eq!(derived.get_col_mod(), None);
+        assert_eq!(
+            floors.lock().unwrap().derived.floor(),
+            Some(0),
+            "the failed removal floored the watermark at floor_on_fail"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A watermark-STAMP failure is the asymmetric case: the rows committed, so
+    /// `derived_ok` stays true (the caller's tag-refresh/status proceeds), but the
+    /// stamp is logged-and-tolerated and the watermark stays behind for the next
+    /// drift to re-stamp — a stamp failure is NOT a write failure.
+    #[test]
+    fn watermark_stamp_failure_is_tolerated_not_a_write_failure() {
+        let (derived, calls, dir) = temp_recording_derived_failing(false, true, false);
+        let derived: Arc<dyn DerivedStore> = Arc::new(derived);
+        let floors = Arc::new(Mutex::new(WatermarkFloors::default()));
+        let batch = group_derived_rows(
+            &[(7i64, "field".into(), "Front".into(), "krebs cycle".into())],
+            &[7],
+        );
+
+        let ok = apply_derived_writes(&*derived, &floors, batch, Vec::new(), 100, 0);
+
+        assert!(
+            ok,
+            "a stamp failure leaves derived_ok true — the ingest committed"
+        );
+        let ops: Vec<String> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(o, _)| o.clone())
+            .collect();
+        assert_eq!(ops, vec!["ingest_many", "set_col_mod"]);
+        assert_eq!(
+            derived.get_col_mod(),
+            None,
+            "the failed stamp left the watermark behind"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// `compose_embed_inputs_with_overlay`'s two uncovered arms: the
+    /// whole-source read (`only_notes = None`) and a recognized-text read that
+    /// FAILS — which degrades to embedding without that source's text, never
+    /// erroring the compose.
+    #[test]
+    fn overlay_compose_handles_whole_source_reads_and_read_failures() {
+        let gate = RecognitionGate::default();
+        let empty: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+
+        // (a) only_notes = None → the whole-source `texts_for_source` path.
+        let (real, _calls, dir1) = temp_recording_derived(false);
+        real.inner
+            .ingest(
+                7,
+                "ocr",
+                &[("d.png".into(), "krebs cycle diagram clearly visible".into())],
+            )
+            .unwrap();
+        let raw = vec![(7i64, "the field text".to_string(), Vec::<String>::new())];
+        let inputs = compose_embed_inputs_with_overlay(&real, &gate, raw, None, "asr", &empty);
+        assert_eq!(inputs.len(), 1);
+        assert!(
+            inputs[0]
+                .ocr_texts
+                .iter()
+                .any(|t| t.contains("krebs cycle")),
+            "the whole-source read folds in the durable ocr text: {:?}",
+            inputs[0].ocr_texts
+        );
+        std::fs::remove_dir_all(dir1).ok();
+
+        // (b) a recognized-text read that fails → no recognized text folded in;
+        // the note still embeds on its field text.
+        let (failing, _c, dir2) = temp_recording_derived_failing(false, false, true);
+        let raw = vec![(7i64, "field only".to_string(), Vec::<String>::new())];
+        let inputs =
+            compose_embed_inputs_with_overlay(&failing, &gate, raw, Some(&[7]), "asr", &empty);
+        assert_eq!(inputs.len(), 1);
+        assert!(
+            inputs[0].ocr_texts.is_empty(),
+            "a failed recognized-text read drops that source's contribution"
+        );
+        assert_eq!(inputs[0].text, "field only");
+        std::fs::remove_dir_all(dir2).ok();
     }
 }
