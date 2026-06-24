@@ -13,6 +13,7 @@ once per CI run and cached in the pytest tmp directory.
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import json
 import os
 import shutil
@@ -407,6 +408,16 @@ def search_until(mcp, queries, predicate, *, limit: int = 10) -> list[dict]:
         if predicate(matches):
             return matches
         time.sleep(0.2)
+
+
+# Unique first-field values for setup notes. Each CLI test class shares one
+# collection, and `shrike note create` defaults to on_duplicate="error", so
+# notes created purely as fixtures must not collide on their first field.
+_front_counter = itertools.count()
+
+
+def _unique_front() -> str:
+    return f"Front=Q{next(_front_counter)}"
 
 
 class ServerInfo:

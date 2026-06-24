@@ -25,7 +25,7 @@ pytest_test(
     srcs = glob(["test_*.py"]),
     deps = [
         ":conftest",
-        # test_search_quality.py drives the REAL search_notes action in-process
+        # test_search_fusion_native.py drives the REAL search_notes action in-process
         # via the StubEmbedder + the shared metric engine.
         "//shrike-py/tests/manual/search_quality",
         "//shrike-py/tests/manual/search_quality:inprocess",

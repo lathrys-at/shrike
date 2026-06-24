@@ -20,6 +20,7 @@ search recall, which would be vacuous without a populated derived/vector store.
 from __future__ import annotations
 
 import subprocess
+import time
 
 import httpx
 import pytest
@@ -76,6 +77,16 @@ class TestStatusRoute:
         # payload carries no such key.
         body = server.control_request("GET", "/status", timeout=10.0).json()
         assert "collections" not in body
+
+    def test_status_embedding_unconfigured(self, server: ServerInfo) -> None:
+        # With no embedder configured the embedding block reports unavailable /
+        # not_configured and the index reports the unavailable state — both are
+        # always present in the payload (pinned so the fields stay wired).
+        body = server.control_request("GET", "/status", timeout=10.0).json()
+        assert "url" in body
+        assert body["embedding"]["available"] is False
+        assert body["embedding"]["state"] == "not_configured"
+        assert body["index"]["state"] == "unavailable"
 
 
 class TestIndexSaveRoute:
@@ -183,3 +194,93 @@ class TestMediaPathSafety:
         # outside the media dir.
         resp = httpx.get(f"{_base_url(server)}/media/%2e%2e", timeout=10.0)
         assert resp.status_code == 404
+
+
+class TestCooperativeLocking:
+    """End-to-end cooperative locking on an isolated server."""
+
+    def test_status_reports_and_idle_release(self, server_factory):
+        from pathlib import Path
+
+        from shrike.client import ShrikeClient
+
+        def wait_for_release(client: ShrikeClient, deadline: float) -> bool:
+            while client.status().collection_held and time.time() < deadline:
+                time.sleep(0.2)
+            return not client.status().collection_held
+
+        info = server_factory(
+            "coop", extra_args=["--cooperative-lock", "--lock-hold-seconds", "2.0"]
+        )
+        client = ShrikeClient(info.url, autostart=False, state_dir=Path(info.state_dir))
+
+        st = client.status()
+        assert st.locking == "cooperative"
+        # Boot release may not have landed yet — poll with a short deadline.
+        assert wait_for_release(client, time.time() + 8)
+
+        # An MCP op re-acquires the collection.
+        client.query("deck:*")
+        assert client.status().collection_held is True
+
+        # After the idle window it releases again (poll, timing-tolerant).
+        assert wait_for_release(client, time.time() + 8)
+
+        # Re-acquire still works after release — including a WRITE through
+        # the kernel ops (the reopen-on-demand is kernel-side; a read alone
+        # would not exercise it).
+        created = client.upsert_notes(
+            [
+                {
+                    "note_type": "Basic",
+                    "deck": "Coop",
+                    "fields": {"Front": "written after idle release", "Back": "b"},
+                }
+            ]
+        )
+        assert created.results[0].status == "created"
+        assert client.query("deck:Coop").total == 1
+
+    def test_default_server_is_permanent(self, server):
+        from pathlib import Path
+
+        from shrike.client import ShrikeClient
+
+        st = ShrikeClient(server.url, autostart=False, state_dir=Path(server.state_dir)).status()
+        assert st.locking == "permanent"
+        assert st.collection_held is True
+
+
+class TestSigtermShutdown:
+    """SIGTERM tears down cleanly: uvicorn's handlers drain the server, then
+    the post-serve teardown flushes/closes and releases the lock."""
+
+    def test_sigterm_drains_and_tears_down(self, server_factory):
+        import os
+        import pathlib
+        import signal as _signal
+
+        info = server_factory("sigterm")
+        pid = info.control_request("GET", "/status", timeout=5.0).json()["pid"]
+        health_url = info.url.rsplit("/", 1)[0] + "/health"
+
+        os.kill(pid, _signal.SIGTERM)
+        # Liveness via the data-plane endpoint, not os.kill(pid, 0): the spawned
+        # server stays a zombie under the test runner until reaped, so signal-0
+        # keeps succeeding after exit. SIGTERM drains both listeners.
+        for _ in range(75):
+            try:
+                httpx.get(health_url, timeout=1.0)
+            except httpx.HTTPError:
+                break
+            time.sleep(0.2)
+        else:
+            pytest.fail("server still serving after SIGTERM")
+
+        logs = ""
+        for _ in range(50):
+            logs = "".join(p.read_text() for p in pathlib.Path(info.log_dir).glob("*.log"))
+            if "Shutdown complete" in logs:
+                break
+            time.sleep(0.2)
+        assert "Shutdown complete" in logs

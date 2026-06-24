@@ -93,7 +93,7 @@ _EMBEDDING_BACKENDS = [
 # The manual adversarial search-quality suite: real CLIP + a downloaded
 # Wikimedia Commons corpus, env-gated and NEVER named on a CI command line.
 # Excluded from the :integration glob below so `bazel test //...` skips it.
-_SEARCH_QUALITY = ["test_search_quality.py"]
+_SEARCH_QUALITY = ["test_search_quality_realmodel.py"]
 
 # Non-embedding integration: the server-spawn-bound suite (~230 tests), the
 # slowest non-manual target and the per-PR wall-clock bottleneck. Glob-partitioned:
