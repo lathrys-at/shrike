@@ -36,6 +36,15 @@ to [Semantic Versioning](https://semver.org/). While in `0.x`, the public surfac
   `shrike server status`/`stop` and the `server embedding`/`server index`
   commands reach its control channel. Unset, the platform default is used (the
   common case).
+- A Prometheus metrics surface at `GET /metrics` on the control plane (#797):
+  request count/latency/result per action and per HTTP route; subsystem
+  instruments for the index (size, state, rebuild + reconcile duration),
+  embedding throughput/latency, derived + collection sizes, cooperative-lock
+  contention, the debounced saver, and the recognition sweep; and the driven
+  runtime pools (#721) — per-pool occupancy, queue depth, queue-wait and
+  job-duration latency, `drive_io` liveness, and the compute overlap ratio.
+  Served only on the always-local control plane, never widened by
+  `--allow-remote`. Durations are in seconds and labels are OTel-shaped.
 
 ### Removed
 - In-process Apple Vision OCR is no longer compiled into the server (#496):

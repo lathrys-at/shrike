@@ -20,11 +20,13 @@ import inspect
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import Any
 
 import shrike_native
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.tools.base import Tool
+from pydantic import ValidationError
 
 from shrike.api.actions import (
     CONTROL_PLANE_ACTIONS,
@@ -33,8 +35,14 @@ from shrike.api.actions import (
     _call_outcome,
 )
 from shrike.harness.collection import CollectionBusyError
+from shrike.observability.metrics import metrics
 
 logger = logging.getLogger("shrike.tools")
+
+# The same wrapped action implementation serves MCP and actions-over-HTTP.  The
+# HTTP handler sets this for the duration of Tool.run; MCP naturally retains the
+# default.  ContextVar keeps concurrent requests isolated.
+_action_transport: ContextVar[str] = ContextVar("shrike_action_transport", default="mcp")
 
 # The readiness gate: an async callable that resolves once the data plane is
 # open (boot/reload/re-acquire maintenance has settled). None disables gating
@@ -89,6 +97,10 @@ def _log_completed(name: str, kwargs: dict[str, Any], started: float) -> None:
     logger.info("%s%s%s -> %s (%.0fms)", name, " " if params else "", params, outcome, elapsed_ms)
 
 
+def _record_action(name: str, started: float, result: str) -> None:
+    metrics.observe_action(name, _action_transport.get(), result, time.perf_counter() - started)
+
+
 def _safe_tool(fn: Any) -> Any:
     """Wrap a tool to log unhandled exceptions, then re-raise.
 
@@ -118,11 +130,13 @@ def _safe_tool(fn: Any) -> Any:
             except ToolInputError as e:
                 # Expected bad input — the caller's mistake, surfaced without a trace.
                 logger.warning("%s rejected: %s", fn.__name__, e)
+                _record_action(fn.__name__, started, "input_error")
                 raise
             except CollectionBusyError as e:
                 # Expected under cooperative locking — another process holds the
                 # collection. Surface the coded message (client maps it), no trace.
                 logger.warning("%s in %s", e, fn.__name__)
+                _record_action(fn.__name__, started, "collection_busy")
                 raise
             except shrike_native.NativeBusyError as e:
                 # The same contention, surfaced by a kernel-routed op (the
@@ -130,11 +144,17 @@ def _safe_tool(fn: Any) -> Any:
                 # typed busy surface so the client's retry contract holds.
                 busy = CollectionBusyError()
                 logger.warning("%s in %s", busy, fn.__name__)
+                _record_action(fn.__name__, started, "collection_busy")
                 raise busy from e
+            except ServerNotReadyError:
+                _record_action(fn.__name__, started, "not_ready")
+                raise
             except Exception:
                 logger.exception("Unhandled error in %s", fn.__name__)
+                _record_action(fn.__name__, started, "internal_error")
                 raise
             _log_completed(fn.__name__, kwargs, started)
+            _record_action(fn.__name__, started, "ok")
             return result
 
         async_wrapper.__doc__ = cleaned_doc
@@ -148,18 +168,26 @@ def _safe_tool(fn: Any) -> Any:
             result = fn(*args, **kwargs)
         except ToolInputError as e:
             logger.warning("%s rejected: %s", fn.__name__, e)
+            _record_action(fn.__name__, started, "input_error")
             raise
         except CollectionBusyError as e:
             logger.warning("%s in %s", e, fn.__name__)
+            _record_action(fn.__name__, started, "collection_busy")
             raise
         except shrike_native.NativeBusyError as e:
             busy = CollectionBusyError()
             logger.warning("%s in %s", busy, fn.__name__)
+            _record_action(fn.__name__, started, "collection_busy")
             raise busy from e
+        except ServerNotReadyError:
+            _record_action(fn.__name__, started, "not_ready")
+            raise
         except Exception:
             logger.exception("Unhandled error in %s", fn.__name__)
+            _record_action(fn.__name__, started, "internal_error")
             raise
         _log_completed(fn.__name__, kwargs, started)
+        _record_action(fn.__name__, started, "ok")
         return result
 
     wrapper.__doc__ = cleaned_doc
@@ -206,6 +234,38 @@ def _bound_impl(action: ActionDef, readiness: ReadinessGate | None) -> Any:
     return _safe_tool(_gate_ready(action.impl, gate))
 
 
+def _instrument_tool_manager(mcp: FastMCP) -> None:
+    """Count an MCP-transport **validation rejection** as ``input_error``.
+
+    FastMCP validates a call's arguments inside ``Tool.run`` (``fn_metadata``),
+    BEFORE the ``_safe_tool``-wrapped impl runs — so a bad/out-of-range argument
+    raises a pydantic ``ValidationError`` (wrapped in ``ToolError``) that never
+    reaches ``_record_action``. The HTTP edge records that case as ``input_error``;
+    without this the two transports disagree. Wrap the tool manager's ``call_tool``
+    (the single seam every MCP ``tools/call`` flows through) to record it, with
+    the ``mcp`` transport from the ContextVar. Impl-path outcomes are already
+    recorded by ``_safe_tool``, so only the pre-impl validation gap is filled.
+    Idempotent — wrapping once per manager.
+    """
+    manager = mcp._tool_manager
+    if getattr(manager, "_shrike_instrumented", False):
+        return
+    original_call_tool = manager.call_tool
+
+    async def call_tool(name: str, arguments: dict[str, Any], **kwargs: Any) -> Any:
+        started = time.perf_counter()
+        try:
+            return await original_call_tool(name, arguments, **kwargs)
+        except Exception as exc:
+            cause = exc.__cause__ if exc.__cause__ is not None else exc
+            if isinstance(cause, ValidationError):
+                _record_action(name, started, "input_error")
+            raise
+
+    manager.call_tool = call_tool  # type: ignore[assignment]
+    manager._shrike_instrumented = True  # type: ignore[attr-defined]
+
+
 def register_actions(
     mcp: FastMCP, actions: list[ActionDef], readiness: ReadinessGate | None = None
 ) -> None:
@@ -213,6 +273,7 @@ def register_actions(
     ``mcp.tool()`` over the ``_safe_tool``-wrapped, readiness-gated impl)."""
     for action in actions:
         mcp.tool()(_bound_impl(action, readiness))
+    _instrument_tool_manager(mcp)
 
 
 def build_action_tools(

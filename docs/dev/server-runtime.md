@@ -64,8 +64,8 @@ The server runs **two listeners**. The **data plane** (the FastMCP app) serves
 `/mcp`, `/actions/{name}`, `/media/{name}`, `/export/{token}`, and a minimal
 `/health`; it binds loopback by default and honors the exposure flags below. The
 **control plane** is a separate Starlette app serving the privileged routes —
-`/shutdown`, `/reload`, `/index/*`, `/embedding/*`, and the full `/status`
-diagnostics — on its own **always-local** listener: a Unix-domain socket
+`/shutdown`, `/reload`, `/index/*`, `/embedding/*`, full `/status` diagnostics,
+and Prometheus `/metrics` — on its own **always-local** listener: a Unix-domain socket
 (POSIX) or an ephemeral loopback-TCP port (Windows, which lacks asyncio Unix
 sockets). The socket does **not** live in the state dir — a deep state-dir path
 would overflow the AF_UNIX path-length limit (~104 bytes on macOS). It sits in a
@@ -150,6 +150,7 @@ Each custom route sits behind its plane's `_guard` check.
 | Route | Purpose |
 |-------|---------|
 | `GET /status` | Full diagnostics: pid, url, collection, uptime, embedding/index/recognition state, lock state, per-collection rows. Backs `shrike server status`. |
+| `GET /metrics` | Prometheus text exposition for action/HTTP traffic, indexes, embedding, locking, recognition, the debounced saver, and driven-runtime pools. Scrapes are side-effect free and never acquire the collection. |
 | `POST /shutdown` | Graceful shutdown of both listeners. |
 | `POST /index/rebuild` | Full rebuild (returns immediately with status/progress); requires embedding running. |
 | `POST /index/save` | Immediate flush off the event loop. |

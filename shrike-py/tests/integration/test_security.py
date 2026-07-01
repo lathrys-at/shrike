@@ -146,6 +146,7 @@ class TestControlPlaneSplit:
     # The routes that must NOT be reachable on the data listener.
     _CONTROL_ROUTES = [
         ("GET", "/status"),
+        ("GET", "/metrics"),
         ("POST", "/shutdown"),
         ("POST", "/index/rebuild"),
         ("POST", "/index/save"),
@@ -182,6 +183,28 @@ class TestControlPlaneSplit:
         body = resp.json()
         assert body["running"] is True
         assert "collection" in body  # the full diagnostics, not the minimal /health
+
+        metrics = server.control_request("GET", "/metrics", timeout=5.0)
+        assert metrics.status_code == 200
+        assert metrics.headers["content-type"].startswith("text/plain")
+        assert "# TYPE shrike_http_requests_total counter" in metrics.text
+        assert "shrike_runtime_pool_queue_depth" in metrics.text
+        assert "shrike_index_saver_pending" in metrics.text
+
+    def test_metrics_scrapes_are_observational(self, server: ServerInfo) -> None:
+        # Create one deterministic request sample, then prove scraping itself is
+        # excluded from the request counter family.
+        assert httpx.get(f"{_base_url(server)}/health", timeout=5.0).status_code == 200
+        first = server.control_request("GET", "/metrics", timeout=5.0).text
+        second = server.control_request("GET", "/metrics", timeout=5.0).text
+
+        def request_lines(text: str) -> list[str]:
+            return sorted(
+                line for line in text.splitlines() if line.startswith("shrike_http_requests_total{")
+            )
+
+        assert request_lines(first) == request_lines(second)
+        assert any('route="/health"' in line for line in request_lines(second))
 
     def test_health_is_minimal_and_leaks_nothing(self, server: ServerInfo) -> None:
         # The data plane's liveness probe carries running + wire version, and none

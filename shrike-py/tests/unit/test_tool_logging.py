@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from shrike.api.actions import ToolInputError, note_outcome
 from shrike.api.mcp_adapter import _safe_tool
@@ -123,3 +124,53 @@ class TestFailures:
         assert len(records) == 1
         assert records[0].levelno == logging.ERROR
         assert records[0].exc_info is not None  # genuine bugs carry the traceback
+
+
+class TestMcpActionRecording:
+    """The MCP transport must count a pre-impl validation rejection as
+    input_error — the same label the HTTP edge records — even though FastMCP
+    validates args inside Tool.run before the _safe_tool impl runs."""
+
+    async def test_validation_rejection_recorded_as_input_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mcp.server.fastmcp import FastMCP
+
+        from shrike.api import mcp_adapter
+
+        mcp = FastMCP("test")
+
+        @mcp.tool()
+        def typed(x: int) -> int:
+            """A tool with a typed arg."""
+            return x + 1
+
+        mcp_adapter._instrument_tool_manager(mcp)
+
+        calls: list[tuple] = []
+        monkeypatch.setattr(mcp_adapter.metrics, "observe_action", lambda *a: calls.append(a))
+
+        # A non-coercible argument fails FastMCP's func_metadata validation inside
+        # Tool.run, before the impl — the case that previously went uncounted.
+        with pytest.raises(ToolError):
+            await mcp._tool_manager.call_tool("typed", {"x": "not-an-int"})
+
+        # name, transport="mcp", result="input_error", duration
+        assert any(c[1] == "mcp" and c[2] == "input_error" for c in calls), calls
+
+    async def test_successful_call_not_double_recorded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mcp.server.fastmcp import FastMCP
+
+        from shrike.api import mcp_adapter
+
+        mcp = FastMCP("test")
+        mcp.tool()(_safe_tool(_ok_tool))
+        mcp_adapter._instrument_tool_manager(mcp)
+
+        calls: list[tuple] = []
+        monkeypatch.setattr(mcp_adapter.metrics, "observe_action", lambda *a: calls.append(a))
+        await mcp._tool_manager.call_tool("_ok_tool", {"x": 1})
+        # _safe_tool records the ok outcome once; the wrapper adds nothing on success.
+        assert [c[2] for c in calls] == ["ok"], calls

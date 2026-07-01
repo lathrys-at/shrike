@@ -54,6 +54,7 @@ dependencies = [
     "pyyaml>=6.0",
     "rich>=13.0",
     "numpy>=1.26",
+    "prometheus-client>=0.21",
     # The dylib carrier for the native ort engine (`ort` with load-dynamic): the
     # onnxruntime wheel ships the shared runtime that in-process text + CLIP
     # embedding dlopens. A hard dependency since #497 (the old onnx/clip extras

@@ -1330,6 +1330,7 @@ class ActionErrorCode(StrEnum):
     INPUT_ERROR = "input_error"
     COLLECTION_BUSY = "collection_busy"
     UNKNOWN_ACTION = "unknown_action"
+    NOT_READY = "not_ready"
     INTERNAL_ERROR = "internal_error"
 
 

@@ -52,6 +52,7 @@ py_wheel(
         "pyyaml>=6.0",
         "rich>=13.0",
         "numpy>=1.26",
+        "prometheus-client>=0.21",
         # The dylib carrier for the native ort engine — a hard dep (the
         # onnx/clip extras are gone; the `gpu` extra swaps the carrier).
         "onnxruntime>=1.17",

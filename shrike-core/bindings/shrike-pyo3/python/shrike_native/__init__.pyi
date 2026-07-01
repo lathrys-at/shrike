@@ -63,6 +63,7 @@ from shrike_native._native import index_namespace as index_namespace
 from shrike_native._native import init_driven_runtime as init_driven_runtime
 from shrike_native._native import native_embedder_probe as native_embedder_probe
 from shrike_native._native import rehomed_actions as rehomed_actions
+from shrike_native._native import render_prometheus as render_prometheus
 from shrike_native._native import rrf_fuse as rrf_fuse
 from shrike_native._native import runtime_probe as runtime_probe
 

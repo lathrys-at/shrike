@@ -99,6 +99,8 @@ _INDEX = ["test_index_policy.py"]
 
 _CACHE_LAYOUT = ["test_cache_layout.py"]
 
+_OBSERVABILITY = ["test_metrics.py"]
+
 # The harness coverage-matrix logic: pure helper over modalities +
 # recognizers, so it needs the harness module (and schemas for the wire model).
 _HARNESS = ["test_coverage_matrix.py"]
@@ -277,6 +279,16 @@ pytest_test(
 )
 
 pytest_test(
+    name = "observability",
+    srcs = _OBSERVABILITY,
+    xdist = None,
+    deps = [
+        ":conftest",
+        "//shrike-py/src/shrike:observability",
+    ],
+)
+
+pytest_test(
     name = "harness",
     srcs = _HARNESS,
     xdist = None,
@@ -400,7 +412,7 @@ pytest_test(
 # one cluster (or _PIP_ONLY). A forgotten file fails the build loudly here
 # instead of silently never running under Bazel.
 _ASSIGNED = _PIP_ONLY + _CORE + _CLIENT + _DAEMON + _DRIVEN_RUNTIME + _LOG + _INDEX + \
-            _CACHE_LAYOUT + \
+            _CACHE_LAYOUT + _OBSERVABILITY + \
             _HARNESS + _PATHSAFETY + _DERIVED + \
             _EMBED_HELPERS + _EMBEDDING + _SEARCH_QUALITY + _ACTIONS + _TOOLS + \
             _SERVER + _CONFIG + _CLI

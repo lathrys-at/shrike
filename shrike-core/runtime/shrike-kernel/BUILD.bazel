@@ -28,6 +28,8 @@ rust_library(
         "@crates//:crossbeam-deque",
         "@crates//:futures",
         "@crates//:memchr",
+        "@crates//:metrics",
+        "@crates//:metrics-exporter-prometheus",
         "@crates//:serde",
         "@crates//:serde_json",
         "@crates//:tokio",

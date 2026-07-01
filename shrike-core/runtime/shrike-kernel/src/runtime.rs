@@ -52,18 +52,265 @@ use std::cell::Cell;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crossbeam_deque::{Injector, Stealer, Worker as Deque};
+use metrics::{
+    counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram, Counter,
+    Gauge, Histogram, Unit,
+};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use shrike_error::{NativeError, NativeResult};
 use tokio::sync::{mpsc, oneshot, Notify};
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 /// A pool job: a boxed sync closure that carries its own completion channel, so
-/// finishing it wakes the awaiting async task. Unbounded queues, like the
+/// finishing it wakes the awaiting async task, plus the enqueue instant so the
+/// worker that runs it records the queue-wait latency. Unbounded queues, like the
 /// collection actor's channel — backpressure is the harness's committed pool
 /// size, not the channel.
-type PoolJob = Box<dyn FnOnce() + Send + 'static>;
+struct PoolJob {
+    work: Box<dyn FnOnce() + Send + 'static>,
+    queued_at: Instant,
+}
+
+impl PoolJob {
+    fn new(work: Box<dyn FnOnce() + Send + 'static>) -> Self {
+        Self {
+            work,
+            queued_at: Instant::now(),
+        }
+    }
+}
+
+/// The installed Prometheus pull exporter handle. [`render_prometheus`] renders
+/// it for the control-plane /metrics body (appended after the Python registry).
+static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
+
+/// Install the Prometheus recorder and describe the kernel instruments — once per
+/// process, from [`init_driven_runtime`] after the runtime install wins.
+/// Recommended naming lets the exporter derive `_total`/`_seconds`/`le`, so the
+/// instrument macros never hand-format a Prometheus suffix. All aggregation and
+/// snapshotting lives in the exporter (valid histograms by construction).
+fn install_prometheus() {
+    let _ = PROMETHEUS.get_or_init(|| {
+        let handle = PrometheusBuilder::new()
+            .with_recommended_naming(true)
+            .install_recorder()
+            .expect("the Prometheus recorder installs exactly once per process");
+        describe_kernel_metrics();
+        gauge!("shrike_index_saver_pending").set(0.0);
+        handle
+    });
+}
+
+/// Render the kernel's Prometheus registry. Empty before the exporter installs
+/// (the cabi / test / minimal-core paths that never call [`init_driven_runtime`]).
+pub fn render_prometheus() -> String {
+    PROMETHEUS
+        .get()
+        .map(PrometheusHandle::render)
+        .unwrap_or_default()
+}
+
+/// HELP/TYPE/unit metadata for every kernel instrument. Units (`Unit::Seconds`)
+/// drive the exporter's `_seconds` suffix; the bare counter names gain `_total`.
+fn describe_kernel_metrics() {
+    describe_gauge!(
+        "shrike_runtime_pool_workers",
+        "Live workers driving a pool."
+    );
+    describe_gauge!(
+        "shrike_runtime_pool_active_jobs",
+        "Jobs currently executing in a pool."
+    );
+    describe_gauge!(
+        "shrike_runtime_pool_queue_depth",
+        "Jobs waiting in a pool's queue."
+    );
+    describe_counter!("shrike_runtime_pool_jobs", "Jobs completed by a pool.");
+    describe_histogram!(
+        "shrike_runtime_pool_queue_wait",
+        Unit::Seconds,
+        "Time jobs waited in queue before execution."
+    );
+    describe_histogram!(
+        "shrike_runtime_pool_job_duration",
+        Unit::Seconds,
+        "Time spent executing pool jobs."
+    );
+    describe_gauge!(
+        "shrike_runtime_io_alive",
+        "Whether the drive_io thread is live."
+    );
+    describe_counter!(
+        "shrike_embedding_batches",
+        "Embedding batches by space, modality, operation, and result."
+    );
+    describe_counter!(
+        "shrike_embedding_items",
+        "Items submitted for embedding by space, modality, operation, and result."
+    );
+    describe_histogram!(
+        "shrike_embedding_duration",
+        Unit::Seconds,
+        "Embedding batch latency."
+    );
+    describe_counter!(
+        "shrike_index_saver_runs",
+        "Debounced index saver flushes by result."
+    );
+    describe_counter!(
+        "shrike_index_saver_requests",
+        "Debounced index saver save-requests."
+    );
+    describe_gauge!(
+        "shrike_index_saver_pending",
+        "Unsaved index changes awaiting the debounced saver."
+    );
+    describe_histogram!(
+        "shrike_index_saver_duration",
+        Unit::Seconds,
+        "Debounced index flush latency."
+    );
+}
+
+/// The cached per-pool runtime instrument handles, resolved once at install with
+/// the `pool` label baked in. The hot worker path emits through these via a
+/// direct atomic rather than re-resolving a metric key per job.
+struct PoolInstruments {
+    workers: Gauge,
+    active: Gauge,
+    queue_depth: Gauge,
+    jobs: Counter,
+    queue_wait: Histogram,
+    job_duration: Histogram,
+}
+
+impl PoolInstruments {
+    fn for_pool(pool: &'static str) -> Self {
+        Self {
+            workers: gauge!("shrike_runtime_pool_workers", "pool" => pool),
+            active: gauge!("shrike_runtime_pool_active_jobs", "pool" => pool),
+            queue_depth: gauge!("shrike_runtime_pool_queue_depth", "pool" => pool),
+            jobs: counter!("shrike_runtime_pool_jobs", "pool" => pool),
+            queue_wait: histogram!("shrike_runtime_pool_queue_wait", "pool" => pool),
+            job_duration: histogram!("shrike_runtime_pool_job_duration", "pool" => pool),
+        }
+    }
+}
+
+/// RAII worker-liveness accounting: holds the `workers` gauge up for the lifetime
+/// of a [`drive_collection`]/[`drive_compute`] thread, decrementing on drop — so a
+/// worker that unwinds on a poisoned-mutex `.expect()` still decrements and the
+/// registry never strands a dead worker as live.
+struct WorkerGuard {
+    workers: Gauge,
+}
+
+impl WorkerGuard {
+    fn enter(workers: &Gauge) -> Self {
+        workers.increment(1.0);
+        Self {
+            workers: workers.clone(),
+        }
+    }
+}
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        self.workers.decrement(1.0);
+    }
+}
+
+/// The embedding-call context the kernel op sets around an embed `.await`, so the
+/// observed embedder (which sees only the batch) can attribute the batch to its
+/// space and query-vs-index operation. `space` is the embedding-space key;
+/// `operation` is `"query"` (search-time) or `"index"` (write/build-time).
+#[derive(Clone)]
+pub struct EmbedContext {
+    /// The embedding-space key the batch ran against.
+    pub space: String,
+    /// `"query"` (search-time) or `"index"` (write/build-time).
+    pub operation: &'static str,
+}
+
+tokio::task_local! {
+    static EMBED_CONTEXT: EmbedContext;
+}
+
+/// Scope `fut` (an embed call) with its embedding [`EmbedContext`], so a
+/// [`record_embedding`] emitted while the future resolves carries the right
+/// `space`/`operation` labels. The observed embedder records the batch; the op
+/// boundary names what kind of embed it was.
+pub fn embed_scope<F: Future>(
+    space: String,
+    operation: &'static str,
+    fut: F,
+) -> impl Future<Output = F::Output> {
+    use tracing::Instrument as _;
+    let span = tracing::debug_span!("kernel.embed", operation);
+    EMBED_CONTEXT.scope(EmbedContext { space, operation }, fut.instrument(span))
+}
+
+/// Record one production embedding batch, reading the `space`/`operation` from
+/// the ambient [`EmbedContext`] (defaulting to `unknown` outside an
+/// [`embed_scope`], e.g. a direct embed with no op boundary). Success and failure
+/// are independent counter series (`result="ok"` / `result="error"`), never a
+/// subtraction — a concurrent scrape can't observe a non-monotonic derived count.
+pub fn record_embedding(modality: &str, items: usize, elapsed: Duration, success: bool) {
+    if items == 0 {
+        // An empty batch does no work — counting it inflates the batch/items
+        // totals and biases the latency histogram low.
+        return;
+    }
+    let (space, operation) = EMBED_CONTEXT
+        .try_with(|c| (c.space.clone(), c.operation))
+        .unwrap_or_else(|_| ("unknown".to_owned(), "unknown"));
+    let result = if success { "ok" } else { "error" };
+    counter!(
+        "shrike_embedding_batches",
+        "space" => space.clone(),
+        "modality" => modality.to_owned(),
+        "operation" => operation,
+        "result" => result,
+    )
+    .increment(1);
+    counter!(
+        "shrike_embedding_items",
+        "space" => space.clone(),
+        "modality" => modality.to_owned(),
+        "operation" => operation,
+        "result" => result,
+    )
+    .increment(items as u64);
+    histogram!(
+        "shrike_embedding_duration",
+        "space" => space,
+        "modality" => modality.to_owned(),
+        "operation" => operation,
+    )
+    .record(elapsed.as_secs_f64());
+}
+
+/// Record a debounced index-saver flush — exactly once per physical save, with
+/// `result` as independent ok/error series. `pending` is the live unsaved-change
+/// count read from the saver at the call site, so the gauge tracks the real
+/// backlog rather than a mirror that drifts.
+pub(crate) fn record_saver_run(success: bool, elapsed: Duration, pending: u64) {
+    let result = if success { "ok" } else { "error" };
+    counter!("shrike_index_saver_runs", "result" => result).increment(1);
+    histogram!("shrike_index_saver_duration", "result" => result).record(elapsed.as_secs_f64());
+    gauge!("shrike_index_saver_pending").set(pending as f64);
+}
+
+/// Record a debounced index-saver save-request, refreshing the pending gauge from
+/// the saver's live count.
+pub(crate) fn record_saver_request(pending: u64) {
+    counter!("shrike_index_saver_requests").increment(1);
+    gauge!("shrike_index_saver_pending").set(pending as f64);
+}
 
 /// The driven pools, installed by [`init_driven_runtime`]. The collection queue
 /// is a single-consumer mpsc (one [`drive_collection`] thread pops it); the
@@ -84,6 +331,10 @@ struct DrivenPools {
     /// [`drive_io_until_shutdown`] (the binding's IO thread), so all N + 2
     /// committed threads return from one shutdown call.
     shutdown: Notify,
+    /// Cached per-pool instrument handles (resolved at install) — the hot worker
+    /// path emits through these without re-resolving a metric key per job.
+    collection_metrics: PoolInstruments,
+    compute_metrics: PoolInstruments,
 }
 
 impl DrivenPools {
@@ -94,6 +345,30 @@ impl DrivenPools {
             .lock()
             .expect("driven collection sender poisoned")
             .clone()
+    }
+
+    /// The cached instruments for `kind`.
+    fn metrics(&self, kind: QueueKind) -> &PoolInstruments {
+        match kind {
+            QueueKind::Collection => &self.collection_metrics,
+            QueueKind::Compute => &self.compute_metrics,
+        }
+    }
+
+    /// Run one job on the calling worker, recording the queue-wait, active-jobs,
+    /// duration, and completed-jobs instruments for `kind`. The job body is
+    /// panic-contained ([`run_in_pool_job`] runs under `catch_unwind`), so the
+    /// active gauge cannot strand between increment and decrement.
+    fn run_job(&self, kind: QueueKind, job: PoolJob) {
+        let m = self.metrics(kind);
+        m.queue_depth.decrement(1.0);
+        m.queue_wait.record(job.queued_at.elapsed().as_secs_f64());
+        m.active.increment(1.0);
+        let started = Instant::now();
+        (job.work)();
+        m.job_duration.record(started.elapsed().as_secs_f64());
+        m.active.decrement(1.0);
+        m.jobs.increment(1);
     }
 }
 
@@ -248,14 +523,19 @@ pub fn init_driven_runtime(
     compute_workers: usize,
 ) -> Result<(), tokio::runtime::Runtime> {
     RUNTIME.set(runtime)?;
-    // We won the runtime install, so the pools below are uncontended.
+    // We won the runtime install, so the pools below are uncontended. Install the
+    // Prometheus recorder first so the instrument handles below resolve against a
+    // live recorder (the metrics facade hands out no-ops before one is installed).
     COMPUTE_WIDTH.store(compute_workers, Ordering::Relaxed);
+    install_prometheus();
     let (collection_tx, collection_rx) = mpsc::unbounded_channel::<PoolJob>();
     let _ = DRIVEN.set(DrivenPools {
         collection_tx: Mutex::new(Some(collection_tx)),
         collection_rx: Mutex::new(Some(collection_rx)),
         compute: ComputePool::new(compute_workers),
         shutdown: Notify::new(),
+        collection_metrics: PoolInstruments::for_pool("collection"),
+        compute_metrics: PoolInstruments::for_pool("compute"),
     });
     Ok(())
 }
@@ -319,7 +599,9 @@ pub fn drive_io<F: Future<Output = ()> + Send + 'static>(until: F) -> NativeResu
 /// Returns an error if the driven runtime is not installed.
 pub fn drive_io_until_shutdown() -> NativeResult<()> {
     let pools = DRIVEN.get().ok_or_else(driven_missing)?;
+    gauge!("shrike_runtime_io_alive").set(1.0);
     block_on(pools.shutdown.notified());
+    gauge!("shrike_runtime_io_alive").set(0.0);
     Ok(())
 }
 
@@ -354,8 +636,9 @@ pub fn drive_collection() -> NativeResult<()> {
         .ok_or_else(|| {
             NativeError::internal("drive_collection was already claimed by another thread")
         })?;
+    let _worker = WorkerGuard::enter(&pools.collection_metrics.workers);
     while let Some(job) = rx.blocking_recv() {
-        job();
+        pools.run_job(QueueKind::Collection, job);
     }
     Ok(())
 }
@@ -383,6 +666,7 @@ pub fn drive_collection() -> NativeResult<()> {
 pub fn drive_compute() -> NativeResult<()> {
     let pools = DRIVEN.get().ok_or_else(driven_missing)?;
     let pool = &pools.compute;
+    let _worker = WorkerGuard::enter(&pools.compute_metrics.workers);
     // Claim a local deque. init_driven_runtime provisions exactly N (the committed
     // worker count) before the harness spawns the workers; a worker beyond N — not
     // expected — falls back to a fresh unregistered deque (still correct, just not
@@ -396,7 +680,7 @@ pub fn drive_compute() -> NativeResult<()> {
     loop {
         // Hot path: run every job we can find, lock-free.
         if let Some(job) = find_task(&local, &pool.injector, &pool.stealers) {
-            job();
+            pools.run_job(QueueKind::Compute, job);
             continue;
         }
         // Dry. Re-check under `park` (closing the lost-wakeup window): take a job
@@ -464,10 +748,15 @@ pub fn submit_blocking<T: Send + 'static>(
         "leaf-invariant: a pool job must not submit-and-block on further pool work (submit_blocking)"
     );
     let (tx, rx) = std::sync::mpsc::channel();
-    let job: PoolJob = Box::new(move || {
+    let job = PoolJob::new(Box::new(move || {
         let _ = tx.send(run_in_pool_job(work));
-    });
-    if !DRIVEN.get().ok_or_else(driven_missing)?.compute.push(job) {
+    }));
+    let pools = DRIVEN.get().ok_or_else(driven_missing)?;
+    pools.compute_metrics.queue_depth.increment(1.0);
+    if !pools.compute.push(job) {
+        // The pool refused the job (shutting down): it never reaches run_job, so
+        // undo the queue-depth bump here.
+        pools.compute_metrics.queue_depth.decrement(1.0);
         return Err(NativeError::internal("the compute pool is gone"));
     }
     rx.recv()
@@ -569,14 +858,17 @@ pub fn submit_compute(job: Box<dyn FnOnce() + Send + 'static>) {
         !IN_POOL_JOB.with(Cell::get),
         "leaf-invariant: a pool job must not submit further pool work (submit_compute)"
     );
-    let contained: PoolJob = Box::new(move || {
+    let contained = PoolJob::new(Box::new(move || {
         let _ = run_in_pool_job(move || {
             job();
             Ok::<(), NativeError>(())
         });
-    });
+    }));
     if let Some(pools) = DRIVEN.get() {
-        pools.compute.push(contained);
+        pools.compute_metrics.queue_depth.increment(1.0);
+        if !pools.compute.push(contained) {
+            pools.compute_metrics.queue_depth.decrement(1.0);
+        }
     }
 }
 
@@ -595,21 +887,24 @@ fn enqueue<T: Send + 'static>(
     work: impl FnOnce() -> NativeResult<T> + Send + 'static,
 ) -> futures::future::BoxFuture<'static, NativeResult<T>> {
     let (tx, rx) = oneshot::channel();
-    let job: PoolJob = Box::new(move || {
+    let job = PoolJob::new(Box::new(move || {
         let _ = tx.send(run_in_pool_job(work));
-    });
+    }));
     // If the queue is gone (shutdown took the sender, or no driven runtime
     // installed), the receiver closes empty → the internal error below.
     if let Some(pools) = DRIVEN.get() {
-        match kind {
-            QueueKind::Collection => {
-                if let Some(sender) = pools.collection_sender() {
-                    let _ = sender.send(job);
-                }
-            }
-            QueueKind::Compute => {
-                pools.compute.push(job);
-            }
+        pools.metrics(kind).queue_depth.increment(1.0);
+        let delivered = match kind {
+            QueueKind::Collection => match pools.collection_sender() {
+                Some(sender) => sender.send(job).is_ok(),
+                None => false,
+            },
+            QueueKind::Compute => pools.compute.push(job),
+        };
+        if !delivered {
+            // The job never reaches run_job (queue closed / pool shutting down) —
+            // undo the queue-depth bump that run_job would otherwise decrement.
+            pools.metrics(kind).queue_depth.decrement(1.0);
         }
     }
     Box::pin(async move {
@@ -996,5 +1291,58 @@ mod compute_pool {
             total
         });
         assert_eq!(sum, (0..n).sum::<u64>(), "every job ran exactly once");
+    }
+
+    /// The exporter renders the kernel instruments with the recommended-naming
+    /// suffixes the macros never hand-format (`_total` on counters, `_seconds` on
+    /// the second-unit histograms), carrying the embedding `operation`/`space`
+    /// labels supplied by [`embed_scope`]. Pins the suffix derivation + label
+    /// contract end to end (the install lives in the shared `testing::run` fixture).
+    #[test]
+    fn render_prometheus_exposes_suffixed_instruments() {
+        testing::run(async {
+            // A compute job runs through run_job → the pool instruments record.
+            dispatch_compute(|| Ok::<(), NativeError>(()))
+                .await
+                .expect("the probe job resolves");
+            // An embed batch tagged query/primary records the embedding instruments.
+            embed_scope("primary".to_owned(), "query", async {
+                record_embedding("text", 3, Duration::from_millis(5), true);
+            })
+            .await;
+            record_saver_run(true, Duration::from_millis(2), 0);
+        });
+        let rendered = render_prometheus();
+        // Counters carry `_total`; the duration histograms carry `_seconds`.
+        assert!(
+            rendered.contains("shrike_embedding_items_total"),
+            "embedding items counter missing _total:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("shrike_embedding_duration_seconds"),
+            "embedding duration histogram missing _seconds:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("shrike_runtime_pool_jobs_total"),
+            "pool jobs counter missing _total:\n{rendered}"
+        );
+        // The embed labels supplied by the op boundary, and independent ok/error.
+        assert!(rendered.contains("operation=\"query\""), "{rendered}");
+        assert!(rendered.contains("space=\"primary\""), "{rendered}");
+        assert!(rendered.contains("result=\"ok\""), "{rendered}");
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.starts_with("shrike_embedding_items_total")
+                    && line.contains("result=\"ok\"")),
+            "embedding item counter must carry result label:\n{rendered}"
+        );
+        assert!(
+            rendered.lines().any(
+                |line| line.starts_with("shrike_index_saver_duration_seconds")
+                    && line.contains("result=\"ok\"")
+            ),
+            "saver duration histogram must carry result label:\n{rendered}"
+        );
     }
 }

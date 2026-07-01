@@ -24,6 +24,7 @@ import logging
 import mimetypes
 import os
 import re
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -33,6 +34,7 @@ import shrike_native
 from shrike_native import CollectionCore
 
 from shrike.harness.engines.embedding.base import NoteEmbedInput
+from shrike.observability.metrics import metrics
 from shrike.schemas import COLLECTION_BUSY_CODE
 
 logger = logging.getLogger("shrike.collection")
@@ -40,6 +42,14 @@ logger = logging.getLogger("shrike.collection")
 OnDuplicate = Literal["error", "skip", "allow"]
 
 T = TypeVar("T")
+
+# The ``collection`` metric label for the boot collection. A reserved sentinel,
+# NOT "default": a routed registry profile may legitimately be named "default",
+# and sharing the label would collapse two distinct collections (different files)
+# into one series. Routed harnesses pass their profile name; only the boot
+# collection takes this default — the cardinality contract keeps one series per
+# collection.
+BOOT_COLLECTION_KEY = "__boot__"
 
 # Default seconds to hold the collection open after the last operation before
 # releasing the lock, in cooperative mode. Near SQLite's conventional
@@ -183,6 +193,7 @@ class CollectionWrapper:
         self._on_acquire = on_acquire
         self._open_flag = False
         self._release_handle: asyncio.TimerHandle | None = None
+        self._metrics_key = BOOT_COLLECTION_KEY
         # Standalone mode (tests, library use): the wrapper owns the worker
         # thread. The server uses `over_kernel` instead, where the kernel's
         # injected executor is the one serialization domain.
@@ -204,6 +215,7 @@ class CollectionWrapper:
         *,
         cooperative: bool = False,
         hold_seconds: float = DEFAULT_LOCK_HOLD,
+        collection_key: str = BOOT_COLLECTION_KEY,
     ) -> CollectionWrapper:
         """The server's mode: wrap the kernel's OWN collection.
 
@@ -224,7 +236,13 @@ class CollectionWrapper:
         self._release_handle = None
         self._kernel = kernel
         self._executor = None
+        # The ``collection`` label for this wrapper's lock_held gauge — the boot
+        # sentinel for the boot collection, the registry profile name for a routed one.
+        self._metrics_key = collection_key
         self.core = kernel.core_handle()
+        # The kernel opens its collection at boot — the lock is held from here,
+        # so the gauge starts at 1 (not 0 until the first status/index op).
+        metrics.lock_held.labels(self._metrics_key).set(1)
         atexit.register(self.close)
         return self
 
@@ -232,6 +250,9 @@ class CollectionWrapper:
         logger.debug("Opening collection at %s", self._path)
         self.core = CollectionCore(self._path)
         self._open_flag = True
+        # The lock is held from the initial open, not only after a re-acquire —
+        # set the gauge here so the boot hold is covered, cleared on release/close.
+        metrics.lock_held.labels(self._metrics_key).set(1)
         logger.debug("Collection opened successfully")
 
     def set_acquire_hook(self, hook: Callable[[CollectionCore], None] | None) -> None:
@@ -276,11 +297,17 @@ class CollectionWrapper:
         as :class:`CollectionBusyError` — typed, immediate, retryable.
         """
         if not self._open_flag:
+            started = time.perf_counter()
             try:
                 self.core.reopen()
             except shrike_native.NativeBusyError as e:
+                metrics.lock_attempts.labels("busy").inc()
+                metrics.lock_wait.labels("busy").observe(time.perf_counter() - started)
                 raise CollectionBusyError() from e
+            metrics.lock_attempts.labels("acquired").inc()
+            metrics.lock_wait.labels("acquired").observe(time.perf_counter() - started)
             self._open_flag = True
+            metrics.lock_held.labels(self._metrics_key).set(1)
             logger.debug("Re-acquired collection at %s", self._path)
             if self._on_acquire is not None:
                 with contextlib.suppress(Exception):
@@ -350,6 +377,7 @@ class CollectionWrapper:
         with contextlib.suppress(Exception):
             self.core.release()
         self._open_flag = False
+        metrics.lock_held.labels(self._metrics_key).set(0)
         logger.debug("Released collection lock after idle")
 
     def release_now(self) -> None:
@@ -381,6 +409,7 @@ class CollectionWrapper:
         except shrike_native.NativeBusyError as e:
             raise CollectionBusyError() from e
         self._open_flag = True
+        metrics.lock_held.labels(self._metrics_key).set(1)
         logger.info("Reopened collection at %s", self._path)
 
     def close(self) -> None:
@@ -393,10 +422,14 @@ class CollectionWrapper:
         if self._executor is None:
             # Kernel mode: the kernel owns the collection — its close()
             # (driven by the server's shutdown path) closes the core.
+            self._open_flag = False
+            metrics.lock_held.labels(self._metrics_key).set(0)
             return
         logger.debug("Closing collection")
         with contextlib.suppress(Exception):
             self._executor.submit(self.core.close).result()
+        self._open_flag = False
+        metrics.lock_held.labels(self._metrics_key).set(0)
         self._executor.shutdown(wait=True)
 
     # -- info / read -----------------------------------------------------------

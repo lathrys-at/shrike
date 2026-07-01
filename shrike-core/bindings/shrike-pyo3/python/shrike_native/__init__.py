@@ -88,6 +88,7 @@ with contextlib.suppress(ImportError):
         init_driven_runtime,  # noqa: F401
         native_embedder_probe,  # noqa: F401
         rehomed_actions,  # noqa: F401
+        render_prometheus,  # noqa: F401
         rrf_fuse,  # noqa: F401
         runtime_probe,  # noqa: F401
     )

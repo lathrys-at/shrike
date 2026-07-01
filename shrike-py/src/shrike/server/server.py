@@ -28,6 +28,7 @@ from mcp.server.transport_security import (
 )
 from pydantic import ValidationError
 
+from shrike.api.mcp_adapter import ServerNotReadyError, _action_transport
 from shrike.api.tools import ToolInputError, register_tools
 from shrike.harness.collection import DEFAULT_LOCK_HOLD
 from shrike.harness.engines.embedding.runtime import (
@@ -37,6 +38,7 @@ from shrike.harness.engines.embedding.runtime import (
     EmbeddingRuntime,
 )
 from shrike.harness.harness import CollectionManager, Harness, HarnessParams, KernelConfigError
+from shrike.observability.metrics import metrics
 from shrike.platform.daemon import AlreadyRunningError, ServerLock, control_socket_path
 from shrike.platform.driven_runtime import DrivenRuntime
 from shrike.platform.log import configure_logging
@@ -248,7 +250,9 @@ def _rejected_exec_overrides(overrides: dict[str, Any], *, purely_local: bool) -
 
 def _make_guard(
     security: TransportSecuritySettings | None,
-) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
+    *,
+    plane: str,
+) -> Callable[[Callable[..., Awaitable[Any]], str], Callable[..., Awaitable[Any]]]:
     """A per-plane route decorator: validate Host/Origin under ``security`` (a
     no-op when ``None``) and emit the one-INFO-line-per-served-call.
 
@@ -260,6 +264,7 @@ def _make_guard(
 
     def guard(
         handler: Callable[..., Awaitable[Any]],
+        route_template: str,
     ) -> Callable[..., Awaitable[Any]]:
         @functools.wraps(handler)
         async def wrapped(request: Any) -> Any:
@@ -269,6 +274,26 @@ def _make_guard(
             # security is None.
             started = time.perf_counter()
             path = request.url.path
+            # The metric label is the REGISTERED template, not the resolved URL.
+            # Starlette never writes scope["route"], so recovering it from the
+            # request would fall back to the literal path on every parameterized
+            # route (/media/{filename:path}, /actions/{name}, /export/{token}) —
+            # one series per distinct URL, and the one-shot /export token leaked
+            # into the /metrics body. The template keeps cardinality at O(routes).
+            route = route_template
+
+            def observe(status_code: int) -> None:
+                # Scraping is observational: repeated /metrics reads must not
+                # mutate the registry merely by reading it.
+                if route != "/metrics":
+                    metrics.observe_http(
+                        plane,
+                        request.method,
+                        route,
+                        status_code,
+                        time.perf_counter() - started,
+                    )
+
             rejection = await security_mw.validate_request(request, is_post=False)
             if rejection is not None:
                 logger.warning(
@@ -278,9 +303,15 @@ def _make_guard(
                     rejection.status_code,
                     request.client,
                 )
+                observe(rejection.status_code)
                 return rejection
-            response = await handler(request)
+            try:
+                response = await handler(request)
+            except Exception:
+                observe(500)
+                raise
             elapsed_ms = (time.perf_counter() - started) * 1000
+            observe(response.status_code)
             # Every served route logs at INFO — including /status polls. The one
             # exception is the actions edge: when an action reaches its impl, the
             # _safe_tool wrapper ALREADY emits the canonical one-INFO-line-per-call,
@@ -508,8 +539,8 @@ def _register_custom_routes(
 
     from shrike.harness.collection import CollectionBusyError, _safe_media_name
 
-    data_guard = _make_guard(security)
-    control_guard = _make_guard(control_security)
+    data_guard = _make_guard(security, plane="data")
+    control_guard = _make_guard(control_security, plane="control")
     control_routes: list[Route] = []
     _Handler = Callable[[Request], Awaitable[Response]]
 
@@ -519,9 +550,9 @@ def _register_custom_routes(
 
         def deco(handler: _Handler) -> _Handler:
             if plane == "control":
-                control_routes.append(Route(path, control_guard(handler), methods=methods))
+                control_routes.append(Route(path, control_guard(handler, path), methods=methods))
             else:
-                app.custom_route(path, methods=methods)(data_guard(handler))
+                app.custom_route(path, methods=methods)(data_guard(handler, path))
             return handler
 
         return deco
@@ -579,6 +610,11 @@ def _register_custom_routes(
                 status["collections"] = rows
 
         return JSONResponse(status)
+
+    @_route("control", "/metrics", ["GET"])
+    async def handle_metrics(request: Request) -> Response:
+        payload, content_type = metrics.render()
+        return Response(payload, media_type=None, headers={"Content-Type": content_type})
 
     @_route("data", "/media/{filename:path}", ["GET"])
     async def handle_media(request: Request) -> Response:
@@ -731,7 +767,19 @@ def _register_custom_routes(
 
         @_route("data", "/actions/{name}", ["POST"])
         async def handle_action(request: Request) -> JSONResponse:
+            action_started = time.perf_counter()
             name = request.path_params.get("name", "")
+
+            def _input_error(
+                metric_name: str, code: ActionErrorCode, message: str, status: int
+            ) -> JSONResponse:
+                # One place for the HTTP edge's input-error bookkeeping: record the
+                # rejection (input_error, matching the MCP transport) and build the
+                # typed error response. Collapses the early-return copy-paste.
+                metrics.observe_action(
+                    metric_name, "http", "input_error", time.perf_counter() - action_started
+                )
+                return _action_error(code, message, status)
 
             # Wire-version handshake: an optional request wire-version header must
             # match the server's. A mismatch is refused before the op runs — the
@@ -743,7 +791,8 @@ def _register_custom_routes(
                 # that never reach _safe_tool (the route line in _guard is DEBUG
                 # for /actions/*).
                 logger.info("action %s rejected: wire version %r", name, requested)
-                return _action_error(
+                return _input_error(
+                    name if name in action_tools else "unknown",
                     ActionErrorCode.INPUT_ERROR,
                     f"Unsupported wire protocol version {requested!r}; "
                     f"this server speaks {WIRE_PROTOCOL_VERSION}.",
@@ -753,7 +802,8 @@ def _register_custom_routes(
             tool = action_tools.get(name)
             if tool is None:
                 logger.info("action %s -> unknown_action (404)", name)
-                return _action_error(
+                return _input_error(
+                    "unknown",
                     ActionErrorCode.UNKNOWN_ACTION,
                     f"No action named {name!r}.",
                     404,
@@ -768,14 +818,16 @@ def _register_custom_routes(
                     parsed = await request.json()
                 except Exception:
                     logger.info("action %s rejected: malformed JSON body", name)
-                    return _action_error(
+                    return _input_error(
+                        name,
                         ActionErrorCode.INPUT_ERROR,
                         "Request body must be a JSON object of the action's arguments.",
                         400,
                     )
                 if not isinstance(parsed, dict):
                     logger.info("action %s rejected: body is not a JSON object", name)
-                    return _action_error(
+                    return _input_error(
+                        name,
                         ActionErrorCode.INPUT_ERROR,
                         "Request body must be a JSON object of the action's arguments.",
                         400,
@@ -789,7 +841,11 @@ def _register_custom_routes(
                 # INFO completion line included). convert_result=False returns
                 # the raw response model, which we serialize exactly as MCP's
                 # structuredContent does (output_model.model_dump by_alias).
-                result = await tool.run(arguments, convert_result=False)
+                token = _action_transport.set("http")
+                try:
+                    result = await tool.run(arguments, convert_result=False)
+                finally:
+                    _action_transport.reset(token)
             except Exception as exc:
                 # Tool.run wraps every failure in ToolError, preserving the
                 # original as __cause__; argument-validation failures (a bad or
@@ -806,7 +862,14 @@ def _register_custom_routes(
                         409,
                     )
                 if isinstance(cause, ValidationError):
-                    return _action_error(ActionErrorCode.INPUT_ERROR, str(cause), 400)
+                    return _input_error(name, ActionErrorCode.INPUT_ERROR, str(cause), 400)
+                if isinstance(cause, ServerNotReadyError):
+                    # The readiness gate timed out — a transient "still starting"
+                    # state, not a bug. _safe_tool already recorded the action as
+                    # not_ready; surface a retryable 503 (never a 500) and skip the
+                    # unhandled-error traceback below.
+                    logger.warning("Action %r rejected: %s", name, cause)
+                    return _action_error(ActionErrorCode.NOT_READY, str(cause), 503)
                 # A genuine bug: _safe_tool already logged it with a traceback
                 # (or, for a validation-stage failure, log it here). The wire
                 # body carries a FIXED, non-leaking message — never the detail.

@@ -705,33 +705,50 @@ impl DebouncedSaver {
     /// (clamped non-negative) and the burst-cap `threshold`.
     pub fn new(orchestrator: Arc<IndexOrchestrator>, delay_secs: f64, threshold: u64) -> Arc<Self> {
         let delay = std::time::Duration::from_secs_f64(delay_secs.max(0.0));
-        let orch = Arc::clone(&orchestrator);
-        let job = crate::maintenance::Maintenance::new(
-            Box::new(move || {
-                let orch = Arc::clone(&orch);
-                Box::pin(async move {
-                    // The blocking file write rides the compute pool; a detached
-                    // runtime future (driven by `drive_io`) awaits the pool job,
-                    // keeping the write off every timer and op-tail path.
-                    let save = crate::runtime::dispatch_compute(move || {
-                        orch.save().map_err(|e| {
-                            tracing::warn!(error = ?e, "debounced index save failed");
-                            e
-                        })
-                    });
-                    let _ = save.await;
-                })
-            }),
-            delay,
-            delay,
-            threshold,
-        );
-        Arc::new(Self { orchestrator, job })
+        // `new_cyclic` hands the run closure a `Weak<Self>` before the `Arc`
+        // exists, so the closure can read the *live* pending count from its own
+        // `job` after each save — the metric tracks the real backlog rather than a
+        // mirror that drifts. The save itself records the run exactly once (per
+        // physical save), so the debounced path and `flush` never double-count.
+        Arc::new_cyclic(|me: &std::sync::Weak<Self>| {
+            let orch = Arc::clone(&orchestrator);
+            let me = me.clone();
+            let job = crate::maintenance::Maintenance::new(
+                Box::new(move || {
+                    use tracing::Instrument as _;
+                    let orch = Arc::clone(&orch);
+                    let me = me.clone();
+                    Box::pin(
+                        async move {
+                            let started = std::time::Instant::now();
+                            // The blocking file write rides the compute pool; a
+                            // detached runtime future (driven by `drive_io`) awaits
+                            // the pool job, keeping the write off every timer path.
+                            let save = crate::runtime::dispatch_compute(move || {
+                                orch.save().map_err(|e| {
+                                    tracing::warn!(error = ?e, "debounced index save failed");
+                                    e
+                                })
+                            });
+                            let ok = save.await.is_ok();
+                            let pending = me.upgrade().map(|s| s.job.pending()).unwrap_or(0);
+                            crate::runtime::record_saver_run(ok, started.elapsed(), pending);
+                        }
+                        .instrument(tracing::debug_span!("kernel.index_save")),
+                    )
+                }),
+                delay,
+                delay,
+                threshold,
+            );
+            Self { orchestrator, job }
+        })
     }
 
     /// Record a change: re-arm the idle timer, or flush now at the burst cap.
     pub fn request_save(&self) {
         self.job.request();
+        crate::runtime::record_saver_request(self.job.pending());
     }
 
     /// Unsaved changes since the last flush was handed off.
@@ -743,8 +760,14 @@ impl DebouncedSaver {
     /// save failure is logged, not propagated — used at shutdown so close()
     /// returns only after the write lands).
     pub fn flush(&self) {
+        // Synchronous (no await): an entered guard is safe here.
+        let _span = tracing::debug_span!("kernel.index_flush").entered();
         self.job.cancel();
-        if let Err(e) = self.orchestrator.save() {
+        let started = std::time::Instant::now();
+        let result = self.orchestrator.save();
+        // cancel() zeroed the counter, so pending() is the real post-flush backlog.
+        crate::runtime::record_saver_run(result.is_ok(), started.elapsed(), self.job.pending());
+        if let Err(e) = result {
             tracing::warn!(error = ?e, "debounced index save failed");
         }
     }
@@ -1060,7 +1083,14 @@ impl IndexOrchestrator {
         images: Option<(&dyn ImageEmbedder, &dyn ImageResolver)>,
         mode: WriteMode,
     ) -> NativeResult<usize> {
-        self.apply(inputs, embedder, images, true, mode).await
+        // Index-write embeds: tag the batch so the observed embedder attributes it
+        // to operation="index" (vs the search path's "query").
+        crate::runtime::embed_scope(
+            "primary".to_owned(),
+            "index",
+            self.apply(inputs, embedder, images, true, mode),
+        )
+        .await
     }
 
     /// The shared embed→engine pipeline behind [`Self::add`] (replace
@@ -1348,7 +1378,12 @@ impl IndexOrchestrator {
                 if chunk.is_empty() {
                     continue;
                 }
-                self.apply(&chunk, embedder, images, false, mode).await?;
+                crate::runtime::embed_scope(
+                    "primary".to_owned(),
+                    "index",
+                    self.apply(&chunk, embedder, images, false, mode),
+                )
+                .await?;
                 indexed += chunk.len() as u64;
                 self.shared
                     .lock()

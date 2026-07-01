@@ -163,11 +163,15 @@ def _make_recalib_harness() -> Harness:
     h._bg_tasks = set()
     h._ready = asyncio.Event()
     h._generation = 0
+    h._metrics_key = "default"
 
     async def _noop_build() -> None:
         return None
 
     h._maybe_build_derived = _noop_build  # type: ignore[assignment]
+    # The reconcile choke point refreshes index gauges in its finally; this
+    # fixture has no derived store, so stub it (recalibration is what's under test).
+    h._update_index_metrics = lambda: None  # type: ignore[assignment]
     return h
 
 

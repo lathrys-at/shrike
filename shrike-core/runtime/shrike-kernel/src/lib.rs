@@ -56,9 +56,9 @@ use shrike_store::{DerivedStore, VectorIndex};
 
 pub mod runtime;
 pub use runtime::{
-    block_on, drive_collection, drive_compute, drive_io, drive_io_until_shutdown,
-    init_driven_runtime, is_driven, shutdown_driven_pools, spawn_op, submit_blocking,
-    submit_compute,
+    block_on, drive_collection, drive_compute, drive_io, drive_io_until_shutdown, embed_scope,
+    init_driven_runtime, is_driven, record_embedding, render_prometheus, shutdown_driven_pools,
+    spawn_op, submit_blocking, submit_compute, EmbedContext,
 };
 
 // The multi-engine routing key: re-exported so the pyo3 binding maps
@@ -1058,7 +1058,12 @@ impl Kernel {
             };
             // Embed every source with THIS space's model, then rank per modality
             // on THIS space's engine.
-            let qvectors = svc.embedder.embed(source_texts.to_vec()).await?;
+            let qvectors = crate::runtime::embed_scope(
+                key.clone(),
+                "query",
+                svc.embedder.embed(source_texts.to_vec()),
+            )
+            .await?;
             let engine = orch.engine_arc();
             let rows = engine.search_by_modality(&qvectors, fetch_k, Some(&note_spaces), None)?;
             let per_source: Vec<actions::SpaceSourceHits> = rows
@@ -1204,7 +1209,8 @@ impl Kernel {
         }
         // CLIP-text-embed every sample note's text on THIS space's encoder.
         let texts: Vec<String> = sample.iter().map(|(_, t)| t.clone()).collect();
-        let qvectors = svc.embedder.embed(texts).await?;
+        let qvectors =
+            crate::runtime::embed_scope(key.to_owned(), "index", svc.embedder.embed(texts)).await?;
         // CALIB_K so a pseudo-query whose own image is the nearest hit still has
         // a non-self hit to record (mirrors the engine's intra-modal sampling).
         let rows = engine.search_by_modality(
@@ -1306,6 +1312,7 @@ impl Kernel {
     ///
     /// Returns `Unavailable` when no embedder is attached, or an error if the
     /// collection read, embedding, or the engine rebuild fails.
+    #[tracing::instrument(skip_all, name = "kernel.rebuild_index")]
     pub async fn rebuild_index(&self) -> NativeResult<usize> {
         self.ingest.rebuild_index().await
     }
@@ -1322,6 +1329,7 @@ impl Kernel {
     ///
     /// Returns an error if the collection read, embedding, an index add, or the
     /// derived ingest fails.
+    #[tracing::instrument(skip_all, fields(n = written.len()), name = "kernel.reindex_notes")]
     pub async fn reindex_notes(&self, written: &[i64]) -> NativeResult<()> {
         if written.is_empty() {
             return Ok(());
@@ -1357,6 +1365,7 @@ impl Kernel {
     /// # Errors
     ///
     /// Returns an error if the collection read or the derived-store build fails.
+    #[tracing::instrument(skip_all, name = "kernel.rebuild_derived")]
     pub async fn rebuild_derived(&self) -> NativeResult<(usize, i64)> {
         self.ingest.rebuild_derived().await
     }
@@ -1378,6 +1387,7 @@ impl Kernel {
     /// Returns an error if a collection read, a recognizer call (e.g. a down
     /// endpoint), or the post-recognition persist/re-embed fails for any
     /// purpose — which aborts the call with that purpose's backlog intact.
+    #[tracing::instrument(skip_all, fields(max_items), name = "kernel.recognize_pending")]
     pub async fn recognize_pending(
         &self,
         max_items: usize,
@@ -1457,6 +1467,7 @@ impl Kernel {
     ///
     /// Returns an error if a batch's collection read, recognizer call, or
     /// persist/re-embed fails (aborting before persist, backlog intact).
+    #[tracing::instrument(skip_all, name = "kernel.recognize_all_pending")]
     pub async fn recognize_all_pending(
         &self,
         batch_size: usize,
@@ -1525,6 +1536,7 @@ impl Kernel {
     /// Returns an error if a collection read, the recognizer call, or the
     /// post-recognition persist/re-embed fails — which aborts the sweep before
     /// persisting, leaving the purpose's backlog pending.
+    #[tracing::instrument(skip_all, fields(max_items), name = "kernel.recognize_pending_for")]
     pub async fn recognize_pending_for(
         &self,
         purpose: recognize::RecognitionPurpose,
@@ -2710,7 +2722,15 @@ impl Kernel {
             // overlap the host path gets by embedding before dispatch.
             let svc = self.embed_service();
             let (vectors, semantic) = match &svc {
-                Some(svc) => (svc.embedder.embed(vec![query.to_string()]).await?, true),
+                Some(svc) => (
+                    crate::runtime::embed_scope(
+                        "primary".to_owned(),
+                        "query",
+                        svc.embedder.embed(vec![query.to_string()]),
+                    )
+                    .await?,
+                    true,
+                ),
                 None => (Vec::new(), false),
             };
             let sources = vec![actions::SearchSource {
@@ -2907,9 +2927,15 @@ impl Kernel {
             let source_texts: Vec<String> = sources.iter().map(|s| s.text.clone()).collect();
             let svc = self.embed_service();
             let (vectors, semantic_ok) = match (&svc, semantic) {
-                (Some(svc), true) if !source_texts.is_empty() => {
-                    (svc.embedder.embed(source_texts.clone()).await?, true)
-                }
+                (Some(svc), true) if !source_texts.is_empty() => (
+                    crate::runtime::embed_scope(
+                        "primary".to_owned(),
+                        "query",
+                        svc.embedder.embed(source_texts.clone()),
+                    )
+                    .await?,
+                    true,
+                ),
                 _ => (Vec::new(), false),
             };
             // The over-fetch clamp: `limit` caps it when set; otherwise an

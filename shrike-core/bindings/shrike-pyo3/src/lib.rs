@@ -154,6 +154,7 @@ pub(crate) fn to_py_err(e: NativeError) -> PyErr {
 #[pyfunction]
 fn init_logging(py: Python<'_>) -> PyResult<()> {
     use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Layer;
 
     let logger = pyo3_log::Logger::new(py, pyo3_log::Caching::LoggersAndLevels)?;
     let gated = gated_log::GatedLog::new(finalize_gate::process_gate(), logger);
@@ -162,9 +163,63 @@ fn init_logging(py: Python<'_>) -> PyResult<()> {
         // filter (no per-target filters are configured here).
         log::set_max_level(log::LevelFilter::Debug);
     }
-    let subscriber = tracing_subscriber::registry().with(tracing_error::ErrorLayer::default());
+    // Dev fmt layer: opt-in via SHRIKE_TRACE_FMT for local async-debug/benchmark
+    // (span timings to stderr). Off by default; the pyo3-log bridge above is the
+    // production path. Filter from SHRIKE_TRACE (RUST_LOG-style), default info.
+    let fmt_layer = std::env::var_os("SHRIKE_TRACE_FMT").map(|_| {
+        let filter = tracing_subscriber::EnvFilter::try_from_env("SHRIKE_TRACE")
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_filter(filter)
+            .boxed()
+    });
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_error::ErrorLayer::default())
+        .with(fmt_layer)
+        .with(otlp_trace_layer());
     let _ = tracing::subscriber::set_global_default(subscriber);
     Ok(())
+}
+
+/// The OTLP trace-export seam — **off by default**. Installs a
+/// `tracing-opentelemetry` layer only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set,
+/// batch-exporting op-boundary spans over OTLP/gRPC to that collector. Any
+/// init failure degrades to no export (logged) rather than failing startup. The
+/// cross-machine-spans path (#796); cross-FFI context propagation is #967.
+fn otlp_trace_layer<S>() -> Option<Box<dyn tracing_subscriber::Layer<S> + Send + Sync>>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a> + Send + Sync,
+{
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_otlp::WithExportConfig as _;
+    use tracing_subscriber::Layer as _;
+
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .filter(|e| !e.is_empty())?;
+    let exporter = match opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()
+    {
+        Ok(exporter) => exporter,
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                "OTLP span exporter init failed; trace export disabled"
+            );
+            return None;
+        }
+    };
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .build();
+    let tracer = provider.tracer("shrike");
+    // Keep the provider alive for the process and expose it to the OTel global,
+    // so a flush on shutdown can reach it.
+    opentelemetry::global::set_tracer_provider(provider);
+    Some(tracing_opentelemetry::layer().with_tracer(tracer).boxed())
 }
 
 /// The Rust-canonical wire contracts: `{python_model_name: json_schema}`
@@ -309,6 +364,16 @@ fn runtime_probe(py: Python<'_>) {
         }));
         let _ = rx.recv();
     })
+}
+
+/// Render the kernel's Prometheus registry (runtime pools, embedding, index
+/// saver) for the control-plane /metrics body — appended after the Python
+/// registry. Disjoint `shrike_runtime_*`/`shrike_embedding_*`/`shrike_index_saver_*`
+/// prefixes keep the concatenated exposition valid.
+#[cfg(feature = "anki-core")]
+#[pyfunction]
+fn render_prometheus() -> String {
+    shrike_kernel::render_prometheus()
 }
 
 /// One derived-store MATCH row: (note_id, source, ref, txt, snippet).
@@ -1266,6 +1331,7 @@ fn _native(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(drive_compute, m)?)?;
         m.add_function(wrap_pyfunction!(drive_pools_shutdown, m)?)?;
         m.add_function(wrap_pyfunction!(runtime_probe, m)?)?;
+        m.add_function(wrap_pyfunction!(render_prometheus, m)?)?;
     }
     // The engine/manager matrix: a class is present exactly when its
     // feature is compiled — a lean build simply lacks the name (the Python

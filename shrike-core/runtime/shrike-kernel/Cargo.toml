@@ -44,6 +44,13 @@ memchr = "2"
 # hashlib.blake2b(digest_size=8) so the on-disk sidecar survives the swap.
 blake2 = "0.10"
 tracing = "0.1"
+# The metrics facade (#948): the kernel instruments via metrics::{counter,gauge,
+# histogram}! and metrics-exporter-prometheus renders the registry for the
+# control-plane /metrics pull — no hand-rolled atomics or in-app snapshotting.
+# default-features off: rendering is exposed to the Python /metrics handler via a
+# pyo3 fn, so the exporter's built-in HTTP listener (and its hyper tree) is unused.
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 # The compute pool's work-stealing deques (Injector + per-worker Worker/Stealer).
 # Already in the tree (transitive via rayon-core, anki's dep), so no new weight.
 crossbeam-deque = "0.8"

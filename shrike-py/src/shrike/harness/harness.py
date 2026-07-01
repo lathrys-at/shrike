@@ -16,6 +16,7 @@ import functools
 import json
 import logging
 import os
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +25,7 @@ from typing import Any
 import shrike_native
 
 from shrike.harness import cache_layout
-from shrike.harness.collection import CollectionWrapper
+from shrike.harness.collection import BOOT_COLLECTION_KEY, CollectionWrapper
 from shrike.harness.derived import DerivedTextStore, NativeDerivedEngine
 from shrike.harness.engines.embedding.base import EmbedderBackend
 from shrike.harness.engines.embedding.runtime import EmbeddingRuntime
@@ -33,6 +34,7 @@ from shrike.harness.index import (
 )
 from shrike.harness.profiles import MODALITIES
 from shrike.harness.registry import Registry
+from shrike.observability.metrics import metrics
 
 logger = logging.getLogger("shrike.kernel")
 
@@ -256,9 +258,16 @@ class Harness:
         secondary_runtimes: Sequence[EmbeddingRuntime] | None = None,
         cross_space_floor_margin: float = ACTIVATION_MARGIN,
         shared_llama_manager: Any = None,
+        collection_key: str = BOOT_COLLECTION_KEY,
     ) -> None:
         self.kernel = kernel
         self.wrapper = wrapper
+        # The value of the ``collection`` label on every per-collection metric
+        # this harness emits. "default" for the boot collection; a routed
+        # harness gets its registry profile name, so multi-collection gauges
+        # (lock_held, collection_size, index size/state) keep one series per
+        # collection instead of all colliding on "default".
+        self._metrics_key = collection_key
         self.runtime = runtime
         # The shared llama.cpp ROUTER manager: when N remote/no-endpoint
         # embedder spaces share ONE managed server (managed.llama_server.
@@ -338,6 +347,7 @@ class Harness:
         secondary_runtimes: Sequence[EmbeddingRuntime] | None = None,
         cross_space_floor_margin: float = ACTIVATION_MARGIN,
         shared_llama_manager: Any = None,
+        collection_key: str = BOOT_COLLECTION_KEY,
     ) -> Harness:
         """Open the kernel on the running loop. Scheduling is the kernel's own
         (the owned tokio runtime spawns the collection actor); the harness
@@ -379,7 +389,11 @@ class Harness:
                 path=Path(derived_path), engine_factory=derived_engine_factory
             )
         wrapper = CollectionWrapper.over_kernel(
-            kernel, collection_path, cooperative=cooperative, hold_seconds=hold_seconds
+            kernel,
+            collection_path,
+            cooperative=cooperative,
+            hold_seconds=hold_seconds,
+            collection_key=collection_key,
         )
         return cls(
             kernel=kernel,
@@ -392,6 +406,7 @@ class Harness:
             secondary_runtimes=secondary_runtimes,
             cross_space_floor_margin=cross_space_floor_margin,
             shared_llama_manager=shared_llama_manager,
+            collection_key=collection_key,
         )
 
     # -- boot ------------------------------------------------------------------
@@ -460,8 +475,33 @@ class Harness:
         self._spawn_bg(self._drive_reindex())
         self._spawn_marker(generation)
 
+    async def _reconcile_index(self) -> bool:
+        """Run ``kernel.reindex_if_needed()`` under the reconcile metrics.
+
+        The single instrumented choke point for every drift reconcile — idle
+        re-acquire, boot/embedding-start, and ``/reload`` — so none of them is a
+        metrics blind spot. Returns whether the index changed; callers own the
+        log line and any secondary-floor recalibration.
+        """
+        started = time.perf_counter()
+        result = "ok"
+        try:
+            changed = bool(await self.kernel.reindex_if_needed())
+            if not changed:
+                result = "noop"
+            return changed
+        except Exception:
+            result = "error"
+            raise
+        finally:
+            metrics.index_operations.labels(self._metrics_key, "vector", "reconcile", result).inc()
+            metrics.index_operation_duration.labels(
+                self._metrics_key, "vector", "reconcile", result
+            ).observe(time.perf_counter() - started)
+            self._update_index_metrics()
+
     async def _drive_reindex(self) -> None:
-        if await self.kernel.reindex_if_needed():
+        if await self._reconcile_index():
             logger.info("Collection changed while idle; index reconciled")
             await self._recalibrate_secondary_floors()
 
@@ -549,6 +589,7 @@ class Harness:
         # machine around the await.
         if not self.derived.claim_external_build():
             return
+        started = time.perf_counter()
         col_mod: int | None = None
         try:
             rows, col_mod = await self.kernel.rebuild_derived()
@@ -558,6 +599,12 @@ class Harness:
             logger.exception("Kernel-side derived rebuild failed")
         finally:
             self.derived.settle_external_build(col_mod)
+            result = "ok" if col_mod is not None else "error"
+            metrics.index_operations.labels(self._metrics_key, "derived", "rebuild", result).inc()
+            metrics.index_operation_duration.labels(
+                self._metrics_key, "derived", "rebuild", result
+            ).observe(time.perf_counter() - started)
+            self._update_index_metrics()
 
     # -- status ------------------------------------------------------------------
 
@@ -634,6 +681,19 @@ class Harness:
             source for source, eng in self._recognition_engines.items() if eng.state == "ready"
         )
         status["coverage"] = _coverage_matrix(served, ready_recognizers, per_space)
+        metrics.update_index(
+            "vector",
+            str(status["index"]["state"]),
+            int(status["index"].get("size", 0)),
+            collection=self._metrics_key,
+        )
+        metrics.update_index(
+            "derived",
+            str(status["derived"]["state"]),
+            int(status["derived"].get("size", 0)),
+            collection=self._metrics_key,
+        )
+        metrics.lock_held.labels(self._metrics_key).set(self.wrapper.is_open)
         return status
 
     def _index_status(self) -> dict[str, Any]:
@@ -678,6 +738,24 @@ class Harness:
             status["error"] = str(raw["error"])
         return status
 
+    def _update_index_metrics(self) -> None:
+        """Refresh gauges from in-memory/native snapshots; never opens the collection."""
+        index = self._index_status()
+        metrics.update_index(
+            "vector",
+            str(index.get("state", "unavailable")),
+            index["size"],
+            collection=self._metrics_key,
+        )
+        derived = self.derived.status()
+        metrics.update_index(
+            "derived",
+            str(derived.get("state", "unavailable")),
+            int(derived.get("size", 0)),
+            collection=self._metrics_key,
+        )
+        metrics.lock_held.labels(self._metrics_key).set(self.wrapper.is_open)
+
     # -- index ops -----------------------------------------------------------------
 
     async def rebuild_index(self) -> dict[str, Any]:
@@ -690,9 +768,16 @@ class Harness:
             return {"status": "already_building", "progress": progress}
 
         total_notes = await self.wrapper.run(lambda c: len(c.find_notes("")))
+        metrics.collection_size.labels(self._metrics_key).set(total_notes)
         if total_notes == 0:
+            started = time.perf_counter()
             await self.kernel.rebuild_index()
             await self._recalibrate_secondary_floors()
+            metrics.index_operations.labels(self._metrics_key, "vector", "rebuild", "ok").inc()
+            metrics.index_operation_duration.labels(
+                self._metrics_key, "vector", "rebuild", "ok"
+            ).observe(time.perf_counter() - started)
+            self._update_index_metrics()
             return {"status": "complete", "size": 0}
         self._spawn_bg(self._rebuild_then_calibrate())
         return {"status": "started", "total": total_notes}
@@ -700,8 +785,20 @@ class Harness:
     async def _rebuild_then_calibrate(self) -> None:
         """Full index rebuild, then recalibrate the secondary floors — the
         secondary image vectors are fresh, so the floor must be re-derived."""
-        await self.kernel.rebuild_index()
-        await self._recalibrate_secondary_floors()
+        started = time.perf_counter()
+        result = "ok"
+        try:
+            await self.kernel.rebuild_index()
+            await self._recalibrate_secondary_floors()
+        except Exception:
+            result = "error"
+            raise
+        finally:
+            metrics.index_operations.labels(self._metrics_key, "vector", "rebuild", result).inc()
+            metrics.index_operation_duration.labels(
+                self._metrics_key, "vector", "rebuild", result
+            ).observe(time.perf_counter() - started)
+            self._update_index_metrics()
 
     async def save_index(self) -> dict[str, Any]:
         """Flush the index now (the ``POST /index/save`` semantics)."""
@@ -710,7 +807,10 @@ class Harness:
             return {"status": "building", "progress": raw.get("progress") or {}}
         if raw.get("ndim") is None:
             return {"status": "empty"}
-        await asyncio.to_thread(self.kernel.save_index)
+        try:
+            await asyncio.to_thread(self.kernel.save_index)
+        finally:
+            self._update_index_metrics()
         return {"status": "saved", "size": int(raw.get("size", 0)), "pending": 0}
 
     # -- embedding ops ---------------------------------------------------------------
@@ -867,10 +967,22 @@ class Harness:
         runtime that owns both stores. Each internal batch keeps the bounded-
         batch yield so collection ops interleave. Returns the final report plus
         the run totals (``total_stored``, ``batches``)."""
-        report: dict[str, Any] = json.loads(
-            await self.kernel.recognize_all_pending(batch_size, max_batches)
-        )
+        started = time.perf_counter()
+        metrics.recognition_running.labels(self._metrics_key).set(1)
+        result = "ok"
+        try:
+            report: dict[str, Any] = json.loads(
+                await self.kernel.recognize_all_pending(batch_size, max_batches)
+            )
+        except Exception:
+            result = "error"
+            raise
+        finally:
+            metrics.recognition_running.labels(self._metrics_key).set(0)
+            metrics.recognition_sweeps.labels(result).inc()
+            metrics.recognition_duration.labels(result).observe(time.perf_counter() - started)
         total_stored = int(report.get("total_stored", 0))
+        metrics.recognition_items.inc(total_stored)
         if total_stored:
             logger.info(
                 "Recognition sweep stored %d item(s) over %d batch(es)",
@@ -994,8 +1106,11 @@ class Harness:
             self._recognition_task = None
 
     async def _drive_boot_reindex(self) -> None:
-        if await self.kernel.reindex_if_needed():
+        if await self._reconcile_index():
             logger.info("Index reconciled after embedding start")
+        # Recalibrate unconditionally: the embedder was just (re)attached, so the
+        # secondary cross-space floors must be derived whether or not drift was
+        # found.
         await self._recalibrate_secondary_floors()
 
     async def _recalibrate_secondary_floors(self) -> None:
@@ -1054,7 +1169,7 @@ class Harness:
         await self._maybe_build_derived()
         rebuilding = False
         if self.runtime.backend is not None:
-            rebuilding = await self.kernel.reindex_if_needed()
+            rebuilding = await self._reconcile_index()
             if rebuilding:
                 # The reconcile re-embedded secondary image vectors, so the
                 # cross-space image floor must be re-derived — every other
@@ -1303,6 +1418,7 @@ class CollectionManager:
             index_save_threshold=self._params.index_save_threshold,
             cross_space_floor_margin=self._params.cross_space_floor_margin,
             owns_runtime=False,  # the shared runtime is owned by the default harness
+            collection_key=key,
         )
         # Boot WITHOUT starting embedding (the shared runtime is already
         # started by the default harness); attach its backend so search works,

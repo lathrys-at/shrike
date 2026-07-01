@@ -100,4 +100,23 @@ pyo3-log = "0.13"
 log = "0.4"
 tracing = { version = "0.1", features = ["log-always"] }
 tracing-error = "0.2"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "registry",
+    "fmt",
+    "env-filter",
+] }
+# OTel trace export (#948): the off-by-default OTLP seam. tracing-opentelemetry
+# bridges the tracing spine to an OTLP span exporter; the layer is installed in
+# init_logging only when an endpoint is configured. Pinned as a mutually-
+# compatible 0.x set — these move in lockstep, so bump them together, never one
+# in isolation (0.x minor bumps are breaking).
+tracing-opentelemetry = "0.33.0"
+opentelemetry = "0.32.0"
+opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
+# trace-only, OTLP/gRPC (tonic). default-features off drops the metrics/logs OTLP
+# paths and the reqwest HTTP client we don't use (the Collector scrapes /metrics;
+# only spans push).
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = [
+    "trace",
+    "grpc-tonic",
+] }

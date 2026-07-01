@@ -15,10 +15,13 @@
 //! custom/test-backend escape hatch.
 
 use std::sync::Arc;
+use std::time::Instant;
 
+use futures::future::BoxFuture;
 use pyo3::prelude::*;
 
 use shrike_engine_api::{Embedder, ImageEmbedder};
+use shrike_error::NativeResult;
 // Used only inside the feature-gated engine constructors — a no-engine build
 // (anki-core alone) would otherwise warn on unused imports.
 // onnx/CLIP are route-1 (sync compute behind `Blocking` + `WithPolicy`, the
@@ -36,6 +39,61 @@ use shrike_engine_api::WithPolicy;
 pub(crate) struct NativeEmbedder {
     pub(crate) text: Arc<dyn Embedder>,
     pub(crate) images: Option<Arc<dyn ImageEmbedder>>,
+}
+
+struct ObservedText {
+    inner: Arc<dyn Embedder>,
+}
+
+impl Embedder for ObservedText {
+    fn embed(&self, texts: Vec<String>) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+        let items = texts.len();
+        let started = Instant::now();
+        let future = self.inner.embed(texts);
+        Box::pin(async move {
+            let result = future.await;
+            shrike_kernel::record_embedding("text", items, started.elapsed(), result.is_ok());
+            result
+        })
+    }
+
+    fn fingerprint(&self) -> Option<String> {
+        self.inner.fingerprint()
+    }
+
+    fn dim(&self) -> Option<usize> {
+        self.inner.dim()
+    }
+}
+
+struct ObservedImages {
+    inner: Arc<dyn ImageEmbedder>,
+}
+
+impl ImageEmbedder for ObservedImages {
+    fn embed_images(
+        &self,
+        images: Vec<shrike_engine_api::MediaItem>,
+    ) -> BoxFuture<'_, NativeResult<Vec<Vec<f32>>>> {
+        let items = images.len();
+        let started = Instant::now();
+        let future = self.inner.embed_images(images);
+        Box::pin(async move {
+            let result = future.await;
+            shrike_kernel::record_embedding("image", items, started.elapsed(), result.is_ok());
+            result
+        })
+    }
+}
+
+impl NativeEmbedder {
+    fn observed(text: Arc<dyn Embedder>, images: Option<Arc<dyn ImageEmbedder>>) -> Self {
+        Self {
+            text: Arc::new(ObservedText { inner: text }),
+            images: images
+                .map(|inner| Arc::new(ObservedImages { inner }) as Arc<dyn ImageEmbedder>),
+        }
+    }
 }
 
 #[pymethods]
@@ -60,10 +118,7 @@ impl NativeEmbedder {
             dim,
             safe_batch,
         ));
-        Self {
-            text: Arc::new(crate::compute_dispatch::blocking(tuned)),
-            images: None,
-        }
+        Self::observed(Arc::new(crate::compute_dispatch::blocking(tuned)), None)
     }
 
     /// Compose the remote-embeddings engine — llama-server today, any
@@ -97,10 +152,10 @@ impl NativeEmbedder {
             dim,
             safe_batch,
         ));
-        Self {
-            text: Arc::clone(&tuned) as Arc<dyn Embedder>,
-            images: images.then_some(tuned as Arc<dyn ImageEmbedder>),
-        }
+        Self::observed(
+            Arc::clone(&tuned) as Arc<dyn Embedder>,
+            images.then_some(tuned as Arc<dyn ImageEmbedder>),
+        )
     }
 
     /// Compose the CLIP dual encoder: one engine, both modalities — the same
@@ -121,10 +176,10 @@ impl NativeEmbedder {
             safe_batch,
         ));
         let adapted = Arc::new(crate::compute_dispatch::blocking(tuned));
-        Self {
-            text: Arc::clone(&adapted) as Arc<dyn Embedder>,
-            images: Some(adapted as Arc<dyn ImageEmbedder>),
-        }
+        Self::observed(
+            Arc::clone(&adapted) as Arc<dyn Embedder>,
+            Some(adapted as Arc<dyn ImageEmbedder>),
+        )
     }
 
     /// Compose the deterministic synthetic engine (#865) — Route-1 sync, the
@@ -147,10 +202,10 @@ impl NativeEmbedder {
             safe_batch,
         ));
         let adapted = Arc::new(crate::compute_dispatch::blocking(tuned));
-        Self {
-            text: Arc::clone(&adapted) as Arc<dyn Embedder>,
-            images: Some(adapted as Arc<dyn ImageEmbedder>),
-        }
+        Self::observed(
+            Arc::clone(&adapted) as Arc<dyn Embedder>,
+            Some(adapted as Arc<dyn ImageEmbedder>),
+        )
     }
 }
 

@@ -80,6 +80,10 @@ rust_shared_library(
         "@crates//:tracing",
         "@crates//:tracing-error",
         "@crates//:tracing-subscriber",
+        "@crates//:tracing-opentelemetry",
+        "@crates//:opentelemetry",
+        "@crates//:opentelemetry_sdk",
+        "@crates//:opentelemetry-otlp",
     ] + select({
         # The synthetic-enabled extension must link the engine built WITH
         # `engine-synthetic` — Bazel feature sets don't unify across targets.
